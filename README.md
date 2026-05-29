@@ -2,6 +2,10 @@
 
 Language: **English** | [简体中文](README.zh-CN.md)
 
+<p align="center">
+  <img src="assets/character/睁眼.png" alt="Priestess (普瑞赛斯)" width="220">
+</p>
+
 A macOS menu bar companion. The character (普瑞赛斯, from Arknights) lives in
 your menu bar as a small head icon. Click her and a popover slides down with
 the character on top and a chat box below — you talk to her, she answers
@@ -9,6 +13,16 @@ through your selected local coding CLI.
 
 No floating window. No movement. No clutter in your dock. Just one icon at
 the top of your screen.
+
+<p align="center">
+  <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
+    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=Download%20for%20macOS&style=for-the-badge&color=2a6df4&logo=apple" alt="Download latest release">
+  </a>
+</p>
+
+> Looking for the latest signed build? Grab the `.dmg` from
+> **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)** —
+> no Node toolchain required.
 
 ## Features
 
@@ -36,22 +50,59 @@ the top of your screen.
   earlier conversations. The full archive is capped to roughly 5 MB and pruned
   from the oldest entries when it grows past that limit.
 
-## Setup
+## Download & install (for users)
+
+The easiest way to run PRTS — no source checkout required.
+
+1. Open the [latest release](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)
+   and download **`PRTS-<version>-arm64.dmg`**.
+2. Open the DMG and drag **PRTS.app** into `/Applications`.
+3. First launch will be blocked by Gatekeeper (*"Apple could not verify
+   PRTS is free of malware"*) because the build is not signed with an Apple
+   Developer ID. Bypass it once with either:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/PRTS.app
+   ```
+
+   …or right-click `PRTS.app` → **Open** → confirm **Open** in the dialog.
+4. Click the chibi icon at the top-right of your screen to open the chat.
+
+**System requirements**
+
+- macOS on **Apple Silicon** (M1 / M2 / M3 / M4). Intel Macs are not in this build.
+- A local install of either the [Claude Code](https://claude.ai/code) CLI
+  (`claude`) or the OpenAI [Codex](https://platform.openai.com/docs/codex) CLI
+  (`codex`), already authenticated. See **[Usage backends](#usage-backends)**
+  below.
+
+> Can't find the icon in the menu bar after install? On Macs with a notch,
+> macOS hides overflow status icons behind it. Free a slot by ⌘-dragging
+> existing icons out, or install a menu-bar manager such as
+> [Ice](https://github.com/jordanbaird/Ice) or Bartender.
+
+## Build from source (for developers)
+
+Clone the repo, install dependencies, and start the Electron dev process:
 
 ```sh
+git clone https://github.com/SVAH-X/claude-code-but-priestess.git
+cd claude-code-but-priestess
 npm install
 npm run dev
 ```
 
 Then look up at the menu bar.
 
-## Package
+To produce your own `.dmg` and `.zip`:
 
 ```sh
-npm run dist
+npm run dist          # builds for the host architecture
 ```
 
-Produces a macOS `.dmg` and `.zip` (run on macOS).
+Artifacts land in `dist/`. To target both architectures, run with
+`electron-builder --mac --arm64 --x64` (or `--universal` for one combined
+binary).
 
 ## Usage backends
 

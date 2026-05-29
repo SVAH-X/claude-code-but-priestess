@@ -2,11 +2,25 @@
 
 语言：[English](README.md) | **简体中文**
 
+<p align="center">
+  <img src="assets/character/睁眼.png" alt="普瑞赛斯" width="220">
+</p>
+
 这是一个 macOS 菜单栏桌宠(?)。普瑞赛斯会以一个小头像待在菜单栏里；
 点击头像后，会弹出一个带角色立绘和聊天框的 popover。她通过本机已经
 安装并登录的 Claude Code 或 Codex CLI 来回复。
 
 没有浮动窗口，不在桌面上乱跑，也不占 Dock。主要入口只有菜单栏图标。
+
+<p align="center">
+  <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
+    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=下载%20macOS%20版&style=for-the-badge&color=2a6df4&logo=apple" alt="下载最新版本">
+  </a>
+</p>
+
+> 想直接用的话，去
+> **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**
+> 下载 `.dmg`，不需要装 Node。
 
 ## 功能
 
@@ -27,22 +41,57 @@
   - 打开数据目录。
   - 退出应用。
 
-## 启动
+## 下载安装（普通用户）
+
+最省心的玩法，不需要本机有 Node 环境：
+
+1. 去 [最新 release](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)
+   下载 **`PRTS-<版本>-arm64.dmg`**。
+2. 打开 DMG，把 **PRTS.app** 拖进 `/Applications`。
+3. 第一次启动 macOS 会拦下，提示「Apple 无法验证 PRTS 是否包含恶意软件」，
+   因为这个版本没有 Apple Developer ID 签名。绕过一次即可：
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/PRTS.app
+   ```
+
+   或者在 Finder 里 右键 `PRTS.app` → **打开** → 在对话框里再确认一次
+   **打开**。
+4. 点击屏幕右上角的小头像，开始聊天。
+
+**系统要求**
+
+- 必须是 **Apple Silicon**（M1 / M2 / M3 / M4）的 macOS。当前 release
+  没有 Intel 版本。
+- 本机已安装并登录 [Claude Code](https://claude.ai/code) CLI（`claude`）
+  或 [Codex](https://platform.openai.com/docs/codex) CLI（`codex`）至少
+  一个，详见下面的 **[后端支持](#后端支持)**。
+
+> 装好以后菜单栏里看不到她？带刘海的 Mac 会把溢出的菜单栏图标藏在刘海后面。
+> 按住 ⌘ 把其他菜单栏图标拖走腾位置，或者装个菜单栏管理器（比如
+> [Ice](https://github.com/jordanbaird/Ice) 或 Bartender）。
+
+## 从源码构建（开发者）
+
+克隆仓库、装依赖、启动开发模式：
 
 ```sh
+git clone https://github.com/SVAH-X/claude-code-but-priestess.git
+cd claude-code-but-priestess
 npm install
 npm run dev
 ```
 
 然后看屏幕顶部菜单栏。
 
-## 打包
+自己出 `.dmg` 和 `.zip`：
 
 ```sh
-npm run dist
+npm run dist          # 为当前机器架构构建
 ```
 
-当前配置会在 macOS 上生成 `.dmg` 和 `.zip`。
+产物在 `dist/`。同时构建 arm64 和 Intel，可以用
+`electron-builder --mac --arm64 --x64`，或者 `--universal` 出一个胖二进制。
 
 ## 后端支持
 
