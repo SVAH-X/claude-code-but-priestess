@@ -10,6 +10,10 @@ function onChannel(channel) {
 
 contextBridge.exposeInMainWorld("petApi", {
   hidePopover: () => ipcRenderer.invoke("popover:hide"),
+  getPopoverSize: () => ipcRenderer.invoke("popover:get-size"),
+  resizePopover: (size) => ipcRenderer.invoke("popover:resize", size),
+  resizePopoverDrag: (payload) => ipcRenderer.invoke("popover:resize-drag", payload),
+  movePopover: (point) => ipcRenderer.invoke("popover:move", point),
   pickChatCwd: () => ipcRenderer.invoke("settings:pick-cwd"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   onOpened: onChannel("popover:opened"),
@@ -24,5 +28,6 @@ contextBridge.exposeInMainWorld("chatApi", {
   onChunk: onChannel("chat:chunk"),
   onStatus: onChannel("chat:status"),
   onHistory: onChannel("chat:history"),
-  onTool: onChannel("chat:tool")
+  onTool: onChannel("chat:tool"),
+  onMood: onChannel("chat:mood")
 });

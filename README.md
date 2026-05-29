@@ -27,15 +27,22 @@ the top of your screen.
 ## Features
 
 - Menu bar accessory (`LSUIElement = true`), no Dock icon.
-- Tray icon = cropped head from the smiling sprite.
+- Tray icon = centered `assets/character/icon.png` with a cropped-head fallback.
 - Click the icon → popover under the menu bar with:
   - The character, breathing and blinking in idle.
   - Chat history.
   - Input box (Shift+Enter for newline, Enter to send).
+- Move the popover anywhere on screen by dragging its top bar; resize it from
+  the left/right/bottom edges or the bottom corners. The character stage and
+  chat space grow or shrink with the window, and her movable area scales too.
+- Click her to get a reaction (cheerful → annoyed → threatening as you keep
+  clicking), grab and fling her around inside the box, or leave her alone and
+  she eventually pouts, then dozes off.
 - Mood reactions:
-  - Streaming reply → bobbing happy.
-  - Reply finishes → small scale punch, then back to idle.
-  - Error → brief cry expression.
+  - She picks her own expression to match each reply (calm, smile, sad, angry,
+    sleepy, threat) via a hidden tag the renderer reads and strips.
+  - Streaming reply → thinking / working; reply finishes → settles into the
+    expression she chose; error → a brief cry.
 - Right-click the icon for a context menu: choose Claude Code or Codex as
   the usage backend, choose chat working directory, reveal the data folder,
   or quit.
@@ -93,6 +100,11 @@ npm run dev
 ```
 
 Then look up at the menu bar.
+
+> On macOS 26 (Tahoe), `npm run dev` launches the dev app through LaunchServices
+> and ad-hoc re-signs it so its menu-bar icon actually shows — Tahoe's menu-bar
+> permission silently hides status items from bare-`electron .` launches and
+> unsigned bundles.
 
 To produce your own `.dmg` and `.zip`:
 
@@ -165,7 +177,7 @@ Files stored there:
 
 | File | Purpose |
 | --- | --- |
-| `settings.json` | App settings: selected backend, chat working directory, agent mode, auto-screenshot setting. |
+| `settings.json` | App settings: selected backend, chat working directory, agent mode, auto-screenshot setting, and popover size. |
 | `conversation.json` | Current visible chat session, per-backend resume session ids, and the long-memory dormant flag. |
 | `memory/MEMORY.md` | Curated long-term memory about the Doctor: preferences, projects, recurring topics, and facts worth remembering. |
 | `memory/CONVERSATION_SUMMARY.md` | Rolling bounded summary of older conversations. Used when long context needs to be recovered. |
@@ -233,6 +245,7 @@ The renderer expects these files in `assets/character`:
 
 - `睁眼.png`, `半眯眼.png`, `快闭眼.png`, `闭眼.png`
 - `笑.png`, `生气.png`, `威胁.png`, `哭唧唧.png`, `睡觉.png`
+- `icon.png` for the centered menu bar icon
 
 The PNGs are not modified on disk; the renderer flood-fills the
 edge-connected white background at runtime so the character sits cleanly on

@@ -22,20 +22,26 @@ let saveTimer = null;
 let lastResponseStartedAt = 0;
 
 const ASSETS_DIR = path.join(__dirname, "..", "..", "assets", "character");
-const POPOVER_WIDTH = 380;
-const POPOVER_HEIGHT = 560;
+const DEDICATED_TRAY_ICON = path.join(ASSETS_DIR, "icon.png");
+const POPOVER_DEFAULT_WIDTH = 380;
+const POPOVER_DEFAULT_HEIGHT = 560;
+const POPOVER_MIN_WIDTH = 320;
+const POPOVER_MIN_HEIGHT = 460;
+const POPOVER_MAX_WIDTH = 900;
+const POPOVER_MAX_HEIGHT = 1000;
 
 let tray;
 let popover;
+let popoverSizeSaveTimer = null;
 
 // ============================================================
 //  Tray icon — prefer the dedicated centered icon.png, fallback
 //  to a cropped head from the smiling sprite.
 // ============================================================
 function buildTrayIcon() {
-  const dedicated = nativeImage.createFromPath(path.join(ASSETS_DIR, "icon.png"));
+  const dedicated = nativeImage.createFromPath(DEDICATED_TRAY_ICON);
   if (!dedicated.isEmpty()) {
-    return prepareTrayImage(dedicated);
+    return prepareTrayImage(dedicated, { size: 22 });
   }
 
   const base = nativeImage.createFromPath(path.join(ASSETS_DIR, "笑.png"));
@@ -44,25 +50,26 @@ function buildTrayIcon() {
   // The chibi sprite sits centered in a 1254x1254 canvas. The head occupies
   // roughly the top-center quarter; this rectangle isolates it.
   const head = base.crop({ x: 377, y: 110, width: 500, height: 500 });
-  return prepareTrayImage(head);
+  return prepareTrayImage(head, { chromaKeyLightPixels: true, size: 20 });
 }
 
-// Safety net for any leftover white halo around the character (the source PNG
-// is RGBA, but we still chroma-key near-white pixels in case the asset gets
-// swapped or had a sloppy mask). We then crop to the character's tight square
-// bounding box so it fills the menu-bar slot at roughly the same visual size
-// as neighbouring icons, and emit a 44px @2x representation for Retina.
-function prepareTrayImage(image) {
+// Crop to the character's alpha bbox, then emit explicit 1x/2x menu-bar sizes.
+// The smiling fallback also cleans up its light background; the dedicated
+// icon.png keeps its original alpha and colors intact.
+function prepareTrayImage(image, options = {}) {
+  const { chromaKeyLightPixels = false, size = 20 } = options;
   const { width, height } = image.getSize();
   const buf = Buffer.from(image.toBitmap());
-  const HARD = 245;
-  const SOFT = 215;
-  for (let i = 0; i < buf.length; i += 4) {
-    const minC = Math.min(buf[i], buf[i + 1], buf[i + 2]);
-    if (minC >= HARD) {
-      buf[i + 3] = 0;
-    } else if (minC >= SOFT) {
-      buf[i + 3] = Math.round((255 * (HARD - minC)) / (HARD - SOFT));
+  if (chromaKeyLightPixels) {
+    const HARD = 245;
+    const SOFT = 215;
+    for (let i = 0; i < buf.length; i += 4) {
+      const minC = Math.min(buf[i], buf[i + 1], buf[i + 2]);
+      if (minC >= HARD) {
+        buf[i + 3] = 0;
+      } else if (minC >= SOFT) {
+        buf[i + 3] = Math.round((255 * (HARD - minC)) / (HARD - SOFT));
+      }
     }
   }
   let cropped = nativeImage.createFromBitmap(buf, { width, height });
@@ -97,12 +104,12 @@ function prepareTrayImage(image) {
     cropped = cropped.crop({ x, y, width: side, height: side });
   }
 
-  const icon = cropped.resize({ width: 22, height: 22, quality: "best" });
-  const retina = cropped.resize({ width: 44, height: 44, quality: "best" });
+  const icon = cropped.resize({ width: size, height: size, quality: "best" });
+  const retina = cropped.resize({ width: size * 2, height: size * 2, quality: "best" });
   icon.addRepresentation({
     scaleFactor: 2.0,
-    width: 44,
-    height: 44,
+    width: size * 2,
+    height: size * 2,
     buffer: retina.toBitmap()
   });
   icon.setTemplateImage(false);
@@ -112,13 +119,117 @@ function prepareTrayImage(image) {
 // ============================================================
 //  Popover window — frameless panel that drops below the tray icon.
 // ============================================================
+function clampNumber(value, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return min;
+  return Math.max(min, Math.min(max, Math.round(numeric)));
+}
+
+function clampPopoverSize(size = {}, display = screen.getPrimaryDisplay()) {
+  const work = display.workArea;
+  const maxWidth = Math.max(POPOVER_MIN_WIDTH, Math.min(POPOVER_MAX_WIDTH, work.width - 8));
+  const maxHeight = Math.max(POPOVER_MIN_HEIGHT, Math.min(POPOVER_MAX_HEIGHT, work.height - 8));
+  return {
+    width: clampNumber(size.width ?? POPOVER_DEFAULT_WIDTH, POPOVER_MIN_WIDTH, maxWidth),
+    height: clampNumber(size.height ?? POPOVER_DEFAULT_HEIGHT, POPOVER_MIN_HEIGHT, maxHeight)
+  };
+}
+
+function initialPopoverSize() {
+  const saved = settings.get("popoverSize");
+  return clampPopoverSize(saved && typeof saved === "object" ? saved : {});
+}
+
+function scheduleSavePopoverSize() {
+  if (!popover || popover.isDestroyed()) return;
+  clearTimeout(popoverSizeSaveTimer);
+  popoverSizeSaveTimer = setTimeout(() => {
+    if (!popover || popover.isDestroyed()) return;
+    const size = clampPopoverSize(popover.getBounds(), screen.getDisplayMatching(popover.getBounds()));
+    settings.set({ popoverSize: size });
+  }, 350);
+}
+
+function resizePopoverTo(size = {}) {
+  if (!popover || popover.isDestroyed()) return null;
+  const bounds = popover.getBounds();
+  const display = screen.getDisplayMatching(bounds);
+  const work = display.workArea;
+  const next = clampPopoverSize(size, display);
+  const x = clampNumber(bounds.x, work.x + 4, work.x + work.width - next.width - 4);
+  const y = clampNumber(bounds.y, work.y + 4, work.y + work.height - next.height - 4);
+  popover.setBounds({ x, y, width: next.width, height: next.height }, false);
+  scheduleSavePopoverSize();
+  return next;
+}
+
+// Edge/corner drag resize. The renderer captures the window bounds at pointer
+// down (start) plus the live screen-space delta (dx/dy); the edge string tells
+// us which sides move. We keep the opposite edge anchored even when the size
+// clamps to its min/max, so the window never drifts. The top edge is never a
+// mover here — the popover hangs from the menu bar.
+function resizePopoverDrag({ edge = "se", start = {}, dx = 0, dy = 0 } = {}) {
+  if (!popover || popover.isDestroyed()) return null;
+  const sx = Number(start.x);
+  const sy = Number(start.y);
+  const sw = Number(start.width);
+  const sh = Number(start.height);
+  if (![sx, sy, sw, sh].every(Number.isFinite)) return null;
+
+  const display = screen.getDisplayMatching(popover.getBounds());
+  const work = display.workArea;
+  const e = String(edge);
+  const right = sx + sw;
+  const bottom = sy + sh;
+
+  const maxWidth = Math.max(POPOVER_MIN_WIDTH, Math.min(POPOVER_MAX_WIDTH, work.width - 8));
+  const maxHeight = Math.max(POPOVER_MIN_HEIGHT, Math.min(POPOVER_MAX_HEIGHT, work.height - 8));
+
+  let width = sw + (e.includes("e") ? dx : 0) - (e.includes("w") ? dx : 0);
+  let height = sh + (e.includes("s") ? dy : 0) - (e.includes("n") ? dy : 0);
+  width = clampNumber(width, POPOVER_MIN_WIDTH, maxWidth);
+  height = clampNumber(height, POPOVER_MIN_HEIGHT, maxHeight);
+
+  let x = e.includes("w") ? right - width : sx;
+  let y = e.includes("n") ? bottom - height : sy;
+  x = clampNumber(x, work.x + 4, work.x + work.width - width - 4);
+  y = clampNumber(y, work.y + 4, work.y + work.height - height - 4);
+
+  popover.setBounds({ x, y, width, height }, false);
+  scheduleSavePopoverSize();
+  return { x, y, width, height };
+}
+
+// Move the popover to an absolute screen position, clamped so it stays within
+// the work area of whichever display the target point lands on. Used by the
+// "carry her around the screen" gesture in the renderer.
+function movePopoverTo(point = {}) {
+  if (!popover || popover.isDestroyed()) return null;
+  const bounds = popover.getBounds();
+  const targetX = Number(point.x);
+  const targetY = Number(point.y);
+  if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) return null;
+  const display = screen.getDisplayNearestPoint({
+    x: Math.round(targetX),
+    y: Math.round(targetY)
+  });
+  const work = display.workArea;
+  const x = clampNumber(targetX, work.x, work.x + work.width - bounds.width);
+  const y = clampNumber(targetY, work.y, work.y + work.height - bounds.height);
+  popover.setPosition(x, y, false);
+  return { x, y };
+}
+
 function createPopover() {
+  const size = initialPopoverSize();
   popover = new BrowserWindow({
-    width: POPOVER_WIDTH,
-    height: POPOVER_HEIGHT,
+    width: size.width,
+    height: size.height,
+    minWidth: POPOVER_MIN_WIDTH,
+    minHeight: POPOVER_MIN_HEIGHT,
     show: false,
     frame: false,
-    resizable: false,
+    resizable: true,
     movable: false,
     minimizable: false,
     maximizable: false,
@@ -127,9 +238,11 @@ function createPopover() {
     hasShadow: true,
     transparent: true,
     backgroundColor: "#00000000",
-    // "popover" is the native NSVisualEffectMaterial for menu bar drop-downs;
-    // gives the macOS frosted-glass / liquid-glass texture without a solid fill.
-    vibrancy: "popover",
+    // "under-window" is one of the most translucent NSVisualEffectMaterials —
+    // it keeps the macOS liquid-glass blur but lets much more of the desktop
+    // read through than the denser "popover" material. Pair it with the low
+    // CSS surface tints in styles.css to keep the panel see-through.
+    vibrancy: "under-window",
     visualEffectState: "active",
     roundedCorners: true,
     alwaysOnTop: false,
@@ -148,7 +261,10 @@ function createPopover() {
 
   popover.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
 
+  popover.on("resize", scheduleSavePopoverSize);
+
   popover.on("closed", () => {
+    clearTimeout(popoverSizeSaveTimer);
     popover = null;
   });
 }
@@ -385,10 +501,12 @@ function maybeNotifyDoneNotification(event) {
 
 app.whenReady().then(() => {
   // On macOS, become a status-menu accessory BEFORE creating the Tray.
-  // Packaged builds set LSUIElement=true in Info.plist so this is already
-  // their state at launch; dev (`npm run dev`) starts as a regular app
-  // and must transition explicitly. setActivationPolicy is the documented
-  // modern API and avoids the timing pitfalls of app.dock.hide().
+  // Packaged builds set LSUIElement=true in Info.plist so they already launch
+  // as accessories; dev (`npm run dev`) and raw Electron.app launches need an
+  // explicit transition. setActivationPolicy is the documented modern API and
+  // avoids the timing pitfalls of app.dock.hide(), which can transition the
+  // activation policy after the Tray is created and drop the status item —
+  // the exact cause of the missing dev menu-bar icon.
   if (process.platform === "darwin") {
     app.setActivationPolicy("accessory");
   }
@@ -445,6 +563,8 @@ app.whenReady().then(() => {
         name: event.name,
         summary: event.summary
       });
+    } else if (event.kind === "mood") {
+      popover.webContents.send("chat:mood", { mood: event.mood });
     }
   });
 
@@ -461,6 +581,17 @@ app.on("window-all-closed", () => {
 ipcMain.handle("popover:hide", () => {
   popover?.hide();
 });
+
+ipcMain.handle("popover:get-size", () => {
+  if (!popover || popover.isDestroyed()) return initialPopoverSize();
+  return clampPopoverSize(popover.getBounds(), screen.getDisplayMatching(popover.getBounds()));
+});
+
+ipcMain.handle("popover:resize", (_, size) => resizePopoverTo(size));
+
+ipcMain.handle("popover:resize-drag", (_, payload) => resizePopoverDrag(payload));
+
+ipcMain.handle("popover:move", (_, point) => movePopoverTo(point));
 
 ipcMain.handle("chat:send", (_, text) => chat.send(text));
 ipcMain.handle("chat:cancel", () => {

@@ -6,14 +6,14 @@
      reads through. The actual frosted-glass is provided by the window
      material; CSS only adds subtle tinting and definition. */
   --bg: transparent;
-  --bar-bg: rgba(0, 0, 0, 0.18);
-  --stage-bg: rgba(0, 0, 0, 0.10);
-  --chat-bg: rgba(0, 0, 0, 0.06);
+  --bar-bg: rgba(0, 0, 0, 0.10);
+  --stage-bg: rgba(0, 0, 0, 0.04);
+  --chat-bg: rgba(0, 0, 0, 0.02);
   /* Composer wrapper kept at the same tone as the chat stream so the typing
      area visually continues the conversation surface instead of dropping
      into a dark trough. The input field itself uses a lighter overlay so
      it still reads as an editable target against the wrapper. */
-  --composer-bg: rgba(0, 0, 0, 0.06);
+  --composer-bg: rgba(0, 0, 0, 0.02);
   --panel: rgba(255, 255, 255, 0.16);
   --panel-2: rgba(255, 255, 255, 0.24);
   --border: rgba(255, 255, 255, 0.10);
@@ -30,6 +30,9 @@
   --muted: #2f6a44;
   --warn: #ffd166;
   --danger: #ff8b7a;
+  --stage-min-h: 180px;
+  --stage-target-h: 34vh;
+  --stage-max-h: 460px;
   /* Dual halo (light glow + dark drop) keeps the character outline visible
      whether the desktop bleeding through the vibrancy is light or dark. */
   --text-halo: 0 0 2px rgba(255, 255, 255, 0.55), 0 1px 1px rgba(0, 0, 0, 0.28);
@@ -73,6 +76,14 @@ body {
   text-shadow: var(--text-halo);
 }
 
+/* While actively resizing, block text selection so a drag that slips onto the
+   chat surface doesn't highlight text. The per-handle cursor stays in effect
+   via pointer capture. */
+body.is-window-resizing,
+body.is-window-resizing * {
+  user-select: none !important;
+}
+
 button {
   font: inherit;
 }
@@ -87,9 +98,18 @@ button {
   align-items: center;
   justify-content: space-between;
   padding: 0 10px 0 14px;
-  -webkit-app-region: drag;
+  /* Manual window drag (see renderer.js) rather than -webkit-app-region: drag,
+     so she can smile while the window is carried. */
+  -webkit-app-region: no-drag;
+  cursor: grab;
   border-bottom: 1px solid var(--border);
   background: var(--bar-bg);
+}
+
+body.is-window-moving,
+body.is-window-moving * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 
 .bar-title {
@@ -169,8 +189,9 @@ button.ghost:disabled {
    ============================================================ */
 .stage {
   position: relative;
-  height: 180px;
-  flex-shrink: 0;
+  height: clamp(var(--stage-min-h), var(--stage-target-h), var(--stage-max-h));
+  min-height: var(--stage-min-h);
+  flex: 0 0 clamp(var(--stage-min-h), var(--stage-target-h), var(--stage-max-h));
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -178,13 +199,21 @@ button.ghost:disabled {
   border-bottom: 1px solid var(--border);
   cursor: grab;
   background: var(--stage-bg);
+  /* Own compositing layer so the overflow clip repaints cleanly while the
+     canvas inside is transform-animated every frame — without this, macOS
+     WebKit leaves an un-cleared sliver of the previous paint (e.g. a ghost of
+     her feet) at the clip boundary. */
+  transform: translateZ(0);
+  isolation: isolate;
 }
 
-.stage.is-dragging {
+.stage.is-dragging,
+.stage.is-carrying {
   cursor: grabbing;
 }
 
-.stage.is-dragging #petCanvas {
+.stage.is-dragging #petCanvas,
+.stage.is-carrying #petCanvas {
   /* No CSS transitions while dragging — the JS rAF loop owns the transform
      and any easing here would fight it. */
   transition: none;
@@ -196,6 +225,9 @@ button.ghost:disabled {
   display: block;
   pointer-events: none;
   will-change: transform, filter;
+  transform-origin: center bottom;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
   filter: drop-shadow(0 8px 10px rgba(0, 0, 0, 0.45));
   transition: filter 240ms ease;
 }
@@ -257,6 +289,7 @@ button.ghost:disabled {
    ============================================================ */
 .chat-stream {
   flex: 1;
+  min-height: 112px;
   overflow-y: auto;
   padding: 12px 14px 8px;
   display: flex;
@@ -500,4 +533,61 @@ button.primary:disabled {
   color: var(--muted);
   text-align: center;
   letter-spacing: 0.02em;
+}
+
+/* Manual edge/corner resize handles. Transparent frameless windows can't be
+   resized from their native edges, so these invisible strips capture the drag.
+   Top edge is intentionally omitted — the popover hangs from the menu bar. */
+.resize-edge {
+  position: fixed;
+  z-index: 30;
+  -webkit-app-region: no-drag;
+}
+
+.resize-edge.e {
+  top: 4px;
+  bottom: 10px;
+  right: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.resize-edge.w {
+  top: 4px;
+  bottom: 10px;
+  left: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.resize-edge.s {
+  left: 10px;
+  right: 18px;
+  bottom: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.resize-edge.sw {
+  left: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+
+.resize-grip {
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  opacity: 0.65;
+  background:
+    linear-gradient(135deg, transparent 58%, var(--border-strong) 58%, var(--border-strong) 64%, transparent 64%),
+    linear-gradient(135deg, transparent 72%, var(--border-strong) 72%, var(--border-strong) 78%, transparent 78%);
+}
+
+.resize-grip:hover {
+  opacity: 1;
 }

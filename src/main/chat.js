@@ -33,6 +33,16 @@ let currentProvider = null;
 let longMemoryDormant = true;
 let providerAvailability = null;
 
+// Expression tag parsing — she begins each reply with a hidden [[mood:X]]
+// marker (see persona.js) that drives her on-screen face. We strip it out of
+// everything the Doctor sees or that gets archived, and emit a "mood" event.
+const MOOD_TAG_RE = /^\s*\[\[\s*mood\s*:\s*([a-zA-Z]+)\s*\]\]\s*/;
+const MOOD_TAG_PREFIX = "[[mood:";
+const MOOD_HEAD_MAX = 48;
+let moodHeadBuffer = "";
+let moodHeadResolved = false;
+let moodEmittedThisTurn = false;
+
 function normalizeProvider(provider) {
   return provider === PROVIDERS.CODEX ? PROVIDERS.CODEX : PROVIDERS.CLAUDE;
 }
@@ -300,6 +310,73 @@ function emitTool(active, name, summary) {
   });
 }
 
+function normalizeMood(raw) {
+  switch (String(raw || "").toLowerCase()) {
+    case "calm": return "calm";
+    case "smile":
+    case "happy": return "smile";
+    case "sad":
+    case "cry": return "sad";
+    case "angry":
+    case "anger": return "angry";
+    case "sleepy":
+    case "sleep": return "sleepy";
+    case "threat":
+    case "threaten": return "threat";
+    default: return null;
+  }
+}
+
+function emitMood(raw) {
+  if (moodEmittedThisTurn) return;
+  const mood = normalizeMood(raw);
+  if (!mood) return;
+  moodEmittedThisTurn = true;
+  notify({ kind: "mood", mood });
+}
+
+function resetMoodParsing() {
+  moodHeadBuffer = "";
+  moodHeadResolved = false;
+  moodEmittedThisTurn = false;
+}
+
+// Pull a leading [[mood:X]] tag out of the streaming head. Returns the text
+// safe to display now (the tag is consumed, never shown). While the head might
+// still be forming a tag, returns "" and keeps buffering.
+function consumeMoodHead(text) {
+  if (moodHeadResolved) return text;
+  moodHeadBuffer += text;
+  const match = moodHeadBuffer.match(MOOD_TAG_RE);
+  if (match) {
+    emitMood(match[1]);
+    const rest = moodHeadBuffer.slice(match[0].length);
+    moodHeadResolved = true;
+    moodHeadBuffer = "";
+    return rest;
+  }
+  const lead = moodHeadBuffer.replace(/^\s+/, "");
+  const couldBeTag = lead.length <= MOOD_TAG_PREFIX.length
+    ? MOOD_TAG_PREFIX.startsWith(lead)
+    : lead.startsWith(MOOD_TAG_PREFIX);
+  if (couldBeTag && moodHeadBuffer.length < MOOD_HEAD_MAX) {
+    return ""; // still possibly a tag — wait for more
+  }
+  moodHeadResolved = true;
+  const out = moodHeadBuffer;
+  moodHeadBuffer = "";
+  return out;
+}
+
+function stripLeadingMoodTag(text) {
+  const match = String(text).match(MOOD_TAG_RE);
+  if (match) {
+    emitMood(match[1]);
+    return String(text).slice(match[0].length);
+  }
+  return text;
+}
+
 // One-line summary for transcript ("PRTS · Bash · screencapture …").
 function summarizeToolInput(name, input) {
   if (!input || typeof input !== "object") return null;
@@ -520,6 +597,7 @@ function updateConversationSummary() {
 }
 
 function beginAssistant() {
+  resetMoodParsing();
   pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   pendingAssistantText = "";
   history.push({
@@ -535,15 +613,20 @@ function appendAssistant(text) {
   if (!pendingAssistantId) {
     beginAssistant();
   }
-  pendingAssistantText += text;
+  const display = consumeMoodHead(text);
+  if (!display) return; // still buffering the leading mood tag
+  pendingAssistantText += display;
   const entry = history.find((h) => h.id === pendingAssistantId);
   if (entry) {
     entry.text = pendingAssistantText;
   }
-  emitChunk(pendingAssistantId, text);
+  emitChunk(pendingAssistantId, display);
 }
 
 function finalizeAssistant(finalText) {
+  if (typeof finalText === "string" && finalText) {
+    finalText = stripLeadingMoodTag(finalText);
+  }
   if (!pendingAssistantId) {
     if (finalText) {
       beginAssistant();
@@ -797,6 +880,27 @@ function shouldIgnoreNonJsonLine(line) {
 }
 
 function takeScreenshotSync() {
+  // Gate on the macOS Screen Recording TCC state BEFORE spawning
+  // `screencapture` — otherwise the binary itself triggers the system
+  // permission dialog every turn, which on ad-hoc-signed builds (no
+  // Apple Developer ID) can re-prompt even after the user grants access.
+  // `getMediaAccessStatus` only reads the cached state; it never prompts.
+  if (process.platform === "darwin") {
+    try {
+      const { systemPreferences } = require("electron");
+      const status = systemPreferences.getMediaAccessStatus("screen");
+      if (status !== "granted") {
+        // 'not-determined' / 'denied' / 'restricted' / 'unknown' — skip the
+        // screenshot silently this turn so we don't nag. The user can grant
+        // access at any time in System Settings → Privacy & Security →
+        // Screen Recording, and the next turn will pick it up.
+        return null;
+      }
+    } catch {
+      // If the API is unavailable for any reason, fall through and try.
+    }
+  }
+
   try {
     const dir = path.join(os.tmpdir(), "prts");
     fs.mkdirSync(dir, { recursive: true });

@@ -14,6 +14,7 @@ const sendBtn = document.getElementById("sendBtn");
 const cancelBtn = document.getElementById("cancelBtn");
 const clearBtn = document.getElementById("clearBtn");
 const cwdLine = document.getElementById("cwdLine");
+const resizeGrip = document.getElementById("resizeGrip");
 
 // ============================================================
 //  Frame loading — same edge-flood-fill technique as before.
@@ -69,6 +70,7 @@ const state = {
   expression: "idle",
   punch: 0,
   tremble: 0,
+  squeeze: 0,
   dragX: 0,
   dragY: 0
 };
@@ -256,6 +258,19 @@ async function loadAllFrames() {
 // ============================================================
 //  Canvas + render
 // ============================================================
+let lastStageWidth = 0;
+let lastStageHeight = 0;
+
+// Live animation transform. We bake this into the canvas draw call every frame
+// instead of using a CSS transform on the canvas element — a CSS-transformed
+// canvas under the stage's overflow:hidden clip leaves an un-cleared sliver of
+// the previous paint ("ghost feet"); a full clearRect+drawImage each frame
+// cannot.
+let animTx = 0;
+let animTy = 0;
+let animScaleX = 1;
+let animScaleY = 1;
+
 function resizeCanvas() {
   const rect = canvas.getBoundingClientRect();
   const ratio = window.devicePixelRatio || 1;
@@ -266,22 +281,31 @@ function resizeCanvas() {
     canvas.height = nextH;
   }
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  renderExpression(state.expression);
+  drawCharacter();
+  handleStageResize(rect);
 }
 
 function renderExpression(name) {
-  const frame = frames[name];
-  if (!frame) return;
+  if (!frames[name]) return;
   state.expression = name;
   stage.dataset.mood = state.mood;
+  drawCharacter();
+}
 
+// Draw the current frame bottom-anchored, with the live animation scale/offset
+// baked into the draw. Clears the whole canvas first, so nothing can linger.
+function drawCharacter() {
+  const frame = frames[state.expression];
+  if (!frame) return;
   const rect = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, rect.width, rect.height);
-  const scale = Math.min((rect.width - 24) / frame.width, (rect.height - 12) / frame.height);
-  const drawW = frame.width * scale;
-  const drawH = frame.height * scale;
-  const drawX = (rect.width - drawW) / 2;
-  const drawY = rect.height - drawH;
+  const availableW = Math.max(1, rect.width - 24);
+  const availableH = Math.max(1, rect.height - 12);
+  const base = Math.max(0.01, Math.min(availableW / frame.width, availableH / frame.height));
+  const drawW = frame.width * base * animScaleX;
+  const drawH = frame.height * base * animScaleY;
+  const drawX = (rect.width - drawW) / 2 + animTx;
+  const drawY = rect.height - drawH + animTy;
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(frame, drawX, drawY, drawW, drawH);
 }
@@ -316,19 +340,34 @@ function tick(now) {
   const shakeX = ambientShake ? (Math.random() - 0.5) * ambientShake * 2 : 0;
   const shakeY = ambientShake ? (Math.random() - 0.5) * ambientShake : 0;
 
-  // Spring the drag offset back to rest when the user lets go. Exponential
-  // ease — settles in roughly 250ms which feels lively without overshoot.
   if (!isDragging) {
-    const decay = 1 - Math.exp(-dt * 14);
-    state.dragX -= state.dragX * decay;
-    state.dragY -= state.dragY * decay;
+    const speed = Math.hypot(dragVelocityX, dragVelocityY);
+    if (speed > 1) {
+      state.dragX += dragVelocityX * dt;
+      state.dragY += dragVelocityY * dt;
+      const hit = clampDragToBounds();
+      if (hit.x) dragVelocityX = 0;
+      if (hit.y) dragVelocityY = 0;
+      const friction = Math.exp(-dt * 5.2);
+      dragVelocityX *= friction;
+      dragVelocityY *= friction;
+      if (Math.hypot(dragVelocityX, dragVelocityY) < 8) {
+        dragVelocityX = 0;
+        dragVelocityY = 0;
+      }
+    } else {
+      clampDragToBounds();
+    }
   }
+  state.squeeze *= Math.exp(-dt * 5);
 
   const scale = breath + state.punch;
-  const tx = state.dragX + shakeX;
-  const ty = state.dragY + bob + shakeY;
-  canvas.style.transform =
-    `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${scale.toFixed(4)})`;
+  const squeeze = Math.max(0, Math.min(1, state.squeeze));
+  animScaleX = scale * (1 - squeeze * 0.055);
+  animScaleY = scale * (1 + squeeze * 0.035);
+  animTx = state.dragX + shakeX;
+  animTy = state.dragY + bob + shakeY;
+  drawCharacter();
 
   requestAnimationFrame(tick);
 }
@@ -443,16 +482,17 @@ function bumpClickCount() {
   }, 1500);
 }
 
-const CLICK_TIER = { happy: 1, angry: 2, threat: 3 };
+const CLICK_TIER = { cry: 0, happy: 1, angry: 2, threat: 3 };
 
 // ============================================================
 //  Drag handling on the stage — pull her around inside the box.
-//  While dragging she shows the threat face; releasing springs
-//  her back to rest (handled by the easing branch in tick()).
+//  While dragging she shows the angry face. On release, her momentum decays
+//  in place instead of snapping her back to the center.
 // ============================================================
 const DRAG_THRESHOLD = 4;             // px before a mousedown becomes a drag
 const DRAG_LOCK_DURATION = 10 * 60_000; // long enough that auto-release
                                        // never fires mid-grab; we release manually
+const MAX_DRAG_VELOCITY = 1800;       // px / sec, keeps accidental spikes sane
 
 let pendingDrag = false;
 let isDragging = false;
@@ -460,6 +500,11 @@ let dragStartMouseX = 0;
 let dragStartMouseY = 0;
 let dragStartOffsetX = 0;
 let dragStartOffsetY = 0;
+let dragVelocityX = 0;
+let dragVelocityY = 0;
+let lastDragSampleX = 0;
+let lastDragSampleY = 0;
+let lastDragSampleAt = 0;
 let justDragged = false;
 let justDraggedTimer = null;
 
@@ -469,7 +514,9 @@ function getDragBounds() {
   if (!frame) return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
   // Mirror the math in renderExpression so the bounds match the actual
   // on-screen character rect.
-  const scale = Math.min((sr.width - 24) / frame.width, (sr.height - 12) / frame.height);
+  const availableW = Math.max(1, sr.width - 24);
+  const availableH = Math.max(1, sr.height - 12);
+  const scale = Math.max(0.01, Math.min(availableW / frame.width, availableH / frame.height));
   const charW = frame.width * scale;
   const charH = frame.height * scale;
   const charLeft = (sr.width - charW) / 2;
@@ -482,6 +529,46 @@ function getDragBounds() {
   };
 }
 
+function clampDragToBounds() {
+  const b = getDragBounds();
+  const nextX = clamp(state.dragX, b.minX, b.maxX);
+  const nextY = clamp(state.dragY, b.minY, b.maxY);
+  const hit = {
+    x: Math.abs(nextX - state.dragX) > 0.01,
+    y: Math.abs(nextY - state.dragY) > 0.01
+  };
+  state.dragX = nextX;
+  state.dragY = nextY;
+  return { ...hit, any: hit.x || hit.y };
+}
+
+function reactToSpaceCompression(strength = 0.6) {
+  state.squeeze = Math.max(state.squeeze, clamp(strength, 0.25, 1));
+  if (!isDragging) {
+    lockMood("cry", { durationMs: 1600 });
+  }
+}
+
+function handleStageResize(rect) {
+  if (!rect || !frames.idle) return;
+  const hadPrevious = lastStageWidth > 0 && lastStageHeight > 0;
+  const shrankWidth = hadPrevious && rect.width < lastStageWidth - 2;
+  const shrankHeight = hadPrevious && rect.height < lastStageHeight - 2;
+  const clamped = clampDragToBounds();
+
+  if (shrankWidth || shrankHeight || clamped.any) {
+    const lostW = Math.max(0, lastStageWidth - rect.width);
+    const lostH = Math.max(0, lastStageHeight - rect.height);
+    const strength = Math.max(clamped.any ? 0.75 : 0, lostW / 120, lostH / 90);
+    reactToSpaceCompression(strength || 0.35);
+    if (clamped.x) dragVelocityX = 0;
+    if (clamped.y) dragVelocityY = 0;
+  }
+
+  lastStageWidth = rect.width;
+  lastStageHeight = rect.height;
+}
+
 function releaseClickLock() {
   clearTimeout(lockReleaseTimer);
   lockUntil = 0;
@@ -489,13 +576,34 @@ function releaseClickLock() {
   applyMood(baseMood);
 }
 
+// True only when the point lands on one of her actual (opaque) pixels, so
+// clicking empty space in the stage box doesn't trigger a reaction or a drag.
+function isPointOnCharacter(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  const x = Math.floor((clientX - rect.left) * (canvas.width / rect.width));
+  const y = Math.floor((clientY - rect.top) * (canvas.height / rect.height));
+  if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return false;
+  try {
+    return ctx.getImageData(x, y, 1, 1).data[3] > 16;
+  } catch {
+    return true; // if pixel readback is blocked, don't break interaction
+  }
+}
+
 function handleStageMouseDown(event) {
   if (event.button !== 0) return;
+  if (!isPointOnCharacter(event.clientX, event.clientY)) return;
   pendingDrag = true;
   dragStartMouseX = event.clientX;
   dragStartMouseY = event.clientY;
   dragStartOffsetX = state.dragX;
   dragStartOffsetY = state.dragY;
+  dragVelocityX = 0;
+  dragVelocityY = 0;
+  lastDragSampleX = state.dragX;
+  lastDragSampleY = state.dragY;
+  lastDragSampleAt = performance.now();
 }
 
 function handleDocumentMouseMove(event) {
@@ -507,11 +615,24 @@ function handleDocumentMouseMove(event) {
     // Crossed the threshold — promote from pending to active drag.
     isDragging = true;
     stage.classList.add("is-dragging");
-    lockMood("threat", { durationMs: DRAG_LOCK_DURATION });
+    lockMood("angry", { durationMs: DRAG_LOCK_DURATION });
   }
   const b = getDragBounds();
-  state.dragX = Math.max(b.minX, Math.min(b.maxX, dragStartOffsetX + dx));
-  state.dragY = Math.max(b.minY, Math.min(b.maxY, dragStartOffsetY + dy));
+  const rawX = dragStartOffsetX + dx;
+  const rawY = dragStartOffsetY + dy;
+  const nextX = clamp(rawX, b.minX, b.maxX);
+  const nextY = clamp(rawY, b.minY, b.maxY);
+  const now = performance.now();
+  const dt = Math.max(0.016, (now - lastDragSampleAt) / 1000);
+  dragVelocityX = clamp((nextX - lastDragSampleX) / dt, -MAX_DRAG_VELOCITY, MAX_DRAG_VELOCITY);
+  dragVelocityY = clamp((nextY - lastDragSampleY) / dt, -MAX_DRAG_VELOCITY, MAX_DRAG_VELOCITY);
+  if (nextX !== rawX) dragVelocityX = 0;
+  if (nextY !== rawY) dragVelocityY = 0;
+  state.dragX = nextX;
+  state.dragY = nextY;
+  lastDragSampleX = nextX;
+  lastDragSampleY = nextY;
+  lastDragSampleAt = now;
 }
 
 function handleDocumentMouseUp(event) {
@@ -522,6 +643,10 @@ function handleDocumentMouseUp(event) {
   isDragging = false;
   stage.classList.remove("is-dragging");
   releaseClickLock();
+  if (Math.hypot(dragVelocityX, dragVelocityY) < 35) {
+    dragVelocityX = 0;
+    dragVelocityY = 0;
+  }
   // Swallow the click event the browser will dispatch right after this
   // mouseup so we don't immediately switch into happy/angry.
   justDragged = true;
@@ -535,11 +660,138 @@ stage.addEventListener("mousedown", handleStageMouseDown);
 document.addEventListener("mousemove", handleDocumentMouseMove);
 document.addEventListener("mouseup", handleDocumentMouseUp);
 
-function handleStageClick() {
+// ============================================================
+//  Window resize — frameless transparent windows can't be resized from the
+//  native edges, so we lay invisible strips along the left/right/bottom edges
+//  and the two bottom corners. Each reports its edge ("e", "w", "s", "se",
+//  "sw") plus the live screen-space drag delta to the main process, which
+//  keeps the opposite edge anchored. The top edge stays fixed under the menu
+//  bar. window.screenX/screenY give the window's top-left in screen space.
+// ============================================================
+let activeResizeEdge = null;
+let resizeStartScreenX = 0;
+let resizeStartScreenY = 0;
+let resizeStartBounds = null;
+
+function handleResizePointerDown(event) {
+  if (event.button !== 0) return;
+  const edge = event.currentTarget?.dataset?.edge;
+  if (!edge) return;
+  event.preventDefault();
+  event.stopPropagation();
+  try {
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  } catch {
+    /* continue without capture */
+  }
+  activeResizeEdge = edge;
+  resizeStartScreenX = event.screenX;
+  resizeStartScreenY = event.screenY;
+  resizeStartBounds = {
+    x: window.screenX,
+    y: window.screenY,
+    width: window.innerWidth,
+    height: window.innerHeight
+  };
+  document.body.classList.add("is-window-resizing");
+}
+
+function handleResizePointerMove(event) {
+  if (!activeResizeEdge || !resizeStartBounds) return;
+  event.preventDefault();
+  window.petApi?.resizePopoverDrag?.({
+    edge: activeResizeEdge,
+    start: resizeStartBounds,
+    dx: event.screenX - resizeStartScreenX,
+    dy: event.screenY - resizeStartScreenY
+  })?.catch?.(() => {});
+}
+
+function handleResizePointerUp(event) {
+  if (!activeResizeEdge) return;
+  event.preventDefault();
+  try {
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  } catch {
+    /* already released */
+  }
+  activeResizeEdge = null;
+  resizeStartBounds = null;
+  document.body.classList.remove("is-window-resizing");
+}
+
+for (const handle of document.querySelectorAll(".resize-edge")) {
+  handle.addEventListener("pointerdown", handleResizePointerDown);
+  handle.addEventListener("pointermove", handleResizePointerMove);
+  handle.addEventListener("pointerup", handleResizePointerUp);
+  handle.addEventListener("pointercancel", handleResizePointerUp);
+}
+
+// ============================================================
+//  Window move — drag the whole app by its top bar, like a normal window
+//  title bar. We move it manually (via the main process) instead of using
+//  -webkit-app-region: drag so we can keep her smiling (笑) while she travels.
+//  window.screenX/screenY give the window's top-left in screen space; we use
+//  the absolute pointer delta from the grab point so the move never drifts.
+// ============================================================
+const dragHandle = document.getElementById("dragHandle");
+let isWindowMoving = false;
+let winMoveStartScreenX = 0;
+let winMoveStartScreenY = 0;
+let winMoveStartX = 0;
+let winMoveStartY = 0;
+
+function handleHeaderPointerDown(event) {
+  if (event.button !== 0) return;
+  // Let the Clear/Stop buttons (and any control) work normally.
+  if (event.target.closest("button")) return;
+  isWindowMoving = true;
+  winMoveStartScreenX = event.screenX;
+  winMoveStartScreenY = event.screenY;
+  winMoveStartX = window.screenX;
+  winMoveStartY = window.screenY;
+  try {
+    dragHandle.setPointerCapture(event.pointerId);
+  } catch {
+    /* continue without capture */
+  }
+  document.body.classList.add("is-window-moving");
+  lockMood("happy", { durationMs: DRAG_LOCK_DURATION });
+}
+
+function handleHeaderPointerMove(event) {
+  if (!isWindowMoving) return;
+  event.preventDefault();
+  window.petApi?.movePopover?.({
+    x: winMoveStartX + (event.screenX - winMoveStartScreenX),
+    y: winMoveStartY + (event.screenY - winMoveStartScreenY)
+  })?.catch?.(() => {});
+}
+
+function handleHeaderPointerUp(event) {
+  if (!isWindowMoving) return;
+  isWindowMoving = false;
+  try {
+    dragHandle.releasePointerCapture(event.pointerId);
+  } catch {
+    /* already released */
+  }
+  document.body.classList.remove("is-window-moving");
+  releaseClickLock();
+}
+
+dragHandle?.addEventListener("pointerdown", handleHeaderPointerDown);
+dragHandle?.addEventListener("pointermove", handleHeaderPointerMove);
+dragHandle?.addEventListener("pointerup", handleHeaderPointerUp);
+dragHandle?.addEventListener("pointercancel", handleHeaderPointerUp);
+
+function handleStageClick(event) {
   if (justDragged) {
     justDragged = false;
     return;
   }
+  // Only react to clicks that actually land on her, not on empty stage space.
+  if (event && !isPointOnCharacter(event.clientX, event.clientY)) return;
   resetInactivityTimers();
   flashPunch(0.05);
 
@@ -597,6 +849,19 @@ let backendReady = true;
 let currentAssistantId = null;
 let lastHistory = [];
 
+// Model-chosen expression for the current reply (from the persona's hidden
+// [[mood:X]] tag). Applied to her face when the reply finishes, so her
+// expression matches what she just said.
+const MODEL_MOOD_FRAME = {
+  calm: "idle",
+  smile: "happy",
+  sad: "cry",
+  angry: "angry",
+  sleepy: "sleep",
+  threat: "threat"
+};
+let pendingModelMood = null;
+
 // ----- Tiny safe markdown renderer for assistant messages -----
 // Supports: fenced code blocks, inline code, **bold**, *italic*, [text](url),
 // headings (#/##/###), and line breaks. Escapes HTML; restricts links to http(s).
@@ -612,7 +877,7 @@ function renderMarkdown(input) {
   // Pull out fenced blocks first so other rules don't munge their contents.
   let src = String(input).replace(/```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
     codeBlocks.push({ lang: lang.toLowerCase(), code });
-    return ` CB${codeBlocks.length - 1} `;
+    return `\u0000CB${codeBlocks.length - 1}\u0000`;
   });
   src = escapeHtml(src);
   // Inline code
@@ -629,7 +894,7 @@ function renderMarkdown(input) {
   // Newlines → <br>; collapse extras
   src = src.replace(/\n{2,}/g, "<br><br>").replace(/\n/g, "<br>");
   // Re-insert code blocks
-  src = src.replace(/ CB(\d+) /g, (_, idx) => {
+  src = src.replace(/\u0000CB(\d+)\u0000/g, (_, idx) => {
     const { lang, code } = codeBlocks[Number(idx)];
     const langClass = lang ? ` class="lang-${escapeHtml(lang)}"` : "";
     return `<pre><code${langClass}>${escapeHtml(code)}</code></pre>`;
@@ -868,11 +1133,15 @@ window.chatApi.onStatus((event) => {
       showBubble("Stopped.", 1600);
     } else {
       flashPunch(0.08);
-      setBaseMood("happy");
+      // Settle into the expression she chose for this reply; default to happy.
+      const target = pendingModelMood || "happy";
+      setBaseMood(target);
+      const hold = target === "happy" ? 1400 : 2800;
       setTimeout(() => {
-        if (baseMood === "happy") setBaseMood("idle");
-      }, 1400);
+        if (baseMood === target) setBaseMood("idle");
+      }, hold);
     }
+    pendingModelMood = null;
   }
 });
 
@@ -885,6 +1154,14 @@ window.chatApi.onTool?.((payload) => {
   } else {
     setBaseMood("thinking");
   }
+});
+
+// Expression chosen by the persona for this reply (hidden [[mood:X]] tag,
+// parsed + stripped in the main process). Stored now, applied when she
+// finishes speaking (see onStatus idle handler).
+window.chatApi.onMood?.((payload) => {
+  const frame = payload && MODEL_MOOD_FRAME[payload.mood];
+  if (frame) pendingModelMood = frame;
 });
 
 // ============================================================
@@ -943,6 +1220,9 @@ stage.addEventListener("click", handleStageClick);
 //  Boot
 // ============================================================
 window.addEventListener("resize", resizeCanvas);
+if (typeof ResizeObserver !== "undefined") {
+  new ResizeObserver(() => resizeCanvas()).observe(stage);
+}
 
 loadAllFrames()
   .then(() => {

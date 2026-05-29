@@ -6,7 +6,8 @@ const DEFAULTS = Object.freeze({
   chatProvider: "claude",
   chatCwd: "",
   agentMode: false,
-  autoScreenshot: true
+  autoScreenshot: true,
+  popoverSize: { width: 380, height: 560 }
 });
 
 let cache = { ...DEFAULTS };
