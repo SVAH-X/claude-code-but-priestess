@@ -384,8 +384,13 @@ function maybeNotifyDoneNotification(event) {
 }
 
 app.whenReady().then(() => {
-  if (process.platform === "darwin" && app.dock) {
-    app.dock.hide();
+  // On macOS, become a status-menu accessory BEFORE creating the Tray.
+  // Packaged builds set LSUIElement=true in Info.plist so this is already
+  // their state at launch; dev (`npm run dev`) starts as a regular app
+  // and must transition explicitly. setActivationPolicy is the documented
+  // modern API and avoids the timing pitfalls of app.dock.hide().
+  if (process.platform === "darwin") {
+    app.setActivationPolicy("accessory");
   }
 
   settings.init();

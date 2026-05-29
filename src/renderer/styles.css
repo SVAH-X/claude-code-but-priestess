@@ -1,5 +1,7 @@
 :root {
-  color-scheme: dark;
+  /* Let macOS pick the matching native widget appearance so scrollbars,
+     form controls, etc. flip with system theme. */
+  color-scheme: light dark;
   /* Surface alphas kept low so the macOS popover vibrancy ("liquid glass")
      reads through. The actual frosted-glass is provided by the window
      material; CSS only adds subtle tinting and definition. */
@@ -7,9 +9,13 @@
   --bar-bg: rgba(0, 0, 0, 0.18);
   --stage-bg: rgba(0, 0, 0, 0.10);
   --chat-bg: rgba(0, 0, 0, 0.06);
-  --composer-bg: rgba(0, 0, 0, 0.22);
-  --panel: rgba(255, 255, 255, 0.08);
-  --panel-2: rgba(255, 255, 255, 0.14);
+  /* Composer wrapper kept at the same tone as the chat stream so the typing
+     area visually continues the conversation surface instead of dropping
+     into a dark trough. The input field itself uses a lighter overlay so
+     it still reads as an editable target against the wrapper. */
+  --composer-bg: rgba(0, 0, 0, 0.06);
+  --panel: rgba(255, 255, 255, 0.16);
+  --panel-2: rgba(255, 255, 255, 0.24);
   --border: rgba(255, 255, 255, 0.10);
   --border-strong: rgba(255, 255, 255, 0.22);
   /* Her color — cyan / terminal teal. */
@@ -18,13 +24,30 @@
   --her-edge: rgba(123, 223, 242, 0.42);
   --user-bg: rgba(255, 255, 255, 0.10);
   --user-edge: rgba(255, 255, 255, 0.18);
+  /* Light-mode defaults: dark green on light vibrancy. */
   --text: #1a5d2e;
   --text-on-her: #103d1d;
   --muted: #2f6a44;
   --warn: #ffd166;
   --danger: #ff8b7a;
+  /* Dual halo (light glow + dark drop) keeps the character outline visible
+     whether the desktop bleeding through the vibrancy is light or dark. */
+  --text-halo: 0 0 2px rgba(255, 255, 255, 0.55), 0 1px 1px rgba(0, 0, 0, 0.28);
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+/* macOS dark appearance — the popover vibrancy becomes dark, so the green
+   text above turns invisible. Switch to PRTS' light-theme palette: a pale
+   mint that stays readable on the dark glass and still echoes Priestess's
+   teal accent. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #d8f6e4;
+    --text-on-her: #eafff5;
+    --muted: #8fc7a4;
+    --text-halo: 0 0 2px rgba(0, 0, 0, 0.60), 0 1px 1px rgba(0, 0, 0, 0.40);
+  }
 }
 
 * {
@@ -44,8 +67,10 @@ body {
   overflow: hidden;
   user-select: none;
   border-radius: 12px;
-  /* Make text legible over any desktop content showing through the glass. */
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  /* Make text legible over any desktop content showing through the glass.
+     The dual-halo variable carries both a light glow and a dark drop so
+     letters stay outlined against a busy / unpredictable backdrop. */
+  text-shadow: var(--text-halo);
 }
 
 button {

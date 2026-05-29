@@ -726,7 +726,18 @@ function autosizeInput() {
 composerInput.addEventListener("input", autosizeInput);
 
 composerInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
+  // event.isComposing / keyCode === 229 → the keypress belongs to an active
+  // IME composition (e.g. picking a Pinyin candidate, confirming a partial
+  // Latin word inside the IME). Don't submit the form mid-composition; let
+  // the IME consume the Enter and only treat a "real" Enter as send.
+  if (
+    event.key === "Enter" &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.isComposing &&
+    event.keyCode !== 229
+  ) {
     event.preventDefault();
     composer.requestSubmit();
   }
