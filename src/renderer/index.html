@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PRTS</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="bar" id="dragHandle">
+      <div class="bar-title">
+        <span class="dot" aria-hidden="true"></span>
+        <span>PRTS</span>
+        <span class="provider-badge" id="providerBadge">Claude</span>
+        <span class="agent-badge" id="agentBadge" hidden>⚡ agent</span>
+      </div>
+      <div class="bar-actions">
+        <button type="button" id="clearBtn" class="ghost" title="Clear conversation">Clear</button>
+        <button type="button" id="cancelBtn" class="ghost" title="Stop response" disabled>Stop</button>
+      </div>
+    </header>
+
+    <section class="stage" id="petStage">
+      <canvas id="petCanvas" width="380" height="180"></canvas>
+      <div class="bubble" id="petBubble" aria-live="polite"></div>
+    </section>
+
+    <main class="chat-stream" id="chatStream" aria-live="polite"></main>
+
+    <footer class="composer">
+      <form id="composer" autocomplete="off">
+        <textarea
+          id="composerInput"
+          placeholder="Talk to her…  (Shift+Enter for newline)"
+          rows="1"
+          spellcheck="false"
+        ></textarea>
+        <button type="submit" id="sendBtn" class="primary" aria-label="Send">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 12l16-8-6 16-3-7-7-1z" />
+          </svg>
+        </button>
+      </form>
+      <p class="cwd-line" id="cwdLine"></p>
+    </footer>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

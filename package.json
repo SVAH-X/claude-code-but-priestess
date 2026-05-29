@@ -1,0 +1,50 @@
+{
+  "name": "claude-code-but-priestess",
+  "version": "0.2.0",
+  "description": "A macOS menu bar companion that lets you chat with 普瑞赛斯, backed by local Claude Code or Codex CLI usage.",
+  "main": "src/main/main.js",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/run-electron.js",
+    "start": "node scripts/run-electron.js",
+    "pack": "electron-builder --dir --mac",
+    "dist": "electron-builder --mac",
+    "lint": "node scripts/check-assets.js"
+  },
+  "keywords": [
+    "menubar",
+    "electron",
+    "macos",
+    "claude-code",
+    "codex"
+  ],
+  "author": "",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "electron": "^42.3.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "local.claude-code-but-priestess.menubar",
+    "productName": "PRTS",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "!**/.DS_Store",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "assets/build"
+    },
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "extendInfo": {
+        "LSUIElement": true
+      }
+    }
+  }
+}
