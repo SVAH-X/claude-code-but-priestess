@@ -443,6 +443,60 @@ button.ghost:disabled {
   vertical-align: bottom;
 }
 
+/* Expandable variant — a real button that toggles the command/output panel. */
+button.tool-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+button.tool-pill:hover {
+  background: rgba(255, 209, 102, 0.26);
+}
+
+.tool-pill .tool-pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-pill .tool-caret {
+  flex: none;
+  font-size: 8px;
+  line-height: 1;
+  opacity: 0.75;
+}
+
+/* The actual logs — command line + output, in a contained scroll box so a
+   chatty command can't flood the popover. */
+.tool-detail {
+  margin: 3px 0 1px 2px;
+  max-width: 100%;
+  max-height: 196px;
+  overflow: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.30);
+  border: 1px solid rgba(255, 209, 102, 0.22);
+  border-radius: 6px;
+  padding: 6px 9px;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.tool-detail.error {
+  color: #ffb4b4;
+  border-color: rgba(255, 120, 120, 0.4);
+  background: rgba(60, 0, 0, 0.28);
+}
+
 /* Markdown elements inside assistant bubbles. */
 .msg.assistant h1,
 .msg.assistant h2,

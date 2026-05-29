@@ -38,6 +38,14 @@ let longMemoryDormant = true;
 let providerAvailability = null;
 let consecutiveQuestionReplies = 0;
 const BOUNDARY_QUIT_AFTER = 4;
+// Set when a Claude `result` arrives flagged is_error with no text — usually a
+// stale `--resume` session. The close handler uses it to self-heal (drop the
+// dead session id and retry once with a fresh one) instead of leaving the
+// backend permanently returning blank replies. `resumeRetryInFlight` guards
+// against retry loops.
+let claudeResultErrored = false;
+let resumeRetryInFlight = false;
+const MAX_TOOL_OUTPUT_CHARS = 4000;
 
 // Expression tag parsing — she begins each reply with a hidden [[mood:X]]
 // marker (see persona.js) that drives her on-screen face. We strip it out of
@@ -463,6 +471,54 @@ function summarizeToolInput(name, input) {
   return null;
 }
 
+// Full command / target for the expandable tool detail (the Doctor wants to
+// read the actual logs, not just a truncated label).
+function toolCommandDetail(name, input) {
+  if (!input || typeof input !== "object") return null;
+  if (name === "Bash" && typeof input.command === "string") return input.command;
+  if (typeof input.file_path === "string") return input.file_path;
+  if (typeof input.pattern === "string") return input.pattern;
+  if (typeof input.command === "string") return input.command;
+  return null;
+}
+
+// Flatten a tool_result's content (string, or array of text parts) into the
+// log text we show under the pill.
+function extractToolResultText(content) {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part?.type === "text" && typeof part.text === "string") return part.text;
+        return "";
+      })
+      .join("");
+  }
+  if (typeof content === "object" && typeof content.text === "string") return content.text;
+  return "";
+}
+
+// Attach a tool_result's output to the matching pill (by tool_use id) so the
+// chat can reveal the actual command logs.
+function attachToolResult(toolUseId, block) {
+  if (!toolUseId) return;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry?.role === "tool" && entry.toolUseId === toolUseId) {
+      let text = extractToolResultText(block?.content);
+      if (text.length > MAX_TOOL_OUTPUT_CHARS) {
+        text = `${text.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n…(${text.length - MAX_TOOL_OUTPUT_CHARS} more chars)`;
+      }
+      entry.output = text;
+      entry.outputError = Boolean(block?.is_error);
+      emitHistory();
+      return;
+    }
+  }
+}
+
 function pushSystem(text) {
   const entry = {
     id: `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -475,18 +531,25 @@ function pushSystem(text) {
 }
 
 // Persistent tool-use receipt that appears inline as a pill in the chat stream.
-function pushTool(name, summary) {
-  if (!name) return;
+// `toolUseId` lets a later tool_result attach the command's output; `command`
+// is the full command/target shown when the pill is expanded.
+function pushTool(name, summary, { toolUseId = null, command = null } = {}) {
+  if (!name) return null;
   const entry = {
     id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "tool",
     text: summary ? `${name} · ${summary}` : name,
     name,
     summary: summary || null,
+    toolUseId,
+    command: command || null,
+    output: null,
+    outputError: false,
     ts: Date.now()
   };
   history.push(entry);
   emitHistory();
+  return entry;
 }
 
 function pushUser(text, provider = activeProvider(), { ephemeral = false, queued = false } = {}) {
@@ -687,6 +750,7 @@ function updateConversationSummary() {
 
 function beginAssistant() {
   resetMoodParsing();
+  claudeResultErrored = false;
   pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   pendingAssistantText = "";
   history.push({
@@ -728,6 +792,16 @@ function finalizeAssistant(finalText) {
   const entry = history.find((h) => h.id === pendingAssistantId);
   if (entry && finalText && finalText !== entry.text) {
     entry.text = finalText;
+  }
+  // A turn that produced no text (errored, cancelled, or swallowed prompt) used
+  // to linger as a blank gray bubble. Drop it instead of persisting emptiness.
+  if (entry && !(entry.text || "").trim()) {
+    const idx = history.indexOf(entry);
+    if (idx !== -1) history.splice(idx, 1);
+    pendingAssistantId = null;
+    pendingAssistantText = "";
+    emitHistory();
+    return;
   }
   if (entry?.text) {
     noteConsecutiveQuestionReply(entry);
@@ -828,12 +902,27 @@ function handleClaudeStreamEvent(event) {
       if (block?.type === "tool_use") {
         const summary = summarizeToolInput(block.name, block.input);
         emitTool(true, block.name, summary);
-        pushTool(block.name, summary);
+        pushTool(block.name, summary, {
+          toolUseId: block.id,
+          command: toolCommandDetail(block.name, block.input)
+        });
       }
     }
 
     const text = extractText(event.message?.content);
     appendReconciledAssistantText(text);
+    return;
+  }
+
+  // tool_result blocks come back as a user-role message; attach their output
+  // to the matching pill so the chat can reveal the command's logs.
+  if (event.type === "user") {
+    const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
+    for (const block of blocks) {
+      if (block?.type === "tool_result") {
+        attachToolResult(block.tool_use_id, block);
+      }
+    }
     return;
   }
 
@@ -843,8 +932,10 @@ function handleClaudeStreamEvent(event) {
       typeof event.result === "string"
         ? event.result
         : extractText(event.result?.content);
-    if (event.is_error && !finalText) {
-      pushSystem(`claude reported an error (${event.subtype || "unknown"}).`);
+    // Empty error result (commonly a dead --resume session). Flag it; the close
+    // handler decides whether to self-heal with a fresh session or surface it.
+    if (event.is_error && !finalText && !pendingAssistantText) {
+      claudeResultErrored = true;
     }
     emitTool(false);
     finalizeAssistant(finalText || pendingAssistantText);
@@ -1053,7 +1144,13 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
   if (sessionIds[PROVIDERS.CLAUDE]) {
     args.push("--resume", sessionIds[PROVIDERS.CLAUDE]);
   }
-  args.push(trimmed);
+  // `--` terminates option parsing. Without it, variadic flags like
+  // `--allowedTools` (which accepts several space-separated tool names as
+  // separate argv entries) greedily swallow the trailing positional prompt,
+  // leaving claude with no input → it exits with "Input must be provided"
+  // and the Doctor sees an empty reply. The separator guarantees the prompt
+  // is always treated as the positional input, even if it begins with "-".
+  args.push("--", trimmed);
 
   return {
     command: resolveExecutable("claude"),
@@ -1211,6 +1308,10 @@ function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscrip
     screenshotPath,
     sharedTranscript
   );
+  // Did this turn try to resume a Claude session? If it did and the turn dies
+  // with an empty error, the session id is probably stale and we self-heal.
+  const launchedWithClaudeSession =
+    provider === PROVIDERS.CLAUDE && Boolean(sessionIds[PROVIDERS.CLAUDE]);
   let proc;
   try {
     proc = spawn(invocation.command, invocation.args, {
@@ -1262,6 +1363,8 @@ function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscrip
     finalizeAssistant("");
     currentProcess = null;
     currentProvider = null;
+    claudeResultErrored = false;
+    resumeRetryInFlight = false;
     const cancelled = cancelRequested;
     cancelRequested = false;
     finishTurn({ error: error.message, cancelled: cancelled || undefined });
@@ -1277,17 +1380,45 @@ function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscrip
       }
       buffer = "";
     }
+
+    const stderrText = stderrBuffer.trim();
+    const cancelled = cancelRequested;
+    cancelRequested = false;
+
+    // Self-heal a dead `--resume` session: drop the stale id and replay this
+    // turn once with a fresh session, so Claude doesn't get stuck returning
+    // blank replies on every message.
+    const resumeFailed =
+      launchedWithClaudeSession &&
+      !cancelled &&
+      !resumeRetryInFlight &&
+      (claudeResultErrored || /No conversation found with session ID/i.test(stderrText));
+    if (resumeFailed) {
+      sessionIds[PROVIDERS.CLAUDE] = null;
+      resumeRetryInFlight = true;
+      claudeResultErrored = false;
+      if (pendingAssistantId) finalizeAssistant(""); // clears the empty bubble
+      currentProcess = null;
+      currentProvider = null;
+      setImmediate(() => dispatchSend(trimmed, { userAlreadyShown: true, chained: true }));
+      return;
+    }
+
     if (code !== 0 && code !== null) {
-      const stderrSummary = stderrBuffer.trim().slice(-400);
+      const stderrSummary = stderrText.slice(-400);
       pushSystem(
         `\`${providerLabel(provider)}\` exited with code ${code}.${stderrSummary ? "\n" + stderrSummary : ""}`
+      );
+    } else if (claudeResultErrored) {
+      pushSystem(
+        "Claude 返回了一个空的错误回复。请再试一次，或确认 `claude` CLI 已登录且额度未用尽。"
       );
     }
     if (pendingAssistantId) finalizeAssistant("");
     currentProcess = null;
     currentProvider = null;
-    const cancelled = cancelRequested;
-    cancelRequested = false;
+    claudeResultErrored = false;
+    resumeRetryInFlight = false;
     finishTurn(cancelled ? { cancelled: true } : {});
   });
 }
@@ -1310,6 +1441,8 @@ function clear() {
   currentProvider = null;
   longMemoryDormant = true;
   consecutiveQuestionReplies = 0;
+  claudeResultErrored = false;
+  resumeRetryInFlight = false;
   updateConversationSummary();
   emitHistory();
 }
@@ -1323,6 +1456,8 @@ function wipeSession() {
   currentProvider = null;
   longMemoryDormant = true;
   consecutiveQuestionReplies = 0;
+  claudeResultErrored = false;
+  resumeRetryInFlight = false;
   emitHistory();
 }
 

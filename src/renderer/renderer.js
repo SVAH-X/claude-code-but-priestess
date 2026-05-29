@@ -849,6 +849,11 @@ let backendReady = true;
 let currentAssistantId = null;
 let lastHistory = [];
 
+// Tool pills show their command + output expanded by default (the Doctor wants
+// the logs). This tracks the ones she's manually collapsed so the choice
+// survives the frequent full re-renders of the chat stream.
+const toolCollapsed = new Set();
+
 // Model-chosen expression for the current reply (from the persona's hidden
 // [[mood:X]] tag). Applied to her face when the reply finishes, so her
 // expression matches what she just said.
@@ -921,15 +926,48 @@ function buildMsgEl(msg) {
   el.dataset.id = msg.id;
   if (msg.role === "tool") {
     el.className = "msg tool";
-    const pill = document.createElement("span");
-    pill.className = "tool-pill";
-    // Show just the tool name; the full command/summary used to wrap into a
-    // multi-line orange brick that swallowed the chat. Hover reveals the
-    // detail via `title` for anyone who actually wants it.
-    pill.textContent = `PRTS · ${msg.name || msg.text || "tool"}`;
-    const detail = msg.summary || (msg.name && msg.text && msg.text !== msg.name ? msg.text : null);
-    if (detail) pill.title = detail;
+    const label = msg.summary
+      ? `${msg.name} · ${msg.summary}`
+      : msg.name || msg.text || "tool";
+    const commandText = (msg.command && String(msg.command).trim()) || "";
+    const outputText = msg.output != null ? String(msg.output) : "";
+    const hasDetail = Boolean(commandText || outputText);
+
+    const pill = document.createElement(hasDetail ? "button" : "span");
+    pill.className = `tool-pill${hasDetail ? " expandable" : ""}`;
+    if (hasDetail) pill.type = "button";
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "tool-pill-label";
+    labelSpan.textContent = `PRTS · ${label}`;
+    pill.append(labelSpan);
     el.append(pill);
+
+    if (hasDetail) {
+      const caret = document.createElement("span");
+      caret.className = "tool-caret";
+      pill.append(caret);
+
+      const detail = document.createElement("pre");
+      detail.className = `tool-detail${msg.outputError ? " error" : ""}`;
+      const segments = [];
+      if (commandText) segments.push(`$ ${commandText}`);
+      // Output not back yet → show a placeholder until the tool_result lands.
+      segments.push(outputText || "…");
+      detail.textContent = segments.join("\n");
+      el.append(detail);
+
+      const sync = () => {
+        const open = !toolCollapsed.has(msg.id);
+        detail.hidden = !open;
+        caret.textContent = open ? "▾" : "▸";
+      };
+      pill.addEventListener("click", () => {
+        if (toolCollapsed.has(msg.id)) toolCollapsed.delete(msg.id);
+        else toolCollapsed.add(msg.id);
+        sync();
+      });
+      sync();
+    }
     return el;
   }
   el.className = `msg ${msg.role}${msg.queued ? " queued" : ""}`;
@@ -939,7 +977,19 @@ function buildMsgEl(msg) {
     if (isThinking) {
       renderThinkingBubble(el);
     } else if (isStreaming) {
-      el.textContent = msg.text || "";
+      // A re-render can land mid-stream (e.g. a tool pill or its output arrives
+      // while she's still typing). The typewriter holds the not-yet-revealed
+      // tail in its buffer, which is always a suffix of msg.text. Render only
+      // the already-revealed portion so the buffer can finish typing it out —
+      // dumping the full text here would let tickTyping re-append the tail and
+      // duplicate it.
+      const s = typingState.get(msg.id);
+      const full = msg.text || "";
+      const revealed =
+        s && s.buffer && full.length >= s.buffer.length && full.endsWith(s.buffer)
+          ? full.slice(0, full.length - s.buffer.length)
+          : full;
+      el.textContent = revealed;
       const cur = document.createElement("span");
       cur.className = "cursor";
       el.append(cur);
