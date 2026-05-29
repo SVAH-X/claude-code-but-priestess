@@ -332,7 +332,9 @@ button.ghost:disabled {
   to { opacity: 0; }
 }
 
-/* Inline tool-use receipts — render as a pill, not a chat bubble. */
+/* Inline tool-use receipts — render as a single-line pill, not a chat
+   bubble. Max-width + ellipsis keeps a long command from wrapping into a
+   multi-line orange brick that swallows the chat surface. */
 .msg.tool {
   align-self: flex-start;
   background: transparent;
@@ -341,10 +343,15 @@ button.ghost:disabled {
   margin: -2px 0 -2px 2px;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
+  max-width: 88%;
 }
 
 .tool-pill {
   display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
@@ -353,6 +360,7 @@ button.ghost:disabled {
   border: 1px solid rgba(255, 209, 102, 0.34);
   padding: 1px 8px;
   border-radius: 999px;
+  vertical-align: bottom;
 }
 
 /* Markdown elements inside assistant bubbles. */

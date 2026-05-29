@@ -644,7 +644,12 @@ function buildMsgEl(msg) {
     el.className = "msg tool";
     const pill = document.createElement("span");
     pill.className = "tool-pill";
-    pill.textContent = `PRTS · ${msg.text || msg.name || "tool"}`;
+    // Show just the tool name; the full command/summary used to wrap into a
+    // multi-line orange brick that swallowed the chat. Hover reveals the
+    // detail via `title` for anyone who actually wants it.
+    pill.textContent = `PRTS · ${msg.name || msg.text || "tool"}`;
+    const detail = msg.summary || (msg.name && msg.text && msg.text !== msg.name ? msg.text : null);
+    if (detail) pill.title = detail;
     el.append(pill);
     return el;
   }
@@ -685,20 +690,89 @@ function renderHistory(history) {
   chatStream.scrollTop = chatStream.scrollHeight;
 }
 
-function appendChunk(messageId, text) {
-  if (!messageId) return;
-  const el = chatStream.querySelector(`.msg.assistant[data-id="${messageId}"]`);
-  if (!el) return;
+// Typewriter — backends often emit chunks in bursts, which makes the response
+// pop in feeling instant. Buffer per messageId and reveal characters at a
+// steady ~90 chars/sec via rAF so it visibly types. The blinking cursor
+// trails the typed text and only goes away once the buffer drains AND the
+// stream is finished.
+const TYPING_CHARS_PER_SEC = 90;
+const typingState = new Map(); // messageId -> { buffer, rafId, lastTickMs }
+let pendingFinalRender = false;
+
+function ensureCursor(el) {
+  if (!el.querySelector(".cursor")) {
+    const cur = document.createElement("span");
+    cur.className = "cursor";
+    el.append(cur);
+  }
+}
+
+function removeCursor(el) {
   const cur = el.querySelector(".cursor");
   if (cur) cur.remove();
-  el.append(document.createTextNode(text));
-  if (chatRunning) {
-    const next = document.createElement("span");
-    next.className = "cursor";
-    el.append(next);
+}
+
+function appendChunk(messageId, text) {
+  if (!messageId || !text) return;
+  let s = typingState.get(messageId);
+  if (!s) {
+    s = { buffer: "", rafId: null, lastTickMs: performance.now() };
+    typingState.set(messageId, s);
   }
-  const nearBottom = chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 80;
-  if (nearBottom) chatStream.scrollTop = chatStream.scrollHeight;
+  s.buffer += text;
+  if (s.rafId == null) {
+    s.lastTickMs = performance.now();
+    s.rafId = requestAnimationFrame(() => tickTyping(messageId));
+  }
+}
+
+function tickTyping(messageId) {
+  const s = typingState.get(messageId);
+  if (!s) return;
+  s.rafId = null;
+
+  const el = chatStream.querySelector(`.msg.assistant[data-id="${messageId}"]`);
+  if (!el) {
+    typingState.delete(messageId);
+    return;
+  }
+
+  const now = performance.now();
+  const dtSec = Math.max(0, (now - s.lastTickMs) / 1000);
+  s.lastTickMs = now;
+
+  if (s.buffer.length > 0) {
+    const advance = Math.max(1, Math.floor(dtSec * TYPING_CHARS_PER_SEC));
+    const chunk = s.buffer.slice(0, advance);
+    s.buffer = s.buffer.slice(advance);
+
+    removeCursor(el);
+    el.append(document.createTextNode(chunk));
+    ensureCursor(el);
+
+    const nearBottom =
+      chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 80;
+    if (nearBottom) chatStream.scrollTop = chatStream.scrollHeight;
+  }
+
+  if (s.buffer.length > 0 || chatRunning) {
+    s.rafId = requestAnimationFrame(() => tickTyping(messageId));
+    return;
+  }
+
+  // Buffer drained AND the stream is finished — clean up the cursor and let
+  // setRunning's deferred render (if any) promote plain text to markdown.
+  removeCursor(el);
+  typingState.delete(messageId);
+  if (pendingFinalRender && typingState.size === 0) {
+    pendingFinalRender = false;
+    renderHistory(lastHistory);
+  }
+}
+
+function anyTypingActive() {
+  for (const s of typingState.values()) if (s.buffer.length > 0) return true;
+  return false;
 }
 
 function setRunning(running) {
@@ -712,9 +786,14 @@ function setRunning(running) {
     setBaseMood("idle");
   }
   // When a stream ends, re-render the last assistant message so it picks up
-  // markdown formatting instead of the raw streamed plain text.
+  // markdown formatting — but only after the typewriter buffer drains, so we
+  // don't replace a still-typing element mid-animation.
   if (wasRunning && !running && lastHistory.length) {
-    renderHistory(lastHistory);
+    if (anyTypingActive()) {
+      pendingFinalRender = true;
+    } else {
+      renderHistory(lastHistory);
+    }
   }
 }
 
