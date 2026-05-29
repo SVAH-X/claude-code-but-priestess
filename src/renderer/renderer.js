@@ -902,6 +902,20 @@ function renderMarkdown(input) {
   return src;
 }
 
+let moodResetTimer = null;
+
+function clearMoodResetTimer() {
+  if (moodResetTimer) {
+    clearTimeout(moodResetTimer);
+    moodResetTimer = null;
+  }
+}
+
+function renderThinkingBubble(el) {
+  el.classList.add("thinking");
+  el.innerHTML = '<span class="thinking-dots" aria-label="Thinking"><span></span><span></span><span></span></span>';
+}
+
 function buildMsgEl(msg) {
   const el = document.createElement("div");
   el.dataset.id = msg.id;
@@ -918,11 +932,13 @@ function buildMsgEl(msg) {
     el.append(pill);
     return el;
   }
-  el.className = `msg ${msg.role}`;
+  el.className = `msg ${msg.role}${msg.queued ? " queued" : ""}`;
   if (msg.role === "assistant") {
-    // Plain text while streaming (current one), markdown when finalized.
     const isStreaming = chatRunning && msg.id === currentAssistantId;
-    if (isStreaming) {
+    const isThinking = isStreaming && !(msg.text || "").trim();
+    if (isThinking) {
+      renderThinkingBubble(el);
+    } else if (isStreaming) {
       el.textContent = msg.text || "";
       const cur = document.createElement("span");
       cur.className = "cursor";
@@ -1002,6 +1018,11 @@ function tickTyping(messageId) {
     return;
   }
 
+  if (el.classList.contains("thinking")) {
+    el.classList.remove("thinking");
+    el.replaceChildren();
+  }
+
   const now = performance.now();
   const dtSec = Math.max(0, (now - s.lastTickMs) / 1000);
   s.lastTickMs = now;
@@ -1040,26 +1061,73 @@ function anyTypingActive() {
   return false;
 }
 
-function setRunning(running) {
+function flushTypingBuffers({ renderMarkdownNow = false } = {}) {
+  for (const [messageId, s] of typingState.entries()) {
+    if (s.rafId != null) {
+      cancelAnimationFrame(s.rafId);
+      s.rafId = null;
+    }
+    const el = chatStream.querySelector(`.msg.assistant[data-id="${messageId}"]`);
+    if (el && s.buffer.length > 0) {
+      removeCursor(el);
+      el.append(document.createTextNode(s.buffer));
+      s.buffer = "";
+    }
+    if (el) removeCursor(el);
+    typingState.delete(messageId);
+  }
+  if (renderMarkdownNow && lastHistory.length) {
+    pendingFinalRender = false;
+    renderHistory(lastHistory);
+  }
+}
+
+function setRunning(running, { chained = false } = {}) {
   const wasRunning = chatRunning;
+  if (!running && queueLength > 0) {
+    flushTypingBuffers({ renderMarkdownNow: true });
+    return;
+  }
   chatRunning = running;
-  sendBtn.disabled = running || !backendReady;
+  sendBtn.disabled = !backendReady;
   cancelBtn.disabled = !running;
   if (running) {
+    clearMoodResetTimer();
+    if (chained) {
+      flushTypingBuffers({ renderMarkdownNow: true });
+    }
     setBaseMood("thinking");
-  } else {
+    ensureThinkingBubbleVisible();
+  } else if (!chained) {
     setBaseMood("idle");
   }
-  // When a stream ends, re-render the last assistant message so it picks up
-  // markdown formatting — but only after the typewriter buffer drains, so we
-  // don't replace a still-typing element mid-animation.
   if (wasRunning && !running && lastHistory.length) {
+    if (queueLength > 0) {
+      flushTypingBuffers({ renderMarkdownNow: true });
+      return;
+    }
     if (anyTypingActive()) {
       pendingFinalRender = true;
     } else {
       renderHistory(lastHistory);
     }
   }
+}
+
+function ensureThinkingBubbleVisible() {
+  if (!currentAssistantId) return;
+  let el = chatStream.querySelector(`.msg.assistant[data-id="${currentAssistantId}"]`);
+  if (!el) {
+    renderHistory(lastHistory);
+    el = chatStream.querySelector(`.msg.assistant[data-id="${currentAssistantId}"]`);
+  }
+  if (!el) return;
+  const entry = lastHistory.find((m) => m.id === currentAssistantId);
+  if (!entry || (entry.text || "").trim()) return;
+  renderThinkingBubble(el);
+  const nearBottom =
+    chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 80;
+  if (nearBottom) chatStream.scrollTop = chatStream.scrollHeight;
 }
 
 function autosizeInput() {
@@ -1090,18 +1158,17 @@ composerInput.addEventListener("keydown", (event) => {
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = composerInput.value.trim();
-  if (!text || chatRunning) return;
+  if (!text) return;
   composerInput.value = "";
   autosizeInput();
   flashPunch(0.05);
   resetInactivityTimers();
-  // Brief acknowledgement: a single "listening" blink-frame.
   renderExpression("halfClosed");
   setTimeout(() => {
     if (chatRunning) renderExpression(MOOD_FRAME[state.mood] || state.mood);
   }, 200);
   const result = await window.chatApi.send(text);
-  if (result?.ok === false && result.reason !== "busy") {
+  if (result?.ok === false) {
     showBubble(`Send failed: ${result.reason}`, 3000);
   }
 });
@@ -1119,9 +1186,15 @@ window.chatApi.onChunk(({ messageId, text }) => appendChunk(messageId, text));
 window.chatApi.onStatus((event) => {
   if (!event) return;
   if (event.status === "running") {
-    setRunning(true);
+    setRunning(true, { chained: Boolean(event.chained) });
+    refreshComposerMeta();
   } else if (event.status === "idle") {
+    if (queueLength > 0) {
+      pendingModelMood = null;
+      return;
+    }
     setRunning(false);
+    refreshComposerMeta();
     resetInactivityTimers();
     if (event.error) {
       setBaseMood("cry");
@@ -1137,8 +1210,10 @@ window.chatApi.onStatus((event) => {
       const target = pendingModelMood || "happy";
       setBaseMood(target);
       const hold = target === "happy" ? 1400 : 2800;
-      setTimeout(() => {
+      clearMoodResetTimer();
+      moodResetTimer = setTimeout(() => {
         if (baseMood === target) setBaseMood("idle");
+        moodResetTimer = null;
       }, hold);
     }
     pendingModelMood = null;
@@ -1170,8 +1245,11 @@ window.chatApi.onMood?.((payload) => {
 const agentBadge = document.getElementById("agentBadge");
 const providerBadge = document.getElementById("providerBadge");
 
-function renderSettings(payload) {
-  const cwd = (payload?.chatCwd || "").trim();
+let queueLength = 0;
+let lastSettingsPayload = null;
+
+function refreshComposerMeta() {
+  const payload = lastSettingsPayload;
   const availability = payload?.providerAvailability;
   const activeProvider = availability?.activeProvider || payload?.chatProvider;
   const providerInfo = activeProvider ? availability?.providers?.[activeProvider] : null;
@@ -1180,21 +1258,36 @@ function renderSettings(payload) {
     ? providerInfo?.shortLabel ||
       (activeProvider === "codex" ? "Codex" : activeProvider ? "Claude" : "No CLI")
     : "No CLI";
+  const cwd = (payload?.chatCwd || "").trim();
+  const queueSuffix = queueLength > 0 ? ` · ${queueLength} queued` : "";
+  const runningSuffix = chatRunning ? " · sends when ready" : "";
   if (cwd) {
     const truncated = cwd.length > 42 ? "…" + cwd.slice(-41) : cwd;
-    cwdLine.textContent = `${provider} · cwd · ${truncated}`;
+    cwdLine.textContent = `${provider} · cwd · ${truncated}${queueSuffix}${runningSuffix}`;
     cwdLine.title = cwd;
   } else {
-    cwdLine.textContent = `${provider} · cwd · $HOME  ·  right-click tray to set`;
+    cwdLine.textContent = `${provider} · cwd · $HOME  ·  right-click tray to set${queueSuffix}${runningSuffix}`;
     cwdLine.title = "";
   }
   if (providerBadge) providerBadge.textContent = provider;
   if (agentBadge) agentBadge.hidden = !payload?.agentMode;
-  sendBtn.disabled = chatRunning || !backendReady;
+  sendBtn.disabled = !backendReady;
   composerInput.placeholder = backendReady
-    ? "Talk to her…  (Shift+Enter for newline)"
+    ? chatRunning
+      ? "Message queues while she responds…  (Shift+Enter for newline)"
+      : "Talk to her…  (Shift+Enter for newline)"
     : "Install Claude Code or Codex CLI first…";
 }
+
+function renderSettings(payload) {
+  lastSettingsPayload = payload;
+  refreshComposerMeta();
+}
+
+window.chatApi.onQueue?.(({ length }) => {
+  queueLength = Number(length) || 0;
+  refreshComposerMeta();
+});
 
 window.petApi?.onSettings?.(renderSettings);
 window.petApi?.getSettings?.().then(renderSettings);

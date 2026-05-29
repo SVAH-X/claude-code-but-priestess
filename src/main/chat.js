@@ -27,11 +27,17 @@ const history = []; // { id, role: 'user' | 'assistant' | 'system' | 'tool', tex
 let currentProcess = null;
 let pendingAssistantId = null;
 let pendingAssistantText = "";
+let quitPending = false;
+let cancelRequested = false;
+let turnLaunching = false;
+const outboundQueue = [];
 let sessionIds = { [PROVIDERS.CLAUDE]: null, [PROVIDERS.CODEX]: null };
 let turnStartedAt = 0;
 let currentProvider = null;
 let longMemoryDormant = true;
 let providerAvailability = null;
+let consecutiveQuestionReplies = 0;
+const BOUNDARY_QUIT_AFTER = 4;
 
 // Expression tag parsing — she begins each reply with a hidden [[mood:X]]
 // marker (see persona.js) that drives her on-screen face. We strip it out of
@@ -284,9 +290,71 @@ function getHistory() {
   return history.slice();
 }
 
+function getPersistableHistory() {
+  return history.filter((entry) => !entry?.ephemeral && !entry?.queued);
+}
+
+function isQuestionOnlyReply(text) {
+  const body = String(text || "").trim();
+  return body === "?" || body === "？";
+}
+
+function markEphemeralQuestionTurn(assistantEntry) {
+  if (!assistantEntry) return;
+  assistantEntry.ephemeral = true;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry && entry.role === "user") {
+      entry.ephemeral = true;
+      break;
+    }
+  }
+}
+
+function noteConsecutiveQuestionReply(assistantEntry) {
+  if (!assistantEntry?.text) return;
+  if (!isQuestionOnlyReply(assistantEntry.text)) {
+    consecutiveQuestionReplies = 0;
+    return;
+  }
+  consecutiveQuestionReplies += 1;
+  markEphemeralQuestionTurn(assistantEntry);
+  if (consecutiveQuestionReplies >= BOUNDARY_QUIT_AFTER) {
+    quitPending = true;
+    clearOutboundQueue();
+    notify({ kind: "quit", reason: "boundary" });
+  }
+}
+
 function subscribe(fn) {
   subscribers.add(fn);
   return () => subscribers.delete(fn);
+}
+
+function emitQueueState() {
+  notify({ kind: "queue", length: outboundQueue.length });
+}
+
+function finishTurn(extra = {}) {
+  if (!quitPending && outboundQueue.length > 0) {
+    emitStatus("running", { chained: true, pending: true });
+    setImmediate(() => drainOutboundQueue());
+    return;
+  }
+  emitStatus("idle", extra);
+}
+
+function drainOutboundQueue() {
+  if (quitPending || currentProcess || outboundQueue.length === 0) return;
+  const next = outboundQueue.shift();
+  emitQueueState();
+  dispatchSend(next, { userAlreadyShown: true, chained: true });
+}
+
+function clearOutboundQueue() {
+  if (!outboundQueue.length) return;
+  outboundQueue.length = 0;
+  emitQueueState();
 }
 
 function emitHistory() {
@@ -421,18 +489,39 @@ function pushTool(name, summary) {
   emitHistory();
 }
 
-function pushUser(text, provider = activeProvider()) {
+function pushUser(text, provider = activeProvider(), { ephemeral = false, queued = false } = {}) {
   const entry = {
     id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "user",
     text,
     provider,
-    ts: Date.now()
+    ts: Date.now(),
+    ephemeral: Boolean(ephemeral),
+    queued: Boolean(queued)
   };
   history.push(entry);
-  archiveConversationEntry(entry);
-  updateConversationSummary();
+  if (!entry.ephemeral && !entry.queued) {
+    archiveConversationEntry(entry);
+    updateConversationSummary();
+  }
   emitHistory();
+  return entry;
+}
+
+function activateQueuedUser(text) {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry?.role !== "user" || entry.text !== text || !entry.queued) continue;
+    entry.queued = false;
+    if (!entry.ephemeral) {
+      archiveConversationEntry(entry);
+      if (outboundQueue.length === 0) {
+        updateConversationSummary();
+      }
+    }
+    emitHistory();
+    return;
+  }
 }
 
 function formatSummaryTimestamp(ts) {
@@ -521,7 +610,7 @@ function readConversationArchive() {
 
 function backfillArchiveFromHistoryIfEmpty() {
   const conversational = history.filter(
-    (entry) => entry && entry.text && ["user", "assistant"].includes(entry.role)
+    (entry) => entry && !entry.ephemeral && entry.text && ["user", "assistant"].includes(entry.role)
   );
   if (!conversational.length) return;
   try {
@@ -543,7 +632,7 @@ function backfillArchiveFromHistoryIfEmpty() {
 function buildSharedTranscript() {
   const lines = [];
   for (const entry of history) {
-    if (!entry || !entry.text || !["user", "assistant"].includes(entry.role)) continue;
+    if (!entry || entry.ephemeral || !entry.text || !["user", "assistant"].includes(entry.role)) continue;
     const label = entry.role === "user" ? "博士" : "普瑞赛斯";
     lines.push(`${label}: ${String(entry.text).trim()}`);
   }
@@ -604,7 +693,8 @@ function beginAssistant() {
     id: pendingAssistantId,
     role: "assistant",
     text: "",
-    ts: Date.now()
+    ts: Date.now(),
+    ephemeral: false
   });
   emitHistory();
 }
@@ -639,7 +729,10 @@ function finalizeAssistant(finalText) {
   if (entry && finalText && finalText !== entry.text) {
     entry.text = finalText;
   }
-  if (entry && entry.text) {
+  if (entry?.text) {
+    noteConsecutiveQuestionReply(entry);
+  }
+  if (entry && entry.text && !entry.ephemeral) {
     archiveConversationEntry({
       role: "assistant",
       provider: currentProvider || activeProvider(),
@@ -650,7 +743,9 @@ function finalizeAssistant(finalText) {
   pendingAssistantId = null;
   pendingAssistantText = "";
   emitHistory();
-  updateConversationSummary();
+  if (!entry?.ephemeral && outboundQueue.length === 0) {
+    updateConversationSummary();
+  }
 }
 
 function resolveCwd() {
@@ -1040,7 +1135,6 @@ function buildProviderInvocation(provider, trimmed, cwd, agentMode, screenshotPa
 function send(text) {
   const trimmed = String(text ?? "").trim();
   if (!trimmed) return { ok: false, reason: "empty" };
-  if (currentProcess) return { ok: false, reason: "busy" };
 
   refreshProviderAvailability();
   const provider = activeProvider();
@@ -1053,17 +1147,62 @@ function send(text) {
     return { ok: false, reason: "missing-cli" };
   }
 
-  const sharedTranscript = buildSharedTranscript();
-  currentProvider = provider;
-  pushUser(trimmed, provider);
+  if (currentProcess || turnLaunching) {
+    outboundQueue.push(trimmed);
+    pushUser(trimmed, provider, { queued: true });
+    emitQueueState();
+    return { ok: true, queued: true, queueLength: outboundQueue.length };
+  }
+
+  return dispatchSend(trimmed);
+}
+
+function dispatchSend(trimmed, { userAlreadyShown = false, chained = false } = {}) {
+  if (currentProcess || turnLaunching) return { ok: false, reason: "busy" };
+
+  refreshProviderAvailability();
+  const provider = activeProvider();
+  const providerInfo = ensureProviderAvailability()[provider];
+  if (!providerInfo?.available) {
+    return { ok: false, reason: "missing-cli" };
+  }
+
+  if (userAlreadyShown) {
+    activateQueuedUser(trimmed);
+  } else {
+    pushUser(trimmed, provider);
+  }
   beginAssistant();
   turnStartedAt = Date.now();
-  emitStatus("running", { provider });
+  currentProvider = provider;
+  emitStatus("running", { provider, chained, pending: chained });
 
+  const sharedTranscript = buildSharedTranscript();
   const agentMode = Boolean(settings.get("agentMode"));
+
+  turnLaunching = true;
+
+  setImmediate(() => {
+    turnLaunching = false;
+    if (currentProcess) return;
+    launchProviderTurn({
+      trimmed,
+      provider,
+      cwd: resolveCwd(),
+      agentMode,
+      sharedTranscript,
+      chained
+    });
+  });
+
+  return { ok: true };
+}
+
+function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscript, chained }) {
+  if (currentProcess) return;
+
   const autoScreenshot = agentMode && settings.get("autoScreenshot") !== false;
-  const screenshotPath = autoScreenshot ? takeScreenshotSync() : null;
-  const cwd = resolveCwd();
+  const screenshotPath = autoScreenshot && !chained ? takeScreenshotSync() : null;
   const invocation = buildProviderInvocation(
     provider,
     trimmed,
@@ -1087,9 +1226,9 @@ function send(text) {
       `Failed to launch \`${providerLabel(provider)}\`: ${error.message}. Is the CLI installed and on PATH?`
     );
     finalizeAssistant("");
-    emitStatus("idle", { error: error.message });
     currentProvider = null;
-    return { ok: false, reason: "spawn-failed" };
+    finishTurn({ error: error.message });
+    return;
   }
 
   currentProcess = proc;
@@ -1118,14 +1257,18 @@ function send(text) {
   });
 
   proc.on("error", (error) => {
+    if (currentProcess !== proc) return;
     pushSystem(`\`${providerLabel(provider)}\` process error: ${error.message}`);
     finalizeAssistant("");
     currentProcess = null;
     currentProvider = null;
-    emitStatus("idle", { error: error.message });
+    const cancelled = cancelRequested;
+    cancelRequested = false;
+    finishTurn({ error: error.message, cancelled: cancelled || undefined });
   });
 
   proc.on("close", (code) => {
+    if (currentProcess !== proc) return;
     if (buffer.trim()) {
       try {
         handleProviderStreamEvent(provider, JSON.parse(buffer.trim()));
@@ -1143,33 +1286,43 @@ function send(text) {
     if (pendingAssistantId) finalizeAssistant("");
     currentProcess = null;
     currentProvider = null;
-    emitStatus("idle");
+    const cancelled = cancelRequested;
+    cancelRequested = false;
+    finishTurn(cancelled ? { cancelled: true } : {});
   });
-
-  return { ok: true };
 }
 
 function cancel() {
-  if (currentProcess) {
-    try {
-      currentProcess.kill("SIGTERM");
-    } catch (error) {
-      console.warn("chat: failed to kill subprocess", error);
-    }
-    currentProcess = null;
-    if (pendingAssistantId) finalizeAssistant("");
-    currentProvider = null;
-    emitStatus("idle", { cancelled: true });
+  if (!currentProcess) return;
+  cancelRequested = true;
+  try {
+    currentProcess.kill("SIGTERM");
+  } catch (error) {
+    console.warn("chat: failed to kill subprocess", error);
   }
 }
 
 function clear() {
   cancel();
+  clearOutboundQueue();
   history.length = 0;
   sessionIds = { [PROVIDERS.CLAUDE]: null, [PROVIDERS.CODEX]: null };
   currentProvider = null;
   longMemoryDormant = true;
+  consecutiveQuestionReplies = 0;
   updateConversationSummary();
+  emitHistory();
+}
+
+function wipeSession() {
+  cancel();
+  clearOutboundQueue();
+  quitPending = false;
+  history.length = 0;
+  sessionIds = { [PROVIDERS.CLAUDE]: null, [PROVIDERS.CODEX]: null };
+  currentProvider = null;
+  longMemoryDormant = true;
+  consecutiveQuestionReplies = 0;
   emitHistory();
 }
 
@@ -1228,13 +1381,16 @@ module.exports = {
   send,
   cancel,
   clear,
+  wipeSession,
   subscribe,
   refreshProviderAvailability,
   getProviderAvailability,
   getHistory,
+  getPersistableHistory,
   hydrate,
   getSessionId,
   getSessionIds,
   isLongMemoryDormant,
-  getLastTurnDurationMs
+  getLastTurnDurationMs,
+  getOutboundQueueLength: () => outboundQueue.length
 };

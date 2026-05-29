@@ -466,7 +466,7 @@ function saveConversation() {
       JSON.stringify(
         {
           sessionIds: chat.getSessionIds(),
-          history: chat.getHistory(),
+          history: chat.getPersistableHistory(),
           longMemoryDormant: chat.isLongMemoryDormant()
         },
         null,
@@ -476,6 +476,32 @@ function saveConversation() {
     );
   } catch (error) {
     console.warn("main: failed to save conversation", error);
+  }
+}
+
+function wipePersistedConversation() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  chat.wipeSession();
+  if (!conversationFile) return;
+  try {
+    fs.writeFileSync(
+      conversationFile,
+      JSON.stringify(
+        {
+          sessionIds: chat.getSessionIds(),
+          history: [],
+          longMemoryDormant: true
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    console.warn("main: failed to wipe conversation on boundary quit", error);
   }
 }
 
@@ -565,6 +591,11 @@ app.whenReady().then(() => {
       });
     } else if (event.kind === "mood") {
       popover.webContents.send("chat:mood", { mood: event.mood });
+    } else if (event.kind === "quit") {
+      wipePersistedConversation();
+      setTimeout(() => app.exit(0), 1500);
+    } else if (event.kind === "queue") {
+      popover.webContents.send("chat:queue", { length: event.length });
     }
   });
 

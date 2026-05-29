@@ -329,6 +329,53 @@ button.ghost:disabled {
   align-self: flex-end;
 }
 
+.msg.user.queued {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.msg.assistant.thinking {
+  min-height: 2rem;
+  display: flex;
+  align-items: center;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  height: 1em;
+  color: var(--text-on-her);
+  opacity: 0.85;
+}
+
+.thinking-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: thinking-bounce 1.1s ease-in-out infinite;
+}
+
+.thinking-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.thinking-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes thinking-bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  40% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
 .msg.assistant {
   background: var(--her-soft);
   border: 1px solid var(--her-edge);
