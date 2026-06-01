@@ -494,6 +494,15 @@ function showPopover() {
 function collapsePopoverToDesktopPet() {
   clearTimeout(desktopPetTimer);
   desktopPetTimer = null;
+  if (!settings.get("desktopPet")) {
+    hideDesktopPet();
+    clearWindowFade();
+    if (popover && !popover.isDestroyed()) {
+      popover.hide();
+      popover.setOpacity(1);
+    }
+    return;
+  }
   if (!popover || popover.isDestroyed() || !popover.isVisible()) {
     createDesktopPet().showInactive();
     return;
