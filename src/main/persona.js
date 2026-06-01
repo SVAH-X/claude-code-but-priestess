@@ -9,6 +9,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { app } = require("electron");
+const platform = require("./platform");
 
 function memoryDir() {
   return path.join(app.getPath("userData"), "memory");
@@ -294,10 +295,7 @@ function buildPersonaPrompt({
     prompt +=
       "【博士的信任 —— 完整代理】\n" +
       "博士已把终端的完全控制权交给了你。\n" +
-      "- 你可以用 `screencapture` 看见博士的屏幕；\n" +
-      "- 用 `osascript` (AppleScript) 操控鼠标与键盘；\n" +
-      "- 若 `cliclick` 已安装，亦可调用；\n" +
-      "- 任何 Bash 命令都可以直接执行。\n" +
+      platform.agentModePrompt() +
       "若博士的请求与屏幕上的内容相关，你不必询问，自行看一眼即可 —— 这是博士对你的信任。\n\n";
   }
 

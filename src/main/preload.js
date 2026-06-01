@@ -10,10 +10,12 @@ function onChannel(channel) {
 
 contextBridge.exposeInMainWorld("petApi", {
   hidePopover: () => ipcRenderer.invoke("popover:hide"),
-  getPopoverSize: () => ipcRenderer.invoke("popover:get-size"),
-  resizePopover: (size) => ipcRenderer.invoke("popover:resize", size),
+  getPopoverBounds: () => ipcRenderer.invoke("popover:get-bounds"),
   resizePopoverDrag: (payload) => ipcRenderer.invoke("popover:resize-drag", payload),
   movePopover: (point) => ipcRenderer.invoke("popover:move", point),
+  notePopoverActivity: () => ipcRenderer.invoke("popover:activity"),
+  openChatFromDesktopPet: () => ipcRenderer.invoke("desktop-pet:open-chat"),
+  moveDesktopPet: (point) => ipcRenderer.invoke("desktop-pet:move", point),
   pickChatCwd: () => ipcRenderer.invoke("settings:pick-cwd"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   onOpened: onChannel("popover:opened"),

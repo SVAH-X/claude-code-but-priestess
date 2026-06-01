@@ -16,6 +16,7 @@ const {
 const settings = require("./settings");
 const chat = require("./chat");
 const persona = require("./persona");
+const platform = require("./platform");
 
 let conversationFile = null;
 let saveTimer = null;
@@ -29,10 +30,20 @@ const POPOVER_MIN_WIDTH = 320;
 const POPOVER_MIN_HEIGHT = 460;
 const POPOVER_MAX_WIDTH = 900;
 const POPOVER_MAX_HEIGHT = 1000;
+const DESKTOP_PET_IDLE_MS = Number(process.env.PRTS_DESKTOP_PET_IDLE_MS) || 60 * 1000;
+const DESKTOP_PET_SIZES = Object.freeze({
+  small: { width: 120, height: 144 },
+  medium: { width: 150, height: 180 },
+  large: { width: 180, height: 216 }
+});
 
 let tray;
 let popover;
 let popoverSizeSaveTimer = null;
+let desktopPet;
+let desktopPetTimer = null;
+let desktopPetPositionSaveTimer = null;
+let windowFadeTimer = null;
 
 // ============================================================
 //  Tray icon — prefer the dedicated centered icon.png, fallback
@@ -150,24 +161,6 @@ function scheduleSavePopoverSize() {
   }, 350);
 }
 
-function resizePopoverTo(size = {}) {
-  if (!popover || popover.isDestroyed()) return null;
-  const bounds = popover.getBounds();
-  const display = screen.getDisplayMatching(bounds);
-  const work = display.workArea;
-  const next = clampPopoverSize(size, display);
-  const x = clampNumber(bounds.x, work.x + 4, work.x + work.width - next.width - 4);
-  const y = clampNumber(bounds.y, work.y + 4, work.y + work.height - next.height - 4);
-  popover.setBounds({ x, y, width: next.width, height: next.height }, false);
-  scheduleSavePopoverSize();
-  return next;
-}
-
-// Edge/corner drag resize. The renderer captures the window bounds at pointer
-// down (start) plus the live screen-space delta (dx/dy); the edge string tells
-// us which sides move. We keep the opposite edge anchored even when the size
-// clamps to its min/max, so the window never drifts. The top edge is never a
-// mover here — the popover hangs from the menu bar.
 function resizePopoverDrag({ edge = "se", start = {}, dx = 0, dy = 0 } = {}) {
   if (!popover || popover.isDestroyed()) return null;
   const sx = Number(start.x);
@@ -181,7 +174,6 @@ function resizePopoverDrag({ edge = "se", start = {}, dx = 0, dy = 0 } = {}) {
   const e = String(edge);
   const right = sx + sw;
   const bottom = sy + sh;
-
   const maxWidth = Math.max(POPOVER_MIN_WIDTH, Math.min(POPOVER_MAX_WIDTH, work.width - 8));
   const maxHeight = Math.max(POPOVER_MIN_HEIGHT, Math.min(POPOVER_MAX_HEIGHT, work.height - 8));
 
@@ -194,7 +186,6 @@ function resizePopoverDrag({ edge = "se", start = {}, dx = 0, dy = 0 } = {}) {
   let y = e.includes("n") ? bottom - height : sy;
   x = clampNumber(x, work.x + 4, work.x + work.width - width - 4);
   y = clampNumber(y, work.y + 4, work.y + work.height - height - 4);
-
   popover.setBounds({ x, y, width, height }, false);
   scheduleSavePopoverSize();
   return { x, y, width, height };
@@ -225,26 +216,29 @@ function createPopover() {
   popover = new BrowserWindow({
     width: size.width,
     height: size.height,
-    minWidth: POPOVER_MIN_WIDTH,
-    minHeight: POPOVER_MIN_HEIGHT,
     show: false,
     frame: false,
-    resizable: true,
+    // Resize only through the renderer's explicit edge handles. Native resize
+    // on a frameless Windows window can treat a long press near the border as
+    // an OS resize gesture and fight the custom drag implementation.
+    resizable: false,
     movable: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
     hasShadow: true,
-    transparent: true,
-    backgroundColor: "#00000000",
-    // "under-window" is one of the most translucent NSVisualEffectMaterials —
-    // it keeps the macOS liquid-glass blur but lets much more of the desktop
-    // read through than the denser "popover" material. Pair it with the low
-    // CSS surface tints in styles.css to keep the panel see-through.
-    vibrancy: "under-window",
-    visualEffectState: "active",
-    roundedCorners: true,
+    transparent: process.platform === "darwin",
+    backgroundColor: process.platform === "darwin" ? "#00000000" : "#11151a",
+    ...(process.platform === "darwin"
+      ? {
+          // Keep the macOS liquid-glass material without passing unsupported
+          // visual effect options to Windows.
+          vibrancy: "under-window",
+          visualEffectState: "active",
+          roundedCorners: true
+        }
+      : {}),
     alwaysOnTop: false,
     title: "PRTS",
     webPreferences: {
@@ -275,25 +269,244 @@ function positionPopover() {
   const display = screen.getDisplayNearestPoint({ x: trayBounds.x, y: trayBounds.y });
   const work = display.workArea;
   const winBounds = popover.getBounds();
-  // Center the popover under the tray icon, with a small downward gap.
+  // Center the popover beside the tray icon. Windows commonly puts the tray
+  // at the bottom of the screen, while macOS puts it at the top.
   let x = Math.round(trayBounds.x + trayBounds.width / 2 - winBounds.width / 2);
-  let y = Math.round(trayBounds.y + trayBounds.height + 6);
+  const below = Math.round(trayBounds.y + trayBounds.height + 6);
+  const above = Math.round(trayBounds.y - winBounds.height - 6);
+  let y = below + winBounds.height <= work.y + work.height ? below : above;
   // Clamp inside the active display so we never spill off-screen.
   x = Math.max(work.x + 4, Math.min(work.x + work.width - winBounds.width - 4, x));
-  y = Math.max(work.y + 4, y);
+  y = Math.max(work.y + 4, Math.min(work.y + work.height - winBounds.height - 4, y));
   popover.setPosition(x, y, false);
 }
 
 function togglePopover() {
   if (!popover) createPopover();
   if (popover.isVisible()) {
-    popover.hide();
+    collapsePopoverToDesktopPet();
     return;
   }
+  hideDesktopPet();
   positionPopover();
+  showPopover();
+}
+
+// ============================================================
+//  Desktop pet — appears after the chat stays hidden for a while.
+// ============================================================
+function defaultDesktopPetPosition(display = screen.getPrimaryDisplay()) {
+  const work = display.workArea;
+  const size = desktopPetSize();
+  return {
+    x: work.x + work.width - size.width - 24,
+    y: work.y + work.height - size.height - 24
+  };
+}
+
+function desktopPetSize() {
+  return DESKTOP_PET_SIZES[settings.get("desktopPetSize")] || DESKTOP_PET_SIZES.medium;
+}
+
+function clampDesktopPetPosition(point = {}) {
+  const target = {
+    x: Number(point.x),
+    y: Number(point.y)
+  };
+  const valid = Number.isFinite(target.x) && Number.isFinite(target.y);
+  const display = valid
+    ? screen.getDisplayNearestPoint({ x: Math.round(target.x), y: Math.round(target.y) })
+    : screen.getPrimaryDisplay();
+  const work = display.workArea;
+  const fallback = defaultDesktopPetPosition(display);
+  const size = desktopPetSize();
+  return {
+    x: valid ? clampNumber(target.x, work.x, work.x + work.width - size.width) : fallback.x,
+    y: valid ? clampNumber(target.y, work.y, work.y + work.height - size.height) : fallback.y
+  };
+}
+
+function initialDesktopPetPosition() {
+  const saved = settings.get("desktopPetPosition");
+  return clampDesktopPetPosition(saved && typeof saved === "object" ? saved : {});
+}
+
+function createDesktopPet() {
+  if (desktopPet && !desktopPet.isDestroyed()) return desktopPet;
+  const position = initialDesktopPetPosition();
+  const size = desktopPetSize();
+  desktopPet = new BrowserWindow({
+    ...position,
+    ...size,
+    show: false,
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    alwaysOnTop: true,
+    focusable: true,
+    title: "PRTS Desktop Pet",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  desktopPet.loadFile(path.join(__dirname, "..", "renderer", "desktop-pet.html"));
+  desktopPet.on("closed", () => {
+    desktopPet = null;
+  });
+  return desktopPet;
+}
+
+function hideDesktopPet() {
+  clearTimeout(desktopPetTimer);
+  desktopPetTimer = null;
+  desktopPet?.hide();
+}
+
+function clearWindowFade() {
+  clearInterval(windowFadeTimer);
+  windowFadeTimer = null;
+}
+
+function fadeWindow(window, from, to, durationMs, onDone) {
+  clearWindowFade();
+  const startedAt = Date.now();
+  window.setOpacity(from);
+  windowFadeTimer = setInterval(() => {
+    if (!window || window.isDestroyed()) {
+      clearWindowFade();
+      return;
+    }
+    const progress = Math.min(1, (Date.now() - startedAt) / durationMs);
+    window.setOpacity(from + (to - from) * progress);
+    if (progress < 1) return;
+    clearWindowFade();
+    onDone?.();
+  }, 16);
+}
+
+function desktopPetPositionFromPopover() {
+  if (!popover || popover.isDestroyed()) return initialDesktopPetPosition();
+  const bounds = popover.getBounds();
+  const size = desktopPetSize();
+  const stageHeight = Math.min(460, Math.max(180, Math.round(bounds.height * 0.34)));
+  return clampDesktopPetPosition({
+    x: bounds.x + Math.round((bounds.width - size.width) / 2),
+    y: bounds.y + 32 + stageHeight - size.height
+  });
+}
+
+function showDesktopPet() {
+  if (!settings.get("desktopPet")) return;
+  if (popover?.isVisible()) {
+    collapsePopoverToDesktopPet();
+    return;
+  }
+  createDesktopPet().showInactive();
+}
+
+function scheduleDesktopPet() {
+  clearTimeout(desktopPetTimer);
+  desktopPetTimer = null;
+  if (!settings.get("desktopPet")) return;
+  desktopPetTimer = setTimeout(showDesktopPet, DESKTOP_PET_IDLE_MS);
+}
+
+function moveDesktopPetTo(point = {}) {
+  const position = clampDesktopPetPosition(point);
+  createDesktopPet().setBounds({ ...position, ...desktopPetSize() }, false);
+  clearTimeout(desktopPetPositionSaveTimer);
+  desktopPetPositionSaveTimer = setTimeout(() => {
+    settings.set({ desktopPetPosition: position });
+  }, 350);
+  return position;
+}
+
+function setDesktopPetSize(sizeKey) {
+  const nextKey = DESKTOP_PET_SIZES[sizeKey] ? sizeKey : "medium";
+  settings.set({ desktopPetSize: nextKey });
+  if (!desktopPet || desktopPet.isDestroyed()) return;
+  const position = clampDesktopPetPosition(desktopPet.getBounds());
+  desktopPet.setBounds({ ...position, ...desktopPetSize() }, false);
+  settings.set({ desktopPetPosition: position });
+}
+
+function openChatFromDesktopPet() {
+  if (!popover) createPopover();
+  const restoredSize = initialPopoverSize();
+  popover.setSize(restoredSize.width, restoredSize.height, false);
+  const petBounds = desktopPet?.getBounds();
+  hideDesktopPet();
+  try {
+    if (petBounds) {
+      const bounds = popover.getBounds();
+      const display = screen.getDisplayMatching(petBounds);
+      const work = display.workArea;
+      const x = clampNumber(
+        petBounds.x + Math.round((petBounds.width - bounds.width) / 2),
+        work.x + 4,
+        work.x + work.width - bounds.width - 4
+      );
+      const y = clampNumber(
+        petBounds.y + petBounds.height - Math.min(460, Math.max(180, Math.round(bounds.height * 0.34))) - 32,
+        work.y + 4,
+        work.y + work.height - bounds.height - 4
+      );
+      popover.setPosition(x, y, false);
+    } else {
+      positionPopover();
+    }
+  } catch (error) {
+    console.warn("main: failed to anchor popover to desktop pet", error);
+  }
+  showPopover();
+  return { ok: true };
+}
+
+function showPopover() {
+  clearWindowFade();
+  const bounds = popover.getBounds();
+  const display = screen.getDisplayMatching(bounds);
+  const work = display.workArea;
+  const size = clampPopoverSize(bounds, display);
+  popover.setBounds({
+    x: clampNumber(bounds.x, work.x + 4, work.x + work.width - size.width - 4),
+    y: clampNumber(bounds.y, work.y + 4, work.y + work.height - size.height - 4),
+    ...size
+  }, false);
+  const fadeIn = process.platform !== "win32";
+  popover.setOpacity(fadeIn ? 0 : 1);
   popover.show();
   popover.focus();
   popover.webContents.send("popover:opened");
+  scheduleDesktopPet();
+  if (fadeIn) fadeWindow(popover, 0, 1, 180);
+}
+
+function collapsePopoverToDesktopPet() {
+  clearTimeout(desktopPetTimer);
+  desktopPetTimer = null;
+  if (!popover || popover.isDestroyed() || !popover.isVisible()) {
+    createDesktopPet().showInactive();
+    return;
+  }
+  const position = desktopPetPositionFromPopover();
+  const pet = createDesktopPet();
+  pet.setPosition(position.x, position.y, false);
+  settings.set({ desktopPetPosition: position });
+  fadeWindow(popover, popover.getOpacity(), 0, 220, () => {
+    popover.hide();
+    popover.setOpacity(1);
+    pet.showInactive();
+  });
 }
 
 // ============================================================
@@ -301,17 +514,12 @@ function togglePopover() {
 // ============================================================
 async function toggleAgentMode(nextValue) {
   if (nextValue) {
+    const warning = platform.agentModeWarning();
     const result = await dialog.showMessageBox({
       type: "warning",
       title: "Enable agent mode?",
-      message:
-        "Agent mode lets her run any command on your Mac without asking permission for each tool.",
-      detail:
-        "She will be able to take screenshots, click and type with AppleScript, read and edit files, " +
-        "and run any shell command. macOS will still gate screenshots behind Screen Recording " +
-        "permission and mouse/keyboard control behind Accessibility permission — grant those to PRTS " +
-        "(or Electron in dev) in System Settings → Privacy & Security if you want her to use them.\n\n" +
-        "Only enable this if you trust the conversation. You can turn it off any time from the tray menu.",
+      message: warning.message,
+      detail: warning.detail,
       buttons: ["Cancel", "Enable agent mode"],
       defaultId: 0,
       cancelId: 0
@@ -395,6 +603,34 @@ function buildContextMenu() {
       click: (item) => settings.set({ autoScreenshot: item.checked })
     },
     {
+      label: "Desktop pet while idle",
+      type: "checkbox",
+      checked: all.desktopPet !== false,
+      click: (item) => {
+        settings.set({ desktopPet: item.checked });
+        if (item.checked) {
+          scheduleDesktopPet();
+        } else {
+          hideDesktopPet();
+        }
+      }
+    },
+    {
+      label: "Show desktop pet now",
+      enabled: all.desktopPet !== false,
+      click: () => showDesktopPet()
+    },
+    {
+      label: "Desktop pet size",
+      enabled: all.desktopPet !== false,
+      submenu: Object.keys(DESKTOP_PET_SIZES).map((sizeKey) => ({
+        label: sizeKey[0].toUpperCase() + sizeKey.slice(1),
+        type: "radio",
+        checked: (all.desktopPetSize || "medium") === sizeKey,
+        click: () => setDesktopPetSize(sizeKey)
+      }))
+    },
+    {
       label: "Set chat directory…",
       click: async () => {
         const current = (all.chatCwd || "").trim();
@@ -421,7 +657,7 @@ function buildContextMenu() {
     { type: "separator" },
     {
       label: "Quit",
-      accelerator: "Cmd+Q",
+      accelerator: "CmdOrCtrl+Q",
       click: () => app.quit()
     }
   ]);
@@ -538,6 +774,7 @@ app.whenReady().then(() => {
   }
 
   settings.init();
+  chat.refreshProviderAvailability();
   conversationFile = path.join(app.getPath("userData"), "conversation.json");
   persona.ensureMemoryFile();
   persona.ensureConversationArchiveFile();
@@ -572,6 +809,11 @@ app.whenReady().then(() => {
       scheduleSaveConversation();
     } else if (event.kind === "status") {
       maybeNotifyDoneNotification(event);
+      if (event.status === "running") {
+        hideDesktopPet();
+      } else if (event.status === "idle") {
+        scheduleDesktopPet();
+      }
     }
     if (!popover || popover.isDestroyed()) return;
     if (event.kind === "history") {
@@ -600,6 +842,7 @@ app.whenReady().then(() => {
   });
 
   createPopover();
+  scheduleDesktopPet();
 });
 
 app.on("window-all-closed", () => {
@@ -610,19 +853,25 @@ app.on("window-all-closed", () => {
 //  IPC
 // ============================================================
 ipcMain.handle("popover:hide", () => {
-  popover?.hide();
+  collapsePopoverToDesktopPet();
 });
 
-ipcMain.handle("popover:get-size", () => {
-  if (!popover || popover.isDestroyed()) return initialPopoverSize();
-  return clampPopoverSize(popover.getBounds(), screen.getDisplayMatching(popover.getBounds()));
+ipcMain.handle("popover:activity", () => {
+  scheduleDesktopPet();
 });
 
-ipcMain.handle("popover:resize", (_, size) => resizePopoverTo(size));
+ipcMain.handle("desktop-pet:open-chat", () => openChatFromDesktopPet());
 
-ipcMain.handle("popover:resize-drag", (_, payload) => resizePopoverDrag(payload));
+ipcMain.handle("desktop-pet:move", (_, point) => moveDesktopPetTo(point));
 
 ipcMain.handle("popover:move", (_, point) => movePopoverTo(point));
+
+ipcMain.handle("popover:get-bounds", () => {
+  if (!popover || popover.isDestroyed()) return null;
+  return popover.getBounds();
+});
+
+ipcMain.handle("popover:resize-drag", (_, payload) => resizePopoverDrag(payload));
 
 ipcMain.handle("chat:send", (_, text) => chat.send(text));
 ipcMain.handle("chat:cancel", () => {

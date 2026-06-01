@@ -636,9 +636,7 @@ button.primary:disabled {
   letter-spacing: 0.02em;
 }
 
-/* Manual edge/corner resize handles. Transparent frameless windows can't be
-   resized from their native edges, so these invisible strips capture the drag.
-   Top edge is intentionally omitted — the popover hangs from the menu bar. */
+/* Manual edge/corner resize handles. */
 .resize-edge {
   position: fixed;
   z-index: 30;
@@ -687,8 +685,4 @@ button.primary:disabled {
   background:
     linear-gradient(135deg, transparent 58%, var(--border-strong) 58%, var(--border-strong) 64%, transparent 64%),
     linear-gradient(135deg, transparent 72%, var(--border-strong) 72%, var(--border-strong) 78%, transparent 78%);
-}
-
-.resize-grip:hover {
-  opacity: 1;
 }

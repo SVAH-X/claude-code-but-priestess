@@ -1,19 +1,22 @@
 {
   "name": "claude-code-but-priestess",
   "version": "0.5.1",
-  "description": "A macOS menu bar companion that lets you chat with 普瑞赛斯, backed by local Claude Code or Codex CLI usage.",
+  "description": "A cross-platform tray companion that lets you chat with 普瑞赛斯, backed by local Claude Code or Codex CLI usage.",
   "main": "src/main/main.js",
   "private": true,
   "scripts": {
     "dev": "node scripts/run-electron.js",
     "start": "node scripts/run-electron.js",
-    "pack": "electron-builder --dir --mac",
-    "dist": "electron-builder --mac",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
     "lint": "node scripts/check-assets.js"
   },
   "keywords": [
     "menubar",
     "electron",
+    "windows",
     "macos",
     "claude-code",
     "codex"
@@ -45,6 +48,17 @@
       "extendInfo": {
         "LSUIElement": true
       }
+    },
+    "win": {
+      "icon": "assets/character/icon.png",
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }

@@ -6,17 +6,16 @@ Language: **English** | [简体中文](README.zh-CN.md)
   <img src="assets/character/睁眼.png" alt="Priestess (普瑞赛斯)" width="220">
 </p>
 
-A macOS menu bar companion. The character (普瑞赛斯, from Arknights) lives in
-your menu bar as a small head icon. Click her and a popover slides down with
+A macOS menu bar and Windows system tray companion. The character (普瑞赛斯, from Arknights) lives in
+your tray area as a small head icon. Click her and a popover opens with
 the character on top and a chat box below — you talk to her, she answers
 through your selected local coding CLI.
 
-No floating window. No movement. No clutter in your dock. Just one icon at
-the top of your screen.
+No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
 
 <p align="center">
   <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
-    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=Download%20for%20macOS&style=for-the-badge&color=2a6df4&logo=apple" alt="Download latest release">
+    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=Download%20latest%20release&style=for-the-badge&color=2a6df4" alt="Download latest release">
   </a>
 </p>
 
@@ -38,6 +37,13 @@ the top of your screen.
 - Click her to get a reaction (cheerful → annoyed → threatening as you keep
   clicking), grab and fling her around inside the box, or leave her alone and
   she eventually pouts, then dozes off.
+- When the chat window stays hidden for one minute, she appears as a small
+  desktop pet. An open idle chat panel also fades into this compact state.
+  Drag her to move her, or click her to restore chat around her current
+  position. The desktop pet blinks, breathes, sways, and occasionally bounces.
+  The tray menu
+  can disable this behavior, show her immediately, or select a bounded small,
+  medium, or large desktop-pet size.
 - Mood reactions:
   - She picks her own expression to match each reply (calm, smile, sad, angry,
     sleepy, threat) via a hidden tag the renderer reads and strips.
@@ -58,6 +64,14 @@ the top of your screen.
   from the oldest entries when it grows past that limit.
 
 ## Download & install (for users)
+
+Windows builds are available as an installer and a `.zip` archive. Download
+`PRTS Setup <version>.exe` from
+**[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**,
+run the installer, then click the PRTS icon in the Windows notification area.
+Windows may place it in the hidden-icons overflow menu.
+
+For macOS:
 
 The easiest way to run PRTS — no source checkout required.
 
@@ -99,20 +113,21 @@ npm install
 npm run dev
 ```
 
-Then look up at the menu bar.
+Then look in the macOS menu bar or Windows notification area.
 
 > On macOS 26 (Tahoe), `npm run dev` launches the dev app through LaunchServices
 > and ad-hoc re-signs it so its menu-bar icon actually shows — Tahoe's menu-bar
 > permission silently hides status items from bare-`electron .` launches and
 > unsigned bundles.
 
-To produce your own `.dmg` and `.zip`:
+To produce artifacts for the current operating system:
 
 ```sh
 npm run dist          # builds for the host architecture
 ```
 
-Artifacts land in `dist/`. To target both architectures, run with
+Artifacts land in `dist/`. Use `npm run dist:win` for Windows or
+`npm run dist:mac` for macOS. To target both macOS architectures, run with
 `electron-builder --mac --arm64 --x64` (or `--universal` for one combined
 binary).
 
@@ -168,6 +183,12 @@ Typical packaged macOS path:
 
 ```text
 ~/Library/Application Support/PRTS/
+```
+
+Typical packaged Windows path:
+
+```text
+%APPDATA%\PRTS\
 ```
 
 In development builds, Electron may choose a development-specific `userData`
