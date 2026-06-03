@@ -18,9 +18,10 @@
   </a>
 </p>
 
-> 预编译的 **macOS** `.dmg` 在
-> **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**，
-> 不需要装 Node。Windows 暂时没有发布二进制，请[从源码运行](#从源码构建开发者)。
+> 预编译版本都在
+> **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**——macOS
+> 的 `.dmg` 和 Windows 的 `.exe`/`.zip`，不需要装 Node。
+> （Windows 版本属于实验性，且未签名——详见下文。）
 
 ## 功能
 
@@ -66,16 +67,23 @@
 
 ### Windows
 
-> **目前还没有发布预编译的 Windows 二进制。** 应用本身支持 Windows——系统托盘、
-> Codex 后端、桌宠都能用——但 Releases 里暂时没有打包好的安装包 / `.zip`。
-> 现在请先[从源码运行](#从源码构建开发者)；以后的版本可能会发布 Windows 构建。
-> 启动后，点击通知区域里的 PRTS 图标（可能在隐藏图标的溢出区里）。
+> **实验性。** Windows 版本由 CI 自动构建，维护者还没有在 Windows 上实际测试过，
+> 而且没有签名。遇到问题请到
+> [issues](https://github.com/SVAH-X/claude-code-but-priestess/issues) 反馈。
+
+1. 在 [最新 release](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)
+   里下载 **`PRTS.Setup.<版本>.exe`**（安装包）或
+   **`PRTS-<版本>-win.zip`**（免安装，解压后运行 `PRTS.exe`）。
+2. 运行它。Windows SmartScreen 会因为「未知发布者」弹出警告（因为没有代码签名）——
+   点 **更多信息 → 仍要运行**。
+3. 点击通知区域里的 PRTS 图标打开聊天；Windows 可能把它收进隐藏图标的溢出区
+   （任务栏上的 `^`）。
 
 **系统要求**
 
 - **Apple Silicon**（M1 / M2 / M3 / M4）的 macOS——提供预编译 `.dmg`。当前
   release 没有 Intel 版本。
-- Windows 10 / 11（x64）——支持，但目前需要从源码构建（还没有预编译二进制）。
+- Windows 10 / 11（x64）——提供预编译安装包 / `.zip`（实验性，未签名）。
 - 本机已安装并登录 [Claude Code](https://claude.ai/code) CLI（`claude`）
   或 [Codex](https://platform.openai.com/docs/codex) CLI（`codex`）至少
   一个，详见下面的 **[后端支持](#后端支持)**。

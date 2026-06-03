@@ -19,10 +19,10 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   </a>
 </p>
 
-> Prebuilt **macOS** `.dmg` lives on
+> Prebuilt builds are on
 > **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)** —
-> no Node toolchain required. Windows isn't published as a binary yet — run it
-> [from source](#build-from-source-for-developers).
+> macOS `.dmg` and Windows `.exe`/`.zip`, no Node toolchain required.
+> (Windows builds are experimental and unsigned — see below.)
 
 ## Features
 
@@ -87,19 +87,24 @@ The easiest way to run PRTS — no source checkout required.
 
 ### Windows
 
-> **No prebuilt Windows binary is published yet.** The app itself supports
-> Windows — system-tray placement, the Codex backend, and the desktop pet all
-> work — but a packaged installer / `.zip` isn't in Releases at the moment.
-> Run it [from source](#build-from-source-for-developers) for now; a Windows
-> build may be published in a later release. Once it starts, click the PRTS
-> icon in the notification area (it may sit in the hidden-icons overflow).
+> **Experimental.** Windows builds are produced automatically by CI but have
+> not been runtime-tested by the maintainer, and they are unsigned. Please
+> [report](https://github.com/SVAH-X/claude-code-but-priestess/issues) anything
+> that breaks.
+
+1. From the [latest release](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest),
+   download either **`PRTS.Setup.<version>.exe`** (installer) or
+   **`PRTS-<version>-win.zip`** (portable, just unzip and run `PRTS.exe`).
+2. Run it. Windows SmartScreen will warn about an unknown publisher (the build
+   is not code-signed) — click **More info → Run anyway**.
+3. Click the PRTS icon in the notification area to open the chat. Windows may
+   tuck it into the hidden-icons overflow (the `^` on the taskbar).
 
 **System requirements**
 
 - macOS on **Apple Silicon** (M1 / M2 / M3 / M4) — prebuilt `.dmg`. Intel Macs
   are not in this build.
-- Windows 10 / 11 (x64) — supported, but build from source for now (no prebuilt
-  binary published yet).
+- Windows 10 / 11 (x64) — prebuilt installer / `.zip` (experimental, unsigned).
 - A local install of either the [Claude Code](https://claude.ai/code) CLI
   (`claude`) or the OpenAI [Codex](https://platform.openai.com/docs/codex) CLI
   (`codex`), already authenticated. See **[Usage backends](#usage-backends)**
