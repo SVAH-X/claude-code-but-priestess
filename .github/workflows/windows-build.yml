@@ -1,0 +1,58 @@
+name: Build Windows
+
+# Builds the Windows installer (.exe) and portable .zip on a real Windows
+# runner, since the maintainer develops on macOS. On a published release the
+# artifacts are attached to that release automatically; a manual run can either
+# just produce a downloadable artifact (no tag) or backfill an existing release
+# (pass its tag).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the Windows build to (leave blank to only upload a workflow artifact)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows app
+        run: npm run dist:win -- --publish never
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prts-windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: ${{ github.event_name == 'release' || inputs.tag != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}"
+          echo "Attaching Windows build to release $TAG"
+          gh release upload "$TAG" dist/*.exe dist/*.zip --clobber
