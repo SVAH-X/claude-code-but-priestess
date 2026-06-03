@@ -14,7 +14,6 @@ const sendBtn = document.getElementById("sendBtn");
 const cancelBtn = document.getElementById("cancelBtn");
 const clearBtn = document.getElementById("clearBtn");
 const cwdLine = document.getElementById("cwdLine");
-const resizeGrip = document.getElementById("resizeGrip");
 
 // ============================================================
 //  Frame loading — same edge-flood-fill technique as before.
@@ -661,61 +660,60 @@ document.addEventListener("mousemove", handleDocumentMouseMove);
 document.addEventListener("mouseup", handleDocumentMouseUp);
 
 // ============================================================
-//  Window resize — frameless transparent windows can't be resized from the
-//  native edges, so we lay invisible strips along the left/right/bottom edges
-//  and the two bottom corners. Each reports its edge ("e", "w", "s", "se",
-//  "sw") plus the live screen-space drag delta to the main process, which
-//  keeps the opposite edge anchored. The top edge stays fixed under the menu
-//  bar. window.screenX/screenY give the window's top-left in screen space.
+//  Window resize — explicit edge handles only. The main process supplies the
+//  actual Electron bounds so Windows display scaling cannot shrink the window
+//  when a drag begins.
 // ============================================================
 let activeResizeEdge = null;
+let resizePointerId = null;
 let resizeStartScreenX = 0;
 let resizeStartScreenY = 0;
 let resizeStartBounds = null;
 
-function handleResizePointerDown(event) {
+async function handleResizePointerDown(event) {
   if (event.button !== 0) return;
   const edge = event.currentTarget?.dataset?.edge;
   if (!edge) return;
   event.preventDefault();
   event.stopPropagation();
+  activeResizeEdge = edge;
+  resizePointerId = event.pointerId;
+  resizeStartScreenX = event.screenX;
+  resizeStartScreenY = event.screenY;
   try {
     event.currentTarget.setPointerCapture?.(event.pointerId);
   } catch {
     /* continue without capture */
   }
-  activeResizeEdge = edge;
-  resizeStartScreenX = event.screenX;
-  resizeStartScreenY = event.screenY;
-  resizeStartBounds = {
-    x: window.screenX,
-    y: window.screenY,
-    width: window.innerWidth,
-    height: window.innerHeight
-  };
+  const bounds = await window.petApi?.getPopoverBounds?.();
+  if (activeResizeEdge !== edge || resizePointerId !== event.pointerId || !bounds) return;
+  resizeStartBounds = bounds;
   document.body.classList.add("is-window-resizing");
 }
 
 function handleResizePointerMove(event) {
   if (!activeResizeEdge || !resizeStartBounds) return;
   event.preventDefault();
+  const dx = event.screenX - resizeStartScreenX;
+  const dy = event.screenY - resizeStartScreenY;
+  if (Math.hypot(dx, dy) < 4) return;
   window.petApi?.resizePopoverDrag?.({
     edge: activeResizeEdge,
     start: resizeStartBounds,
-    dx: event.screenX - resizeStartScreenX,
-    dy: event.screenY - resizeStartScreenY
+    dx,
+    dy
   })?.catch?.(() => {});
 }
 
 function handleResizePointerUp(event) {
   if (!activeResizeEdge) return;
-  event.preventDefault();
   try {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
   } catch {
     /* already released */
   }
   activeResizeEdge = null;
+  resizePointerId = null;
   resizeStartBounds = null;
   document.body.classList.remove("is-window-resizing");
 }
@@ -1353,6 +1351,18 @@ window.petApi?.onOpened?.(() => {
     setBaseMood("idle");
   }
 });
+
+let activitySignalTimer = null;
+function notePopoverActivity() {
+  if (activitySignalTimer) return;
+  window.petApi?.notePopoverActivity?.();
+  activitySignalTimer = setTimeout(() => {
+    activitySignalTimer = null;
+  }, 1000);
+}
+
+window.addEventListener("pointerdown", notePopoverActivity, { passive: true });
+window.addEventListener("keydown", notePopoverActivity, { passive: true });
 
 // ============================================================
 //  Click on the character — angry / threat / wake-up reactions.

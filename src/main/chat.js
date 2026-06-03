@@ -96,6 +96,8 @@ function commonBinDirs() {
     return unique([
       process.env.APPDATA && path.join(process.env.APPDATA, "npm"),
       process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs"),
+      process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs", "OpenAI", "Codex", "bin"),
+      path.join(home, "AppData", "Local", "Programs", "OpenAI", "Codex", "bin"),
       process.env.ProgramFiles,
       process.env["ProgramFiles(x86)"],
       path.join(home, ".local", "bin"),
@@ -248,8 +250,8 @@ function emptyProviderAvailability() {
 function selectAvailableProvider(requested, availability = ensureProviderAvailability()) {
   const normalized = normalizeProvider(requested);
   if (availability[normalized]?.available) return normalized;
-  if (availability[PROVIDERS.CLAUDE]?.available) return PROVIDERS.CLAUDE;
   if (availability[PROVIDERS.CODEX]?.available) return PROVIDERS.CODEX;
+  if (availability[PROVIDERS.CLAUDE]?.available) return PROVIDERS.CLAUDE;
   return null;
 }
 
@@ -1065,11 +1067,10 @@ function shouldIgnoreNonJsonLine(line) {
   );
 }
 
-function takeScreenshotSync() {
-  // Gate on the macOS Screen Recording TCC state BEFORE spawning
-  // `screencapture` — otherwise the binary itself triggers the system
-  // permission dialog every turn, which on ad-hoc-signed builds (no
-  // Apple Developer ID) can re-prompt even after the user grants access.
+async function takeScreenshot() {
+  // Gate on the macOS Screen Recording TCC state BEFORE requesting a desktop
+  // thumbnail. Ad-hoc-signed builds can otherwise re-prompt every turn even
+  // after the user grants access.
   // `getMediaAccessStatus` only reads the cached state; it never prompts.
   if (process.platform === "darwin") {
     try {
@@ -1101,12 +1102,22 @@ function takeScreenshotSync() {
       /* ignore */
     }
     const out = path.join(dir, `screen-${Date.now()}.png`);
-    const proc = require("node:child_process").spawnSync("screencapture", ["-x", out], {
-      timeout: 4000
+    const { desktopCapturer, screen } = require("electron");
+    const primary = screen.getPrimaryDisplay();
+    const scale = primary.scaleFactor || 1;
+    const sources = await desktopCapturer.getSources({
+      types: ["screen"],
+      thumbnailSize: {
+        width: Math.round(primary.size.width * scale),
+        height: Math.round(primary.size.height * scale)
+      }
     });
-    if (proc.status === 0 && fs.existsSync(out)) {
-      return out;
-    }
+    const source =
+      sources.find((entry) => String(entry.display_id) === String(primary.id)) ||
+      sources[0];
+    if (!source || source.thumbnail.isEmpty()) return null;
+    fs.writeFileSync(out, source.thumbnail.toPNG());
+    return out;
   } catch (error) {
     console.warn("chat: screenshot failed", error);
   }
@@ -1280,9 +1291,11 @@ function dispatchSend(trimmed, { userAlreadyShown = false, chained = false } = {
   turnLaunching = true;
 
   setImmediate(() => {
-    turnLaunching = false;
-    if (currentProcess) return;
-    launchProviderTurn({
+    if (currentProcess) {
+      turnLaunching = false;
+      return;
+    }
+    void launchProviderTurn({
       trimmed,
       provider,
       cwd: resolveCwd(),
@@ -1295,11 +1308,14 @@ function dispatchSend(trimmed, { userAlreadyShown = false, chained = false } = {
   return { ok: true };
 }
 
-function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscript, chained }) {
-  if (currentProcess) return;
+async function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscript, chained }) {
+  if (currentProcess) {
+    turnLaunching = false;
+    return;
+  }
 
   const autoScreenshot = agentMode && settings.get("autoScreenshot") !== false;
-  const screenshotPath = autoScreenshot && !chained ? takeScreenshotSync() : null;
+  const screenshotPath = autoScreenshot && !chained ? await takeScreenshot() : null;
   const invocation = buildProviderInvocation(
     provider,
     trimmed,
@@ -1314,6 +1330,7 @@ function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscrip
     provider === PROVIDERS.CLAUDE && Boolean(sessionIds[PROVIDERS.CLAUDE]);
   let proc;
   try {
+    turnLaunching = false;
     proc = spawn(invocation.command, invocation.args, {
       cwd,
       env: { ...process.env, CLAUDE_CODE_NONINTERACTIVE: "1" },
@@ -1323,6 +1340,7 @@ function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscrip
       proc.stdin.end(invocation.stdin);
     }
   } catch (error) {
+    turnLaunching = false;
     pushSystem(
       `Failed to launch \`${providerLabel(provider)}\`: ${error.message}. Is the CLI installed and on PATH?`
     );

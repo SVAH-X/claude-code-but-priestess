@@ -144,8 +144,7 @@ if (process.platform === "darwin") {
   child = spawn(electron, [projectRoot], {
     cwd: projectRoot,
     env,
-    stdio: "inherit",
-    shell: process.platform === "win32"
+    stdio: "inherit"
   });
 }
 

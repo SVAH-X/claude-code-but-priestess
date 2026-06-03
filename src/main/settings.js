@@ -3,10 +3,13 @@ const path = require("node:path");
 const { app } = require("electron");
 
 const DEFAULTS = Object.freeze({
-  chatProvider: "claude",
+  chatProvider: process.platform === "win32" ? "codex" : "claude",
   chatCwd: "",
   agentMode: false,
   autoScreenshot: true,
+  desktopPet: true,
+  desktopPetSize: "medium",
+  desktopPetPosition: null,
   popoverSize: { width: 380, height: 560 }
 });
 
