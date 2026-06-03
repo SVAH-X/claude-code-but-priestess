@@ -15,7 +15,17 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
 
 <p align="center">
   <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
-    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=Download%20latest%20release&style=for-the-badge&color=2a6df4" alt="Download latest release">
+    <img src="https://img.shields.io/badge/Download-macOS-2a6df4?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS">
+  </a>
+  &nbsp;
+  <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
+    <img src="https://img.shields.io/badge/Download-Windows-5a9bd4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows (experimental)">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
+    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=latest&style=flat-square&color=2a6df4" alt="Latest release">
   </a>
 </p>
 

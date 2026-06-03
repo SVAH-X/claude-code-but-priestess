@@ -14,7 +14,17 @@
 
 <p align="center">
   <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
-    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=下载最新版本&style=for-the-badge&color=2a6df4" alt="下载最新版本">
+    <img src="https://img.shields.io/badge/下载-macOS-2a6df4?style=for-the-badge&logo=apple&logoColor=white" alt="下载 macOS 版">
+  </a>
+  &nbsp;
+  <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
+    <img src="https://img.shields.io/badge/下载-Windows-5a9bd4?style=for-the-badge&logo=windows&logoColor=white" alt="下载 Windows 版（实验性）">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
+    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=最新版本&style=flat-square&color=2a6df4" alt="最新版本">
   </a>
 </p>
 
