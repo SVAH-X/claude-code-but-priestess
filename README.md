@@ -19,9 +19,10 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   </a>
 </p>
 
-> Looking for the latest signed build? Grab the `.dmg` from
+> Prebuilt **macOS** `.dmg` lives on
 > **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)** —
-> no Node toolchain required.
+> no Node toolchain required. Windows isn't published as a binary yet — run it
+> [from source](#build-from-source-for-developers).
 
 ## Features
 
@@ -38,12 +39,13 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   clicking), grab and fling her around inside the box, or leave her alone and
   she eventually pouts, then dozes off.
 - When the chat window stays hidden for one minute, she appears as a small
-  desktop pet. An open idle chat panel also fades into this compact state.
-  Drag her to move her, or click her to restore chat around her current
-  position. The desktop pet blinks, breathes, sways, and occasionally bounces.
-  The tray menu
-  can disable this behavior, show her immediately, or select a bounded small,
-  medium, or large desktop-pet size.
+  desktop pet (an open but idle chat panel also fades into this compact state).
+  Drag her to move her; click her to restore the chat around her current
+  position. She blinks, breathes, sways, and occasionally bounces.
+  **To turn the pet off, right-click the tray icon and uncheck "Desktop pet
+  while idle"** — clicking the pet itself only reopens the chat, and she comes
+  back about a minute after it is hidden again. The same menu can show her
+  immediately or set a small / medium / large size.
 - Mood reactions:
   - She picks her own expression to match each reply (calm, smile, sad, angry,
     sleepy, threat) via a hidden tag the renderer reads and strips.
@@ -65,13 +67,7 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
 
 ## Download & install (for users)
 
-Windows builds are available as an installer and a `.zip` archive. Download
-`PRTS Setup <version>.exe` from
-**[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**,
-run the installer, then click the PRTS icon in the Windows notification area.
-Windows may place it in the hidden-icons overflow menu.
-
-For macOS:
+### macOS (prebuilt)
 
 The easiest way to run PRTS — no source checkout required.
 
@@ -89,9 +85,21 @@ The easiest way to run PRTS — no source checkout required.
    …or right-click `PRTS.app` → **Open** → confirm **Open** in the dialog.
 4. Click the chibi icon at the top-right of your screen to open the chat.
 
+### Windows
+
+> **No prebuilt Windows binary is published yet.** The app itself supports
+> Windows — system-tray placement, the Codex backend, and the desktop pet all
+> work — but a packaged installer / `.zip` isn't in Releases at the moment.
+> Run it [from source](#build-from-source-for-developers) for now; a Windows
+> build may be published in a later release. Once it starts, click the PRTS
+> icon in the notification area (it may sit in the hidden-icons overflow).
+
 **System requirements**
 
-- macOS on **Apple Silicon** (M1 / M2 / M3 / M4). Intel Macs are not in this build.
+- macOS on **Apple Silicon** (M1 / M2 / M3 / M4) — prebuilt `.dmg`. Intel Macs
+  are not in this build.
+- Windows 10 / 11 (x64) — supported, but build from source for now (no prebuilt
+  binary published yet).
 - A local install of either the [Claude Code](https://claude.ai/code) CLI
   (`claude`) or the OpenAI [Codex](https://platform.openai.com/docs/codex) CLI
   (`codex`), already authenticated. See **[Usage backends](#usage-backends)**
@@ -143,8 +151,8 @@ Supported local CLIs:
 
 Backend selection is automatic:
 
-- If both `claude` and `codex` are available, Claude Code is selected by
-  default and the tray context menu shows both choices.
+- If both `claude` and `codex` are available, the tray context menu shows both
+  choices. Claude Code is the default on macOS; Codex is the default on Windows.
 - If only `claude` is available, the app locks to Claude Code and does not
   show Codex as a selectable option.
 - If only `codex` is available, the app locks to Codex and does not show

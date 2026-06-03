@@ -18,9 +18,9 @@
   </a>
 </p>
 
-> 想直接用的话，去
-> **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**
-> 下载 `.dmg`，不需要装 Node。
+> 预编译的 **macOS** `.dmg` 在
+> **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**，
+> 不需要装 Node。Windows 暂时没有发布二进制，请[从源码运行](#从源码构建开发者)。
 
 ## 功能
 
@@ -32,7 +32,7 @@
   - `Enter` 发送，`Shift+Enter` 换行。
 - 拖动顶部标题栏可以把整个 popover 移动到屏幕任意位置；从左 / 右 / 下边缘或左右下角拖拽来缩放。普瑞赛斯的活动区域和聊天区域会随窗口尺寸变化。
 - 点击她会有反应（连续点击：开心 → 生气 → 威胁）；也可以在框内抓着她甩来甩去；长时间不理她，她会先哭唧唧，再睡着。
-- 聊天窗口闲置一分钟后会淡出，只留下停留在原位置的小桌宠；隐藏聊天窗口后也会进入该状态。可以拖动她改变位置，或点击她在当前位置附近恢复聊天窗口。桌宠会眨眼、呼吸、轻摆，偶尔弹跳；托盘菜单可以关闭该行为、立即显示桌宠，或在有限范围内选择小 / 中 / 大三档尺寸。
+- 聊天窗口闲置一分钟后会淡出，只留下停留在原位置的小桌宠；隐藏聊天窗口后也会进入该状态。可以拖动她改变位置，或点击她在当前位置附近恢复聊天窗口。桌宠会眨眼、呼吸、轻摆，偶尔弹跳。**想彻底关掉桌宠，右键托盘图标，取消勾选「Desktop pet while idle」**——点击桌宠本身只会重新打开聊天，而且隐藏聊天约一分钟后她还会回来。同一个菜单还能立即显示她，或选择小 / 中 / 大三档尺寸。
 - 表情状态：
   - 她会根据每条回复的情绪自己选择表情（平静 / 笑 / 难过 / 生气 / 困倦 / 威胁）——通过一个界面读取并隐藏的标记实现。
   - 回复中：思考 / 工作；回复完成：定格在她为这条回复选择的表情；出错：短暂哭唧唧。
@@ -46,14 +46,9 @@
 
 ## 下载安装（普通用户）
 
+### macOS（预编译）
+
 最省心的玩法，不需要本机有 Node 环境：
-
-Windows 用户可以去
-**[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**
-下载 `PRTS Setup <版本>.exe` 安装包或 `.zip` 压缩包。安装后点击 Windows 通知区域中的
-PRTS 图标；如果没有直接显示，请展开隐藏图标区域。
-
-macOS 用户：
 
 1. 去 [最新 release](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)
    下载 **`PRTS-<版本>-arm64.dmg`**。
@@ -69,10 +64,18 @@ macOS 用户：
    **打开**。
 4. 点击屏幕右上角的小头像，开始聊天。
 
+### Windows
+
+> **目前还没有发布预编译的 Windows 二进制。** 应用本身支持 Windows——系统托盘、
+> Codex 后端、桌宠都能用——但 Releases 里暂时没有打包好的安装包 / `.zip`。
+> 现在请先[从源码运行](#从源码构建开发者)；以后的版本可能会发布 Windows 构建。
+> 启动后，点击通知区域里的 PRTS 图标（可能在隐藏图标的溢出区里）。
+
 **系统要求**
 
-- 必须是 **Apple Silicon**（M1 / M2 / M3 / M4）的 macOS。当前 release
-  没有 Intel 版本。
+- **Apple Silicon**（M1 / M2 / M3 / M4）的 macOS——提供预编译 `.dmg`。当前
+  release 没有 Intel 版本。
+- Windows 10 / 11（x64）——支持，但目前需要从源码构建（还没有预编译二进制）。
 - 本机已安装并登录 [Claude Code](https://claude.ai/code) CLI（`claude`）
   或 [Codex](https://platform.openai.com/docs/codex) CLI（`codex`）至少
   一个，详见下面的 **[后端支持](#后端支持)**。
@@ -120,8 +123,8 @@ npm run dist          # 为当前机器架构构建
 
 后端选择规则：
 
-- 如果本机同时有 `claude` 和 `codex`，默认使用 Claude Code，右键菜单
-  里可以切换。
+- 如果本机同时有 `claude` 和 `codex`，右键菜单里可以切换；macOS 默认
+  使用 Claude Code，Windows 默认使用 Codex。
 - 如果本机只有 `claude`，应用会锁定 Claude Code，不显示 Codex 选项。
 - 如果本机只有 `codex`，应用会锁定 Codex，不显示 Claude Code 选项。
 - 如果两个都没有，popover 顶部显示 `No CLI`，发送按钮禁用，右键菜单
