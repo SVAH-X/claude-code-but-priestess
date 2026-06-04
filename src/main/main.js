@@ -18,6 +18,7 @@ const settings = require("./settings");
 const chat = require("./chat");
 const persona = require("./persona");
 const platform = require("./platform");
+const updater = require("./updater");
 
 let conversationFile = null;
 let saveTimer = null;
@@ -662,6 +663,12 @@ function buildContextMenu() {
       ]
     },
     {
+      label: "Let her use skills (music · search · apps)",
+      type: "checkbox",
+      checked: all.skillsEnabled !== false,
+      click: (item) => settings.set({ skillsEnabled: item.checked })
+    },
+    {
       label: "Agent mode (full screen control)",
       type: "checkbox",
       checked: Boolean(all.agentMode),
@@ -729,6 +736,7 @@ function buildContextMenu() {
       label: "Reveal data folder",
       click: () => shell.openPath(app.getPath("userData"))
     },
+    ...buildUpdateMenuItems(),
     { type: "separator" },
     {
       label: "Quit",
@@ -736,6 +744,21 @@ function buildContextMenu() {
       click: () => app.quit()
     }
   ]);
+}
+
+// Update controls: a manual check plus, when something is waiting, an action
+// item (install now on Windows / open the download page on macOS).
+function buildUpdateMenuItems() {
+  const pending = updater.getPendingUpdate();
+  const items = [{ label: "Check for updates…", click: () => updater.checkNow() }];
+  if (pending) {
+    items.push(
+      pending.action === "install"
+        ? { label: `Restart to update (v${pending.version})`, click: () => updater.installNow() }
+        : { label: `Download update (v${pending.version})…`, click: () => updater.openDownloadPage() }
+    );
+  }
+  return items;
 }
 
 function syncTrayTooltip() {
@@ -848,6 +871,13 @@ app.whenReady().then(() => {
     app.setActivationPolicy("accessory");
   }
 
+  if (process.platform === "win32") {
+    // A stable AppUserModelID so Windows attributes toast notifications (rest
+    // reminders, "update ready", "response complete") to PRTS — without it,
+    // toasts can be dropped or shown under a generic name.
+    app.setAppUserModelId("local.claude-code-but-priestess.menubar");
+  }
+
   settings.init();
   applyThemeSource();
   // Keep the opaque (non-macOS) popover fill aligned with the resolved
@@ -868,6 +898,10 @@ app.whenReady().then(() => {
 
   tray.on("click", () => togglePopover());
   tray.on("right-click", () => tray.popUpContextMenu(buildContextMenu()));
+
+  // Background update check (Windows self-updates; macOS notifies + opens the
+  // download page). No-op in dev / unpackaged builds.
+  updater.init();
 
   setTimeout(() => {
     chat.refreshProviderAvailability();

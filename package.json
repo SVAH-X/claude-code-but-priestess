@@ -1,6 +1,6 @@
 {
   "name": "claude-code-but-priestess",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "A cross-platform tray companion that lets you chat with 普瑞赛斯, backed by local Claude Code or Codex CLI usage.",
   "main": "src/main/main.js",
   "private": true,
@@ -30,6 +30,13 @@
   "build": {
     "appId": "local.claude-code-but-priestess.menubar",
     "productName": "PRTS",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "SVAH-X",
+        "repo": "claude-code-but-priestess"
+      }
+    ],
     "files": [
       "src/**/*",
       "assets/**/*",
@@ -60,5 +67,8 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
   }
 }

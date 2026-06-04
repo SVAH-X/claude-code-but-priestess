@@ -45,6 +45,8 @@ jobs:
           path: |
             dist/*.exe
             dist/*.zip
+            dist/latest.yml
+            dist/*.blockmap
           if-no-files-found: error
 
       - name: Attach to release
@@ -55,4 +57,6 @@ jobs:
         run: |
           TAG="${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}"
           echo "Attaching Windows build to release $TAG"
-          gh release upload "$TAG" dist/*.exe dist/*.zip --clobber
+          # latest.yml + blockmaps are required by electron-updater to detect and
+          # diff-download the update on Windows.
+          gh release upload "$TAG" dist/*.exe dist/*.zip dist/latest.yml dist/*.blockmap --clobber

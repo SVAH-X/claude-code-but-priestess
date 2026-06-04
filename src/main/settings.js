@@ -11,6 +11,10 @@ const DEFAULTS = Object.freeze({
   // popover vibrancy material.
   theme: "system",
   agentMode: false,
+  // Lets Priestess trigger curated local actions (play music, web search, open
+  // a URL/app) via hidden [[skill:…]] directives. Closed whitelist + sanitized
+  // args, so it's safe without agent mode. PRTS-internal only.
+  skillsEnabled: true,
   autoScreenshot: true,
   desktopPet: true,
   desktopPetSize: "medium",

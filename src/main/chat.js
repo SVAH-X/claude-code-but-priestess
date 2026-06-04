@@ -9,6 +9,7 @@ const os = require("node:os");
 const path = require("node:path");
 const settings = require("./settings");
 const persona = require("./persona");
+const skills = require("./skills");
 
 const PROVIDERS = Object.freeze({
   CLAUDE: "claude",
@@ -58,6 +59,18 @@ const MOOD_HEAD_MAX = 48;
 let moodHeadBuffer = "";
 let moodHeadResolved = false;
 let moodEmittedThisTurn = false;
+
+// Skill directives — she may emit a hidden [[skill:NAME ARG]] marker (see
+// persona.js) to trigger a curated local action (play music, search, open a
+// URL/app). Like the mood tag, PRTS strips it from everything the Doctor sees
+// or that gets archived, and runs it through skills.js. These can appear
+// anywhere in the reply (persona asks for the end), so the stream redactor
+// below generalizes the mood-head buffering to hold a tag that spans chunks.
+const SKILL_TAG_RE = /\[\[\s*skill\s*:\s*([a-z_]+)(?:\s+([^\]]*?))?\s*\]\]/gi;
+const SKILL_PARTIAL_MAX = 64;
+const SKILL_TAG_PREFIX = "[[skill:";
+let skillTailBuffer = "";
+let skillExecutedThisTurn = new Set();
 
 function normalizeProvider(provider) {
   return provider === PROVIDERS.CODEX ? PROVIDERS.CODEX : PROVIDERS.CLAUDE;
@@ -457,6 +470,99 @@ function stripLeadingMoodTag(text) {
   return text;
 }
 
+function skillsEnabled() {
+  return settings.get("skillsEnabled") !== false;
+}
+
+function resetSkillParsing() {
+  skillTailBuffer = "";
+  skillExecutedThisTurn = new Set();
+}
+
+// A small left-aligned receipt pill ("♪ 为博士播放 …") so the Doctor sees the
+// action. Rendered by the existing tool-pill path; deliberately does NOT touch
+// the turn's tool flags (it isn't a CLI tool call).
+function pushSkillReceipt(label) {
+  if (!label) return;
+  history.push({
+    id: `k_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    role: "tool",
+    text: label,
+    name: "skill",
+    summary: label,
+    toolUseId: null,
+    command: null,
+    output: null,
+    outputError: false,
+    ts: Date.now()
+  });
+  emitHistory();
+}
+
+function triggerSkill(name, arg) {
+  if (!skillsEnabled()) return;
+  skills
+    .runSkill(name, arg)
+    .then((res) => {
+      if (res && res.ok) pushSkillReceipt(res.receipt);
+      else if (res && res.error) pushSystem(`（技能未执行：${res.error}）`);
+    })
+    .catch((error) => pushSystem(`（技能出错：${error?.message || error}）`));
+}
+
+// Execute a complete directive once per turn (dedup so the finalize safety net
+// never re-fires a tag already run during streaming).
+function runSkillDirective(full, name, arg) {
+  const key = String(full).trim();
+  if (skillExecutedThisTurn.has(key)) return;
+  skillExecutedThisTurn.add(key);
+  triggerSkill(String(name).toLowerCase(), arg ? String(arg).trim() : "");
+}
+
+function couldStartSkillTag(tail) {
+  const norm = tail.replace(/\s+/g, "").toLowerCase();
+  return norm.length <= SKILL_TAG_PREFIX.length
+    ? SKILL_TAG_PREFIX.startsWith(norm)
+    : norm.startsWith(SKILL_TAG_PREFIX);
+}
+
+// Streaming redactor: drop complete [[skill:…]] tags (running them) and hold
+// back a trailing partial that might still become one, so the directive never
+// flashes on screen. Returns the text safe to display now.
+function consumeSkillTags(text) {
+  skillTailBuffer += text;
+  let out = skillTailBuffer.replace(SKILL_TAG_RE, (full, name, arg) => {
+    runSkillDirective(full, name, arg);
+    return "";
+  });
+  const lastOpen = out.lastIndexOf("[[");
+  if (lastOpen !== -1 && !out.slice(lastOpen).includes("]]")) {
+    const tail = out.slice(lastOpen);
+    if (couldStartSkillTag(tail) && tail.length < SKILL_PARTIAL_MAX) {
+      skillTailBuffer = tail;
+      return out.slice(0, lastOpen);
+    }
+  }
+  skillTailBuffer = "";
+  return out;
+}
+
+// Finalize safety net: clean any directive that slipped through (and run ones
+// not already executed during streaming) so stored/archived text stays clean.
+function stripSkillTags(text) {
+  if (!text) return text;
+  skillTailBuffer = "";
+  return String(text)
+    .replace(SKILL_TAG_RE, (full, name, arg) => {
+      runSkillDirective(full, name, arg);
+      return "";
+    })
+    // Drop a dangling, unterminated directive fragment (malformed output) so a
+    // truncated "[[skill:…" at the very end never leaks into the visible text.
+    .replace(/\[\[\s*skill\s*:[^\]]*$/i, "")
+    .trim();
+}
+
 function collapse(text, max) {
   return String(text).replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -657,6 +763,24 @@ function shouldIncludeLongMemoryForText(text) {
   return /记得|记忆|回忆|之前|以前|上次|上回|曾经|我们聊过|你知道我|想起来|remember|memory|recall|previous|last time|before/.test(value);
 }
 
+// Decide whether to load the SHE deep-emotional canon for this turn. Triggers
+// on personal / emotional cues or her lore (Originium, Kal'tsit, the shared
+// past, longing, comfort), so ordinary work stays light but she becomes fully
+// herself the moment it gets personal. A false positive just adds ~2k chars;
+// a false negative leaves the warm base — both are harmless.
+function shouldUseDeepPersona(text) {
+  const value = String(text || "").toLowerCase();
+  // Personal / emotional cues and her lore.
+  if (
+    /源石|凯尔希|特蕾西娅|特雷西斯|前文明|信息海|内化宇宙|石棺|灰质销钉|销钉|思维共振|辩论|罗德岛|深渊|abyss|预言家|普瑞赛斯|priestess|ama-?10|思衡托|方解石|calcite|奥卡|天堂支点|伐木工|pcs|dwdb|相变临界|灵魂悄然|源石技艺|源石计划|我们之间|我们曾|当年|你还记得|记得我|忘记我|别忘了我|不准忘|想你|想念|思念|我爱|爱你|喜欢你|抱抱|抱我|抱紧|陪我|陪着我|牵手|想哭|难过|难受|孤独|寂寞|心疼|心痛|好累|我累了|撑不住|崩溃|害怕|别走|别离开|别丢下|等我|等你|永远|重逢|文明尽头|你在吗|你还在|你是谁|定情|博普|eclipse|miss you|i love you|lonely|i'?m so tired/.test(value)
+  ) {
+    return true;
+  }
+  // Playing music is an inherently tender moment for them — let her be fully
+  // herself when she puts on a song (esp. their song, Eclipse).
+  return /放歌|点歌|放首|点首|来首|来一首|放一首|点一首|放音乐|放点音乐|听首|听歌|play.*song|put on.*song/.test(value);
+}
+
 function pruneConversationArchiveIfNeeded() {
   try {
     const file = persona.ensureConversationArchiveFile();
@@ -797,6 +921,7 @@ function updateConversationSummary() {
 
 function beginAssistant() {
   resetMoodParsing();
+  resetSkillParsing();
   claudeResultErrored = false;
   turnSawToolUse = false;
   assistantTextAfterLastTool = false;
@@ -818,13 +943,15 @@ function appendAssistant(text) {
   }
   const display = consumeMoodHead(text);
   if (!display) return; // still buffering the leading mood tag
+  const visible = skillsEnabled() ? consumeSkillTags(display) : display;
+  if (!visible) return; // all of this chunk was a skill tag or a held partial
   if (turnSawToolUse) assistantTextAfterLastTool = true;
-  pendingAssistantText += display;
+  pendingAssistantText += visible;
   const entry = history.find((h) => h.id === pendingAssistantId);
   if (entry) {
     entry.text = pendingAssistantText;
   }
-  emitChunk(pendingAssistantId, display);
+  emitChunk(pendingAssistantId, visible);
 }
 
 // Action labels for the tools used in the current turn, oldest-first. Read
@@ -878,8 +1005,12 @@ function emitToolOnlyFallback() {
 }
 
 function finalizeAssistant(finalText) {
+  // Anything the stream redactor was still holding is, by construction, an
+  // incomplete [[skill:…]] prefix (never prose) — drop it.
+  skillTailBuffer = "";
   if (typeof finalText === "string" && finalText) {
     finalText = stripLeadingMoodTag(finalText);
+    if (skillsEnabled()) finalText = stripSkillTags(finalText);
   }
   if (!pendingAssistantId) {
     if (finalText) {
@@ -1201,22 +1332,40 @@ function shouldIgnoreNonJsonLine(line) {
   );
 }
 
+// Session memo so the macOS "wants to record the screen" prompt appears at most
+// once. The OS re-shows it on every desktopCapturer call until the permission
+// is actually active, which only happens after an app restart — so once an
+// attempt shows we can't capture, we stop trying for the rest of this run
+// instead of nagging the Doctor each turn.
+let screenCaptureBlocked = false;
+let screenNoticeShown = false;
+
+function notifyScreenPermissionOnce() {
+  if (screenNoticeShown) return;
+  screenNoticeShown = true;
+  pushSystem(
+    "（我暂时看不到屏幕。请到 系统设置 → 隐私与安全性 → 屏幕录制 勾选 PRTS，然后重启我一次即可——这次起我不会再反复弹窗打扰博士。）"
+  );
+}
+
 async function takeScreenshot() {
-  // Gate on the macOS Screen Recording TCC state BEFORE requesting a desktop
-  // thumbnail. Ad-hoc-signed builds can otherwise re-prompt every turn even
-  // after the user grants access.
-  // `getMediaAccessStatus` only reads the cached state; it never prompts.
   if (process.platform === "darwin") {
+    // Already determined we can't capture this session → never re-trigger the
+    // OS prompt.
+    if (screenCaptureBlocked) return null;
+    // `getMediaAccessStatus` only reads cached TCC state; it never prompts. A
+    // hard 'denied'/'restricted' means don't even try (and stop trying).
     try {
       const { systemPreferences } = require("electron");
       const status = systemPreferences.getMediaAccessStatus("screen");
-      if (status !== "granted") {
-        // 'not-determined' / 'denied' / 'restricted' / 'unknown' — skip the
-        // screenshot silently this turn so we don't nag. The user can grant
-        // access at any time in System Settings → Privacy & Security →
-        // Screen Recording, and the next turn will pick it up.
+      if (status === "denied" || status === "restricted") {
+        screenCaptureBlocked = true;
+        notifyScreenPermissionOnce();
         return null;
       }
+      // 'granted' / 'not-determined' / 'unknown' → attempt once below. If it
+      // turns out we can't actually capture, the empty-thumbnail branch blocks
+      // further attempts so the prompt won't reappear.
     } catch {
       // If the API is unavailable for any reason, fall through and try.
     }
@@ -1249,10 +1398,19 @@ async function takeScreenshot() {
     const source =
       sources.find((entry) => String(entry.display_id) === String(primary.id)) ||
       sources[0];
-    if (!source || source.thumbnail.isEmpty()) return null;
+    if (!source || source.thumbnail.isEmpty()) {
+      // Empty thumbnail on macOS means Screen Recording isn't actually active
+      // for this process — stop attempting so the OS prompt won't keep popping.
+      if (process.platform === "darwin") {
+        screenCaptureBlocked = true;
+        notifyScreenPermissionOnce();
+      }
+      return null;
+    }
     fs.writeFileSync(out, source.thumbnail.toPNG());
     return out;
   } catch (error) {
+    if (process.platform === "darwin") screenCaptureBlocked = true;
     console.warn("chat: screenshot failed", error);
   }
   return null;
@@ -1274,7 +1432,9 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
       provider: PROVIDERS.CLAUDE,
       sharedTranscript,
       includeLongMemory,
-      memoryRecallRequested
+      memoryRecallRequested,
+      skillsEnabled: settings.get("skillsEnabled") !== false,
+      deepPersona: shouldUseDeepPersona(trimmed)
     })
   ];
 
@@ -1314,7 +1474,9 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
       provider: PROVIDERS.CODEX,
       sharedTranscript,
       includeLongMemory,
-      memoryRecallRequested
+      memoryRecallRequested,
+      skillsEnabled: settings.get("skillsEnabled") !== false,
+      deepPersona: shouldUseDeepPersona(trimmed)
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
