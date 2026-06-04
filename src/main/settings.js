@@ -5,6 +5,11 @@ const { app } = require("electron");
 const DEFAULTS = Object.freeze({
   chatProvider: process.platform === "win32" ? "codex" : "claude",
   chatCwd: "",
+  // Appearance: "system" follows the OS light/dark setting; "light"/"dark"
+  // force a fixed appearance. Drives nativeTheme.themeSource, which in turn
+  // flips the renderer's prefers-color-scheme palette and (on macOS) the
+  // popover vibrancy material.
+  theme: "system",
   agentMode: false,
   autoScreenshot: true,
   desktopPet: true,

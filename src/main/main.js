@@ -9,6 +9,7 @@ const {
   screen,
   dialog,
   nativeImage,
+  nativeTheme,
   shell,
   Notification
 } = require("electron");
@@ -211,6 +212,38 @@ function movePopoverTo(point = {}) {
   return { x, y };
 }
 
+// ============================================================
+//  Appearance / theme
+// ============================================================
+// macOS draws the popover with vibrancy, so its background follows the
+// resolved appearance automatically. Windows/Linux have no vibrancy and paint
+// an opaque window, so we choose the matching fill here and keep it in sync as
+// the appearance changes. The light tone roughly mirrors the macOS light
+// vibrancy material the green text palette was tuned for.
+const POPOVER_BG_DARK = "#11151a";
+const POPOVER_BG_LIGHT = "#e9edf2";
+
+function popoverBackgroundColor() {
+  if (process.platform === "darwin") return "#00000000";
+  return nativeTheme.shouldUseDarkColors ? POPOVER_BG_DARK : POPOVER_BG_LIGHT;
+}
+
+// Push the saved preference into Electron's nativeTheme. Setting themeSource
+// overrides prefers-color-scheme in every renderer (all platforms) and the
+// native window appearance on macOS, so the renderer palette and the window
+// chrome stay consistent from this single switch.
+function applyThemeSource() {
+  const theme = settings.get("theme");
+  nativeTheme.themeSource = theme === "light" || theme === "dark" ? theme : "system";
+}
+
+function syncPopoverBackground() {
+  if (process.platform === "darwin") return;
+  if (popover && !popover.isDestroyed()) {
+    popover.setBackgroundColor(popoverBackgroundColor());
+  }
+}
+
 function createPopover() {
   const size = initialPopoverSize();
   popover = new BrowserWindow({
@@ -229,7 +262,7 @@ function createPopover() {
     skipTaskbar: true,
     hasShadow: true,
     transparent: process.platform === "darwin",
-    backgroundColor: process.platform === "darwin" ? "#00000000" : "#11151a",
+    backgroundColor: popoverBackgroundColor(),
     ...(process.platform === "darwin"
       ? {
           // Keep the macOS liquid-glass material without passing unsupported
@@ -538,6 +571,12 @@ async function toggleAgentMode(nextValue) {
   settings.set({ agentMode: Boolean(nextValue) });
 }
 
+function setTheme(value) {
+  const next = value === "light" || value === "dark" ? value : "system";
+  settings.set({ theme: next });
+  applyThemeSource();
+}
+
 function buildSettingsState() {
   const providerAvailability = chat.getProviderAvailability({ refresh: false });
   return {
@@ -595,6 +634,29 @@ function buildContextMenu() {
       }
     },
     { type: "separator" },
+    {
+      label: "Appearance",
+      submenu: [
+        {
+          label: "System",
+          type: "radio",
+          checked: (all.theme || "system") === "system",
+          click: () => setTheme("system")
+        },
+        {
+          label: "Light",
+          type: "radio",
+          checked: all.theme === "light",
+          click: () => setTheme("light")
+        },
+        {
+          label: "Dark",
+          type: "radio",
+          checked: all.theme === "dark",
+          click: () => setTheme("dark")
+        }
+      ]
+    },
     {
       label: "Agent mode (full screen control)",
       type: "checkbox",
@@ -783,6 +845,11 @@ app.whenReady().then(() => {
   }
 
   settings.init();
+  applyThemeSource();
+  // Keep the opaque (non-macOS) popover fill aligned with the resolved
+  // appearance. Fires both when the OS theme changes while in "system" mode
+  // and when we flip themeSource via the Appearance menu.
+  nativeTheme.on("updated", syncPopoverBackground);
   chat.refreshProviderAvailability();
   conversationFile = path.join(app.getPath("userData"), "conversation.json");
   persona.ensureMemoryFile();

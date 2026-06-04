@@ -56,6 +56,10 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   while idle"** — clicking the pet itself only reopens the chat, and she comes
   back about a minute after it is hidden again. The same menu can show her
   immediately or set a small / medium / large size.
+- Light / dark appearance that matches your system on every platform.
+  Right-click the tray icon → **Appearance** to follow the system theme
+  (default) or force Light / Dark. The text palette and the popover background
+  flip together, so it reads the same on macOS and Windows.
 - Mood reactions:
   - She picks her own expression to match each reply (calm, smile, sad, angry,
     sleepy, threat) via a hidden tag the renderer reads and strips.
@@ -221,7 +225,7 @@ Files stored there:
 
 | File | Purpose |
 | --- | --- |
-| `settings.json` | App settings: selected backend, chat working directory, agent mode, auto-screenshot setting, and popover size. |
+| `settings.json` | App settings: selected backend, chat working directory, agent mode, auto-screenshot setting, appearance (system / light / dark), and popover size. |
 | `conversation.json` | Current visible chat session, per-backend resume session ids, and the long-memory dormant flag. |
 | `memory/MEMORY.md` | Curated long-term memory about the Doctor: preferences, projects, recurring topics, and facts worth remembering. |
 | `memory/CONVERSATION_SUMMARY.md` | Rolling bounded summary of older conversations. Used when long context needs to be recovered. |

@@ -24,7 +24,11 @@
   --her-edge: rgba(123, 223, 242, 0.42);
   --user-bg: rgba(255, 255, 255, 0.10);
   --user-edge: rgba(255, 255, 255, 0.18);
-  /* Light-mode defaults: dark green on light vibrancy. */
+  /* Light-mode defaults: dark green on a light surface (macOS light vibrancy,
+     or the light opaque fill on Windows/Linux — see popoverBackgroundColor in
+     main.js). prefers-color-scheme is driven by nativeTheme.themeSource, so
+     this palette tracks the system theme or the user's Appearance choice on
+     every platform. */
   --text: #1a5d2e;
   --text-on-her: #103d1d;
   --muted: #2f6a44;
@@ -40,10 +44,10 @@
     -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, ui-sans-serif, system-ui, sans-serif;
 }
 
-/* macOS dark appearance — the popover vibrancy becomes dark, so the green
-   text above turns invisible. Switch to PRTS' light-theme palette: a pale
-   mint that stays readable on the dark glass and still echoes Priestess's
-   teal accent. */
+/* Dark appearance — the popover background becomes dark (macOS vibrancy, or
+   the dark opaque fill on Windows/Linux), so the green text above turns
+   invisible. Switch to PRTS' dark-theme palette: a pale mint that stays
+   readable on the dark surface and still echoes Priestess's teal accent. */
 @media (prefers-color-scheme: dark) {
   :root {
     --text: #d8f6e4;
