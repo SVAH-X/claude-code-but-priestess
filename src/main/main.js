@@ -29,8 +29,12 @@ const POPOVER_DEFAULT_WIDTH = 380;
 const POPOVER_DEFAULT_HEIGHT = 560;
 const POPOVER_MIN_WIDTH = 320;
 const POPOVER_MIN_HEIGHT = 460;
-const POPOVER_MAX_WIDTH = 900;
-const POPOVER_MAX_HEIGHT = 1000;
+// Gap kept between the popover edge and the display work-area edge. The window
+// position is clamped 4px inside each side, so 8px total keeps the max size
+// consistent with that and prevents the window from spilling off-screen. There
+// is no fixed maximum: the active display's work area is the only ceiling, so
+// the popover can grow right up to the screen edges on large monitors.
+const POPOVER_EDGE_MARGIN = 8;
 const DESKTOP_PET_IDLE_MS = Number(process.env.PRTS_DESKTOP_PET_IDLE_MS) || 60 * 1000;
 const DESKTOP_PET_SIZES = Object.freeze({
   small: { width: 120, height: 144 },
@@ -139,8 +143,8 @@ function clampNumber(value, min, max) {
 
 function clampPopoverSize(size = {}, display = screen.getPrimaryDisplay()) {
   const work = display.workArea;
-  const maxWidth = Math.max(POPOVER_MIN_WIDTH, Math.min(POPOVER_MAX_WIDTH, work.width - 8));
-  const maxHeight = Math.max(POPOVER_MIN_HEIGHT, Math.min(POPOVER_MAX_HEIGHT, work.height - 8));
+  const maxWidth = Math.max(POPOVER_MIN_WIDTH, work.width - POPOVER_EDGE_MARGIN);
+  const maxHeight = Math.max(POPOVER_MIN_HEIGHT, work.height - POPOVER_EDGE_MARGIN);
   return {
     width: clampNumber(size.width ?? POPOVER_DEFAULT_WIDTH, POPOVER_MIN_WIDTH, maxWidth),
     height: clampNumber(size.height ?? POPOVER_DEFAULT_HEIGHT, POPOVER_MIN_HEIGHT, maxHeight)
@@ -175,8 +179,8 @@ function resizePopoverDrag({ edge = "se", start = {}, dx = 0, dy = 0 } = {}) {
   const e = String(edge);
   const right = sx + sw;
   const bottom = sy + sh;
-  const maxWidth = Math.max(POPOVER_MIN_WIDTH, Math.min(POPOVER_MAX_WIDTH, work.width - 8));
-  const maxHeight = Math.max(POPOVER_MIN_HEIGHT, Math.min(POPOVER_MAX_HEIGHT, work.height - 8));
+  const maxWidth = Math.max(POPOVER_MIN_WIDTH, work.width - POPOVER_EDGE_MARGIN);
+  const maxHeight = Math.max(POPOVER_MIN_HEIGHT, work.height - POPOVER_EDGE_MARGIN);
 
   let width = sw + (e.includes("e") ? dx : 0) - (e.includes("w") ? dx : 0);
   let height = sh + (e.includes("s") ? dy : 0) - (e.includes("n") ? dy : 0);
