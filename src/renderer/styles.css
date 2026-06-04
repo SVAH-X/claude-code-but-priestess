@@ -439,9 +439,12 @@ button.ghost:disabled {
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
-  color: var(--warn);
-  background: rgba(255, 209, 102, 0.16);
-  border: 1px solid rgba(255, 209, 102, 0.34);
+  /* Activity receipt, not a warning. The old amber-on-amber was unreadable
+     (especially over the light theme). Use the readable, theme-aware muted
+     text on a faint teal chip (her accent) instead. */
+  color: var(--muted);
+  background: rgba(123, 223, 242, 0.12);
+  border: 1px solid rgba(123, 223, 242, 0.32);
   padding: 1px 8px;
   border-radius: 999px;
   vertical-align: bottom;
@@ -458,7 +461,7 @@ button.tool-pill {
 }
 
 button.tool-pill:hover {
-  background: rgba(255, 209, 102, 0.26);
+  background: rgba(123, 223, 242, 0.22);
 }
 
 .tool-pill .tool-pill-label {
@@ -486,9 +489,13 @@ button.tool-pill:hover {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--muted);
-  background: rgba(0, 0, 0, 0.30);
-  border: 1px solid rgba(255, 209, 102, 0.22);
+  /* A dark "terminal" log box with a fixed light text colour. The background
+     is theme-independent (kept dark in both light and dark mode), so the text
+     must not follow --muted — in light mode that was dark-green on a grey box
+     and unreadable. */
+  color: #dcf3e6;
+  background: rgba(8, 12, 16, 0.62);
+  border: 1px solid rgba(123, 223, 242, 0.24);
   border-radius: 6px;
   padding: 6px 9px;
   -webkit-backdrop-filter: blur(8px);
@@ -496,9 +503,9 @@ button.tool-pill:hover {
 }
 
 .tool-detail.error {
-  color: #ffb4b4;
-  border-color: rgba(255, 120, 120, 0.4);
-  background: rgba(60, 0, 0, 0.28);
+  color: #ffc0c0;
+  border-color: rgba(255, 120, 120, 0.45);
+  background: rgba(60, 0, 0, 0.42);
 }
 
 /* Markdown elements inside assistant bubbles. */

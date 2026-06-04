@@ -924,9 +924,11 @@ function buildMsgEl(msg) {
   el.dataset.id = msg.id;
   if (msg.role === "tool") {
     el.className = "msg tool";
-    const label = msg.summary
-      ? `${msg.name} · ${msg.summary}`
-      : msg.name || msg.text || "tool";
+    // Action-phrased label ("编辑 main.js"), already composed in chat.js.
+    // No "PRTS ·" prefix — the pill's shape and tint already mark it as her
+    // activity, and the prefix just turned a row of tool calls into a wall of
+    // repeated "PRTS".
+    const label = msg.summary || msg.name || msg.text || "tool";
     const commandText = (msg.command && String(msg.command).trim()) || "";
     const outputText = msg.output != null ? String(msg.output) : "";
     const hasDetail = Boolean(commandText || outputText);
@@ -936,7 +938,7 @@ function buildMsgEl(msg) {
     if (hasDetail) pill.type = "button";
     const labelSpan = document.createElement("span");
     labelSpan.className = "tool-pill-label";
-    labelSpan.textContent = `PRTS · ${label}`;
+    labelSpan.textContent = label;
     pill.append(labelSpan);
     el.append(pill);
 

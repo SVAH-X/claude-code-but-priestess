@@ -37,6 +37,8 @@ let currentProvider = null;
 let longMemoryDormant = true;
 let providerAvailability = null;
 let consecutiveQuestionReplies = 0;
+let turnSawToolUse = false;
+let assistantTextAfterLastTool = false;
 const BOUNDARY_QUIT_AFTER = 4;
 // Set when a Claude `result` arrives flagged is_error with no text — usually a
 // stale `--resume` session. The close handler uses it to self-heal (drop the
@@ -455,22 +457,63 @@ function stripLeadingMoodTag(text) {
   return text;
 }
 
-// One-line summary for transcript ("PRTS · Bash · screencapture …").
+function collapse(text, max) {
+  return String(text).replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+// Concrete, action-phrased label for a tool call — what she actually did,
+// not just the tool's name. Shown on the pill and woven into the tool-only
+// fallback reply, so prefer human phrasing ("编辑 main.js") over raw API names.
 function summarizeToolInput(name, input) {
   if (!input || typeof input !== "object") return null;
-  if (name === "Bash" && typeof input.command === "string") {
-    return input.command.slice(0, 80);
+  const file = input.file_path ? path.basename(String(input.file_path)) : null;
+  switch (name) {
+    case "Bash":
+      return typeof input.command === "string" ? `运行 ${collapse(input.command, 80)}` : null;
+    case "Edit":
+    case "MultiEdit":
+    case "NotebookEdit":
+      return file ? `编辑 ${file}` : null;
+    case "Write":
+      return file ? `写入 ${file}` : null;
+    case "Read":
+      return file ? `读取 ${file}` : null;
+    case "Grep":
+      return input.pattern ? `搜索 “${collapse(input.pattern, 50)}”` : null;
+    case "Glob":
+      return input.pattern ? `查找 ${collapse(input.pattern, 50)}` : null;
+    case "WebFetch":
+      return input.url ? `查阅 ${collapse(input.url, 60)}` : null;
+    case "WebSearch":
+      return input.query ? `搜索网页 “${collapse(input.query, 50)}”` : null;
+    case "TodoWrite":
+      return "整理待办";
+    case "Task":
+      return input.description ? `调度子任务 · ${collapse(input.description, 40)}` : "调度子任务";
+    default:
+      return null;
   }
-  if ((name === "Edit" || name === "Write" || name === "NotebookEdit") && input.file_path) {
-    return path.basename(String(input.file_path));
+}
+
+// Fallback label when there's no structured input to summarize (e.g. a Codex
+// tool event, or a tool we don't special-case). Keeps the pill readable
+// instead of showing a bare API name.
+function friendlyToolName(name) {
+  switch (name) {
+    case "Bash": return "运行命令";
+    case "Read": return "读取文件";
+    case "Edit":
+    case "MultiEdit":
+    case "NotebookEdit": return "编辑文件";
+    case "Write": return "写入文件";
+    case "Grep":
+    case "Glob": return "搜索";
+    case "WebFetch":
+    case "WebSearch": return "查阅网页";
+    case "Task": return "调度子任务";
+    case "TodoWrite": return "整理待办";
+    default: return name || "工具";
   }
-  if (name === "Read" && input.file_path) {
-    return path.basename(String(input.file_path));
-  }
-  if ((name === "Grep" || name === "Glob") && input.pattern) {
-    return String(input.pattern).slice(0, 60);
-  }
-  return null;
 }
 
 // Full command / target for the expandable tool detail (the Doctor wants to
@@ -537,10 +580,12 @@ function pushSystem(text) {
 // is the full command/target shown when the pill is expanded.
 function pushTool(name, summary, { toolUseId = null, command = null } = {}) {
   if (!name) return null;
+  turnSawToolUse = true;
+  assistantTextAfterLastTool = false;
   const entry = {
     id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "tool",
-    text: summary ? `${name} · ${summary}` : name,
+    text: summary || friendlyToolName(name),
     name,
     summary: summary || null,
     toolUseId,
@@ -753,6 +798,8 @@ function updateConversationSummary() {
 function beginAssistant() {
   resetMoodParsing();
   claudeResultErrored = false;
+  turnSawToolUse = false;
+  assistantTextAfterLastTool = false;
   pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   pendingAssistantText = "";
   history.push({
@@ -771,12 +818,63 @@ function appendAssistant(text) {
   }
   const display = consumeMoodHead(text);
   if (!display) return; // still buffering the leading mood tag
+  if (turnSawToolUse) assistantTextAfterLastTool = true;
   pendingAssistantText += display;
   const entry = history.find((h) => h.id === pendingAssistantId);
   if (entry) {
     entry.text = pendingAssistantText;
   }
   emitChunk(pendingAssistantId, display);
+}
+
+// Action labels for the tools used in the current turn, oldest-first. Read
+// straight from history (the tool pills) so it doesn't depend on streaming
+// flag timing — robust whether or not a text bubble was ever opened.
+function currentTurnToolLabels() {
+  const labels = [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const e = history[i];
+    if (!e) continue;
+    if (e.role === "user" && !e.ephemeral) break;
+    if (e.role === "tool") labels.push(e.summary || friendlyToolName(e.name));
+  }
+  return labels.reverse().filter(Boolean);
+}
+
+function toolOnlyFallbackText(labels) {
+  const shown = labels.slice(0, 6);
+  const more = labels.length - shown.length;
+  const tail = more > 0 ? `；…等共 ${labels.length} 项` : "";
+  return `好了，博士。方才这一手我做完了：${shown.join("；")}${tail}。`;
+}
+
+// When a tool-using turn ends with no spoken reply, she'd otherwise fall
+// silent under a row of pills. Synthesize a short, honest acknowledgement from
+// the real tool actions so the Doctor sees what got done. Returns true if a
+// reply was produced.
+function emitToolOnlyFallback() {
+  const labels = currentTurnToolLabels();
+  if (labels.length === 0) return false;
+  let entry = pendingAssistantId ? history.find((h) => h.id === pendingAssistantId) : null;
+  if (!entry) {
+    pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    entry = { id: pendingAssistantId, role: "assistant", text: "", ts: Date.now(), ephemeral: false };
+    history.push(entry);
+  }
+  entry.text = toolOnlyFallbackText(labels);
+  entry.ephemeral = false;
+  archiveConversationEntry({
+    role: "assistant",
+    provider: currentProvider || activeProvider(),
+    text: entry.text,
+    ts: entry.ts || Date.now()
+  });
+  pendingAssistantId = null;
+  pendingAssistantText = "";
+  turnSawToolUse = false;
+  assistantTextAfterLastTool = false;
+  emitHistory();
+  return true;
 }
 
 function finalizeAssistant(finalText) {
@@ -788,6 +886,9 @@ function finalizeAssistant(finalText) {
       beginAssistant();
       appendAssistant(finalText);
     } else {
+      // No bubble was opened and no text arrived — if tools ran this turn,
+      // speak a short summary of them instead of leaving her silent.
+      emitToolOnlyFallback();
       return;
     }
   }
@@ -796,17 +897,32 @@ function finalizeAssistant(finalText) {
     entry.text = finalText;
   }
   // A turn that produced no text (errored, cancelled, or swallowed prompt) used
-  // to linger as a blank gray bubble. Drop it instead of persisting emptiness.
+  // to linger as a blank gray bubble. Drop it — but if tools ran, replace it
+  // with a short summary of what was done so she isn't silent under the pills.
   if (entry && !(entry.text || "").trim()) {
     const idx = history.indexOf(entry);
     if (idx !== -1) history.splice(idx, 1);
     pendingAssistantId = null;
     pendingAssistantText = "";
+    if (emitToolOnlyFallback()) return;
     emitHistory();
     return;
   }
   if (entry?.text) {
     noteConsecutiveQuestionReply(entry);
+  }
+  if (
+    currentProvider === PROVIDERS.CODEX &&
+    turnSawToolUse &&
+    !assistantTextAfterLastTool &&
+    entry?.text
+  ) {
+    // Codex occasionally completes a tool-using turn after only a visible
+    // progress note ("I will check...") and no post-tool answer. Treat that
+    // note as transient so it does not pollute the shared transcript as if it
+    // were the actual response.
+    entry.ephemeral = true;
+    pushSystem("Codex completed a tool-using turn without a final assistant message after the tools.");
   }
   if (entry && entry.text && !entry.ephemeral) {
     archiveConversationEntry({
@@ -818,6 +934,8 @@ function finalizeAssistant(finalText) {
   }
   pendingAssistantId = null;
   pendingAssistantText = "";
+  turnSawToolUse = false;
+  assistantTextAfterLastTool = false;
   emitHistory();
   if (!entry?.ephemeral && outboundQueue.length === 0) {
     updateConversationSummary();
@@ -963,6 +1081,25 @@ function extractCodexText(value) {
   return "";
 }
 
+function isCodexCompletionType(type) {
+  return type === "turn.completed" || type === "result" || type === "done";
+}
+
+function isCodexAssistantEvent(event, type) {
+  const item = event?.item || event?.event?.item || null;
+  const itemType = String(item?.type || event?.kind || "");
+  const role = String(item?.role || event?.role || "");
+  return (
+    type.includes("message") ||
+    type.includes("answer") ||
+    itemType === "agent_message" ||
+    itemType === "assistant_message" ||
+    itemType === "final_answer" ||
+    (itemType === "message" && (!role || role === "assistant")) ||
+    role === "assistant"
+  );
+}
+
 function codexSessionIdFromEvent(event) {
   return (
     event.session_id ||
@@ -1030,11 +1167,7 @@ function handleCodexStreamEvent(event) {
     extractCodexText(event.item) ||
     extractCodexText(event.result);
 
-  const isAssistantMessage =
-    type.includes("message") ||
-    type.includes("answer") ||
-    event.item?.type === "agent_message" ||
-    event.item?.type === "assistant_message";
+  const isAssistantMessage = isCodexAssistantEvent(event, type);
 
   if (
     text &&
@@ -1043,7 +1176,8 @@ function handleCodexStreamEvent(event) {
     appendReconciledAssistantText(text);
   }
 
-  if (type === "turn.completed" || type === "result" || type === "done") {
+  if (isCodexCompletionType(type)) {
+    if (text) appendReconciledAssistantText(text);
     emitTool(false);
     finalizeAssistant(pendingAssistantText);
     emitStatus("idle", { provider: PROVIDERS.CODEX, sessionId: sessionIds[PROVIDERS.CODEX] });
