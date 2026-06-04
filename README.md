@@ -22,11 +22,6 @@
   </a>
 </p>
 
-<p align="center">
-  <a href="https://github.com/SVAH-X/claude-code-but-priestess/releases/latest">
-    <img src="https://img.shields.io/github/v/release/SVAH-X/claude-code-but-priestess?label=最新版本&style=flat-square&color=2a6df4" alt="最新版本">
-  </a>
-</p>
 
 > 预编译版本都在
 > **[Releases](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest)**——macOS
