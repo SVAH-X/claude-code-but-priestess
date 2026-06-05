@@ -626,8 +626,8 @@ function buildUsageBackendMenuItem() {
 }
 
 // Model presets per backend, passed to the CLI as `--model` (empty = the CLI's
-// own default). Claude accepts aliases plus full names; Codex can expose its
-// current model catalog via `codex debug models --bundled`.
+// own default). Claude accepts aliases plus full names; Codex exposes the
+// current account-visible model catalog via `codex debug models`.
 const MODEL_PRESETS = {
   claude: [
     { label: "默认（CLI/账户）", value: "" },
@@ -644,21 +644,11 @@ const MODEL_PRESETS = {
     { label: "Sonnet 4.6", value: "claude-sonnet-4-6" },
     { label: "Sonnet 4.5 (2025-09-29)", value: "claude-sonnet-4-5-20250929" },
     { label: "Sonnet 4 (2025-05-14)", value: "claude-sonnet-4-20250514" },
-    { label: "Sonnet 3.7 (2025-02-19)", value: "claude-3-7-sonnet-20250219" },
     { type: "separator" },
-    { label: "Haiku 4.5 (2025-10-01)", value: "claude-haiku-4-5-20251001" },
-    { label: "Haiku 3.5 (2024-10-22)", value: "claude-3-5-haiku-20241022" }
+    { label: "Haiku 4.5 (2025-10-01)", value: "claude-haiku-4-5-20251001" }
   ],
   codex: [
-    { label: "默认（CLI/config）", value: "" },
-    { label: "GPT-5.5", value: "gpt-5.5" },
-    { label: "GPT-5.4", value: "gpt-5.4" },
-    { label: "GPT-5.4 mini", value: "gpt-5.4-mini" },
-    { label: "GPT-5.3 Codex", value: "gpt-5.3-codex" },
-    { label: "GPT-5.2", value: "gpt-5.2" },
-    { type: "separator" },
-    { label: "GPT-5（legacy/best-effort）", value: "gpt-5" },
-    { label: "GPT-5 Codex（legacy/best-effort）", value: "gpt-5-codex" }
+    { label: "默认（CLI/config）", value: "" }
   ]
 };
 
@@ -667,11 +657,6 @@ let codexModelPresetCache = {
   ts: 0,
   presets: null
 };
-
-const CODEX_LEGACY_PRESETS = [
-  { label: "GPT-5（legacy/best-effort）", value: "gpt-5" },
-  { label: "GPT-5 Codex（legacy/best-effort）", value: "gpt-5-codex" }
-];
 
 function modelSettingKey(provider) {
   return provider === "codex" ? "codexModel" : "claudeModel";
@@ -711,7 +696,7 @@ function codexModelPresetsFromCli() {
     return codexModelPresetCache.presets;
   }
   try {
-    const result = spawnSync(command, ["debug", "models", "--bundled"], {
+    const result = spawnSync(command, ["debug", "models"], {
       encoding: "utf8",
       env: { ...process.env, NO_COLOR: "1" },
       shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
@@ -731,10 +716,7 @@ function codexModelPresetsFromCli() {
 
 function modelPresetsForProvider(provider) {
   if (provider === "codex") {
-    const base = codexModelPresetsFromCli() || MODEL_PRESETS.codex;
-    const missingLegacy = CODEX_LEGACY_PRESETS
-      .filter((item) => !base.some((preset) => preset.value === item.value));
-    return missingLegacy.length ? [...base, { type: "separator" }, ...missingLegacy] : base;
+    return codexModelPresetsFromCli() || MODEL_PRESETS.codex;
   }
   return MODEL_PRESETS[provider] || null;
 }
@@ -756,7 +738,11 @@ function buildModelMenuItems() {
   const presets = provider && modelPresetsForProvider(provider);
   if (!presets) return [];
   const key = modelSettingKey(provider);
-  const current = String(settings.get(key) || "");
+  let current = String(settings.get(key) || "");
+  if (provider === "codex" && current && !presets.some((item) => item.value === current)) {
+    settings.set({ [key]: "" });
+    current = "";
+  }
   const visiblePresets = includeCurrentModelPreset(presets, current);
   const label = provider === "codex" ? "Model (Codex)" : "Model (Claude)";
   return [

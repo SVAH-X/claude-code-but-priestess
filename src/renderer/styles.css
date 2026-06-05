@@ -338,6 +338,25 @@ button.ghost:disabled {
   border-style: dashed;
 }
 
+.msg-time {
+  display: block;
+  margin-top: 4px;
+  font-size: 9.5px;
+  line-height: 1;
+  opacity: 0.56;
+  text-shadow: none;
+}
+
+.msg.user .msg-time {
+  text-align: left;
+  color: var(--muted);
+}
+
+.msg.assistant .msg-time {
+  text-align: right;
+  color: var(--text-on-her);
+}
+
 .msg.assistant.thinking {
   min-height: 2rem;
   display: flex;

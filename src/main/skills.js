@@ -24,6 +24,7 @@ const SKILL_NAMES = Object.freeze([
   "open_url",
   "open_app",
   "remind",
+  "cancel_reminder",
   "note"
 ]);
 
@@ -252,7 +253,8 @@ async function openApp(name) {
 //  fine for a tray companion that stays running.
 // ----------------------------------------------------------------
 const MAX_REMINDER_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-const pendingReminders = new Set();
+const pendingReminders = new Map();
+let nextReminderId = 1;
 
 // Parse "25" / "25m" / "1h" / "30s" / "22:30" into a delay from now (ms).
 function parseDelayMs(spec) {
@@ -290,7 +292,10 @@ function humanizeDelay(ms) {
 }
 
 function scheduleReminder(delay, message) {
-  const id = setTimeout(() => {
+  const id = nextReminderId;
+  nextReminderId += 1;
+  const dueAt = Date.now() + delay;
+  const timer = setTimeout(() => {
     pendingReminders.delete(id);
     if (!Notification.isSupported()) return;
     try {
@@ -299,7 +304,8 @@ function scheduleReminder(delay, message) {
       /* ignore */
     }
   }, delay);
-  pendingReminders.add(id);
+  pendingReminders.set(id, { timer, message, dueAt });
+  return id;
 }
 
 function runRemind(value) {
@@ -310,8 +316,44 @@ function runRemind(value) {
   if (delay <= 0) return { ok: false, error: "这个时间已经过去了" };
   if (delay > MAX_REMINDER_MS) return { ok: false, error: "提醒最多设到 7 天内" };
   const message = (m[2] || "").trim() || "博士，说好的时间到了。";
-  scheduleReminder(delay, message);
-  return { ok: true, receipt: `⏰ 已设提醒 · ${humanizeDelay(delay)} · ${clip(message, 40)}` };
+  const id = scheduleReminder(delay, message);
+  return { ok: true, receipt: `⏰ 已设提醒 #${id} · ${humanizeDelay(delay)} · ${clip(message, 40)}` };
+}
+
+function cancelReminderId(id) {
+  const reminder = pendingReminders.get(id);
+  if (!reminder) return false;
+  clearTimeout(reminder.timer);
+  pendingReminders.delete(id);
+  return true;
+}
+
+function runCancelReminder(value) {
+  const raw = String(value || "").trim();
+  if (pendingReminders.size === 0) {
+    return { ok: true, receipt: "没有待取消的提醒。" };
+  }
+
+  if (!raw || /^(all|全部|所有|所有提醒|全部提醒|提醒|latest|last|最近|刚才|上一个)$/.test(raw)) {
+    const count = pendingReminders.size;
+    for (const id of Array.from(pendingReminders.keys())) cancelReminderId(id);
+    return { ok: true, receipt: `已取消 ${count} 个提醒。` };
+  }
+
+  const idMatch = raw.match(/^#?(\d+)$/);
+  if (idMatch) {
+    const id = Number(idMatch[1]);
+    if (cancelReminderId(id)) return { ok: true, receipt: `已取消提醒 #${id}。` };
+    return { ok: false, error: `没有找到提醒 #${id}` };
+  }
+
+  const needle = raw.toLowerCase();
+  const matches = Array.from(pendingReminders.entries())
+    .filter(([, reminder]) => reminder.message.toLowerCase().includes(needle))
+    .map(([id]) => id);
+  if (matches.length === 0) return { ok: false, error: `没有找到包含「${clip(raw, 24)}」的提醒` };
+  for (const id of matches) cancelReminderId(id);
+  return { ok: true, receipt: `已取消 ${matches.length} 个匹配提醒。` };
 }
 
 // ----------------------------------------------------------------
@@ -403,6 +445,8 @@ async function runSkill(name, arg) {
       }
       case "remind":
         return runRemind(value);
+      case "cancel_reminder":
+        return runCancelReminder(value);
       case "note":
         return runNote(value);
       default:

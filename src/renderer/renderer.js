@@ -919,6 +919,20 @@ function renderThinkingBubble(el) {
   el.innerHTML = '<span class="thinking-dots" aria-label="Thinking"><span></span><span></span><span></span></span>';
 }
 
+function formatBubbleTime(ts) {
+  const date = new Date(Number(ts) || Date.now());
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function appendBubbleTime(el, msg) {
+  if (!msg || !["user", "assistant"].includes(msg.role) || !msg.ts) return;
+  const meta = document.createElement("span");
+  meta.className = "msg-time";
+  meta.textContent = formatBubbleTime(msg.ts);
+  el.append(meta);
+}
+
 function buildMsgEl(msg) {
   const el = document.createElement("div");
   el.dataset.id = msg.id;
@@ -995,9 +1009,11 @@ function buildMsgEl(msg) {
       el.append(cur);
     } else {
       el.innerHTML = renderMarkdown(msg.text || "");
+      appendBubbleTime(el, msg);
     }
   } else {
     el.textContent = msg.text || "";
+    appendBubbleTime(el, msg);
   }
   return el;
 }

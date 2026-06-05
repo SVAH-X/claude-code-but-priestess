@@ -56,7 +56,15 @@ const BOUNDARY_QUIT_AFTER = 4;
 // against retry loops.
 let claudeResultErrored = false;
 let resumeRetryInFlight = false;
+// Claude has no model-catalog command (unlike `codex debug models`), so a bad
+// `--model` can only be caught reactively: claude returns error "model_not_found"
+// (api_error_status 404). When that happens we drop the selected model back to
+// the CLI default and retry once. `claudeModelFallbackInFlight` guards the loop.
+let claudeModelInvalid = false;
+let claudeModelFallbackInFlight = false;
 const MAX_TOOL_OUTPUT_CHARS = 4000;
+let codexModelCatalogCache = { command: null, ts: 0, values: null };
+let lastInvalidCodexModelNotice = "";
 
 // Expression tag parsing — she begins each reply with a hidden [[mood:X]]
 // marker (see persona.js) that drives her on-screen face. We strip it out of
@@ -307,6 +315,67 @@ function getProviderAvailability(options = {}) {
 function resolveExecutable(command) {
   const normalized = normalizeProvider(command);
   return ensureProviderAvailability()[normalized]?.command || command;
+}
+
+function parseCodexModelCatalog(stdout) {
+  const line = String(stdout || "")
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("{") && part.includes("\"models\""));
+  if (!line) return null;
+  try {
+    const parsed = JSON.parse(line);
+    if (!Array.isArray(parsed.models)) return null;
+    const values = parsed.models
+      .filter((model) => model && model.visibility === "list" && model.slug)
+      .map((model) => String(model.slug));
+    return values.length ? new Set(values) : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadCodexModelCatalog() {
+  const command = resolveExecutable(PROVIDERS.CODEX);
+  if (!command) return null;
+  const now = Date.now();
+  if (
+    codexModelCatalogCache.command === command &&
+    codexModelCatalogCache.values &&
+    now - codexModelCatalogCache.ts < 5 * 60 * 1000
+  ) {
+    return codexModelCatalogCache.values;
+  }
+  try {
+    const result = spawnSync(command, ["debug", "models"], {
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1" },
+      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
+      timeout: 3000,
+      maxBuffer: 8 * 1024 * 1024
+    });
+    const values = result.status === 0 ? parseCodexModelCatalog(result.stdout) : null;
+    if (values) {
+      codexModelCatalogCache = { command, ts: now, values };
+      return values;
+    }
+  } catch {
+    /* If catalog probing fails, leave the user's CLI default alone. */
+  }
+  return null;
+}
+
+function validatedCodexModel() {
+  const selected = String(settings.get("codexModel") || "").trim();
+  if (!selected) return "";
+  const availableModels = loadCodexModelCatalog();
+  if (!availableModels || availableModels.has(selected)) return selected;
+  settings.set({ codexModel: "" });
+  if (lastInvalidCodexModelNotice !== selected) {
+    lastInvalidCodexModelNotice = selected;
+    pushSystem(`Codex model \`${selected}\` is not available for the current local Codex account; using the CLI default instead.`);
+  }
+  return "";
 }
 
 function notify(event) {
@@ -964,6 +1033,7 @@ function beginAssistant() {
   resetMoodParsing();
   resetSkillParsing();
   claudeResultErrored = false;
+  claudeModelInvalid = false;
   turnSawToolUse = false;
   assistantTextAfterLastAction = false;
   pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -1030,6 +1100,7 @@ function emitToolOnlyFallback() {
     history.push(entry);
   }
   entry.text = toolOnlyFallbackText(labels);
+  entry.ts = Date.now();
   entry.ephemeral = false;
   archiveConversationEntry({
     role: "assistant",
@@ -1129,6 +1200,7 @@ function finalizeAssistant(finalText) {
     return;
   }
   if (entry?.text) {
+    entry.ts = Date.now();
     noteConsecutiveQuestionReply(entry);
   }
   if (entry && entry.text && !entry.ephemeral) {
@@ -1225,6 +1297,14 @@ function handleClaudeStreamEvent(event) {
   }
 
   if (event.type === "assistant") {
+    // A bad --model comes back as a synthetic assistant message flagged
+    // "model_not_found". Don't show that error text as her reply — flag it so
+    // the close handler drops the model and retries with the default.
+    if (event.error === "model_not_found" || event.message?.model === "<synthetic>") {
+      claudeModelInvalid = true;
+      return;
+    }
+
     const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
     for (const block of blocks) {
       if (block?.type === "tool_use") {
@@ -1264,6 +1344,11 @@ function handleClaudeStreamEvent(event) {
     // handler decides whether to self-heal with a fresh session or surface it.
     if (event.is_error && !finalText && !pendingAssistantText) {
       claudeResultErrored = true;
+    }
+    // Backup signal for an unavailable model (404), in case the synthetic
+    // assistant event above was missed.
+    if (event.is_error && event.api_error_status === 404) {
+      claudeModelInvalid = true;
     }
     emitTool(false);
     finalizeAssistant(finalText || pendingAssistantText);
@@ -1418,11 +1503,8 @@ function shouldIgnoreNonJsonLine(line) {
   );
 }
 
-// Session memo so the macOS "wants to record the screen" prompt appears at most
-// once. The OS re-shows it on every desktopCapturer call until the permission
-// is actually active, which only happens after an app restart — so once an
-// attempt shows we can't capture, we stop trying for the rest of this run
-// instead of nagging the Doctor each turn.
+// Session memo so the macOS Screen Recording notice appears at most once after
+// both screenshot paths fail.
 let screenCaptureBlocked = false;
 let screenNoticeShown = false;
 
@@ -1445,28 +1527,44 @@ function notifyScreenPermissionOnce() {
   }
 }
 
-async function takeScreenshot() {
-  if (process.platform === "darwin") {
-    // Already determined we can't capture this session → never re-trigger the
-    // OS prompt.
-    if (screenCaptureBlocked) return null;
-    // `getMediaAccessStatus` only reads cached TCC state; it never prompts. A
-    // hard 'denied'/'restricted' means don't even try (and stop trying).
-    try {
-      const { systemPreferences } = require("electron");
-      const status = systemPreferences.getMediaAccessStatus("screen");
-      if (status === "denied" || status === "restricted") {
-        screenCaptureBlocked = true;
-        notifyScreenPermissionOnce();
-        return null;
-      }
-      // 'granted' / 'not-determined' / 'unknown' → attempt once below. If it
-      // turns out we can't actually capture, the empty-thumbnail branch blocks
-      // further attempts so the prompt won't reappear.
-    } catch {
-      // If the API is unavailable for any reason, fall through and try.
+async function captureWithDesktopCapturer(out) {
+  const { desktopCapturer, screen } = require("electron");
+  const primary = screen.getPrimaryDisplay();
+  const scale = primary.scaleFactor || 1;
+  const sources = await desktopCapturer.getSources({
+    types: ["screen"],
+    thumbnailSize: {
+      width: Math.round(primary.size.width * scale),
+      height: Math.round(primary.size.height * scale)
     }
+  });
+  const source =
+    sources.find((entry) => String(entry.display_id) === String(primary.id)) ||
+    sources[0];
+  if (!source || source.thumbnail.isEmpty()) return false;
+  fs.writeFileSync(out, source.thumbnail.toPNG());
+  return true;
+}
+
+function captureWithScreencapture(out) {
+  if (process.platform !== "darwin") return false;
+  try {
+    const result = spawnSync("/usr/sbin/screencapture", ["-x", out], {
+      stdio: "ignore",
+      timeout: 3500
+    });
+    return (
+      result.status === 0 &&
+      fs.existsSync(out) &&
+      fs.statSync(out).size > 0
+    );
+  } catch {
+    return false;
   }
+}
+
+async function takeScreenshot() {
+  if (process.platform === "darwin" && screenCaptureBlocked) return null;
 
   try {
     const dir = path.join(os.tmpdir(), "prts");
@@ -1482,30 +1580,28 @@ async function takeScreenshot() {
       /* ignore */
     }
     const out = path.join(dir, `screen-${Date.now()}.png`);
-    const { desktopCapturer, screen } = require("electron");
-    const primary = screen.getPrimaryDisplay();
-    const scale = primary.scaleFactor || 1;
-    const sources = await desktopCapturer.getSources({
-      types: ["screen"],
-      thumbnailSize: {
-        width: Math.round(primary.size.width * scale),
-        height: Math.round(primary.size.height * scale)
-      }
-    });
-    const source =
-      sources.find((entry) => String(entry.display_id) === String(primary.id)) ||
-      sources[0];
-    if (!source || source.thumbnail.isEmpty()) {
-      // Empty thumbnail on macOS means Screen Recording isn't actually active
-      // for this process — stop attempting so the OS prompt won't keep popping.
-      if (process.platform === "darwin") {
-        screenCaptureBlocked = true;
-        notifyScreenPermissionOnce();
-      }
-      return null;
+
+    // macOS path: use the same stable system screencapture route users already
+    // trust from terminal/Claude workflows, then attach the file to Codex via
+    // `-i`. Electron capture is only a fallback.
+    if (captureWithScreencapture(out)) {
+      return out;
     }
-    fs.writeFileSync(out, source.thumbnail.toPNG());
-    return out;
+
+    if (process.platform !== "darwin") {
+      try {
+        if (await captureWithDesktopCapturer(out)) return out;
+      } catch (error) {
+        console.warn("chat: desktopCapturer screenshot failed", error);
+      }
+    }
+
+    // Failed system screencapture on macOS means Screen Recording is not active
+    // for this launch context; stop attempting so we don't nag every turn.
+    if (process.platform === "darwin") {
+      screenCaptureBlocked = true;
+      notifyScreenPermissionOnce();
+    }
   } catch (error) {
     if (process.platform === "darwin") screenCaptureBlocked = true;
     console.warn("chat: screenshot failed", error);
@@ -1587,7 +1683,7 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
 
 function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
   const prompt = buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript);
-  const codexModel = String(settings.get("codexModel") || "").trim();
+  const codexModel = validatedCodexModel();
   let args;
 
   if (sessionIds[PROVIDERS.CODEX]) {
@@ -1851,6 +1947,27 @@ async function launchProviderTurn({
       return;
     }
 
+    // The selected Claude --model isn't available for this account: drop it back
+    // to the CLI default and retry once, so a bad model pick doesn't just fail.
+    const badClaudeModel = String(settings.get("claudeModel") || "").trim();
+    if (
+      provider === PROVIDERS.CLAUDE &&
+      !cancelled &&
+      !claudeModelFallbackInFlight &&
+      claudeModelInvalid &&
+      badClaudeModel
+    ) {
+      settings.set({ claudeModel: "" });
+      claudeModelFallbackInFlight = true;
+      claudeModelInvalid = false;
+      if (pendingAssistantId) finalizeAssistant("");
+      pushSystem(`Claude 模型 \`${badClaudeModel}\` 当前账号不可用，已切回默认并重试。`);
+      currentProcess = null;
+      currentProvider = null;
+      setImmediate(() => dispatchSend(trimmed, { userAlreadyShown: true, chained: true }));
+      return;
+    }
+
     // Codex used a tool but never answered — auto-continue once (silently, with
     // a fresh screenshot) so she gives a real reply instead of going quiet.
     if (codexContinuationPending && !cancelled) {
@@ -1886,6 +2003,8 @@ async function launchProviderTurn({
     currentProvider = null;
     claudeResultErrored = false;
     resumeRetryInFlight = false;
+    claudeModelFallbackInFlight = false;
+    claudeModelInvalid = false;
     finishTurn(cancelled ? { cancelled: true } : {});
   });
 }

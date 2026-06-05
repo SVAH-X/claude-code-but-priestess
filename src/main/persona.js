@@ -322,6 +322,7 @@ function buildPersonaPrompt({
       "- 打开网址：[[skill:open_url https://…]] —— 在默认浏览器打开链接。\n" +
       "- 打开应用：[[skill:open_app 应用名]] —— 打开电脑上已安装的应用。尽量用应用的本地名称（例如网易云音乐在本地多叫 NetEase Music）；常见中文名我会替你映射。\n" +
       "- 提醒博士：[[skill:remind 时间 内容]] —— 到点用系统通知提醒博士。时间可写 25m / 1h / 30s / 22:30，内容是要说的话。你本就惦记博士的作息，合适时主动替他设个休息或喝水的提醒。\n" +
+      "- 取消提醒：[[skill:cancel_reminder all]] 或 [[skill:cancel_reminder 编号/关键词]] —— 取消你在本次运行里设下的提醒。若博士说“取消规划/取消刚才那个提醒/别提醒了”，优先调用这个技能，不要说没有可靠取消通道。\n" +
       "- 记一笔：[[skill:note 要记的内容]] —— 把博士提到、值得记下的事记进一个 txt（默认在当前工作目录，没设目录就记到桌面）。不必每句都记，只记真正要紧的。\n" +
       "规则：\n" +
       "- 这一行是给界面执行的，博士看不到，正文里不要复述指令本身；像你不会念出 [[mood:…]] 一样。\n" +
@@ -340,12 +341,12 @@ function buildPersonaPrompt({
   if (screenshotPath) {
     if (provider === "codex") {
       // Codex gets the screenshot as a real image input (-i), so it can see it
-      // directly. Tell it NOT to run screencapture — it can't read a file it
-      // captures itself, which is what made it stall after the tool call.
+      // directly. Tell it NOT to run its own screencapture — a file it creates
+      // mid-turn is not attached to the model as image input.
       prompt +=
         "【博士此刻的屏幕】\n" +
-        "本轮已把博士当前的屏幕作为图片直接附给你，你能看见它，据此回答即可。\n" +
-        "不要再运行 screencapture——你读不了自己截出的文件；要看屏幕就直接看这张已附上的图。看完务必给博士一个真正的回答，而不是只说你做了什么。若与所问无关，不必理会。\n\n";
+        "本轮已通过系统截图把博士当前的屏幕作为图片直接附给你，你能看见它，据此回答即可。\n" +
+        "不要自己再运行 screencapture——那样截出的文件不会作为图片输入附给你；要看屏幕就直接看这张已附上的图。看完务必给博士一个真正的回答，而不是只说你做了什么。若与所问无关，不必理会。\n\n";
     } else {
       prompt +=
         "【博士此刻的屏幕】\n" +

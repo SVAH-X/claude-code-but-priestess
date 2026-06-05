@@ -62,7 +62,8 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   flip together, so it reads the same on macOS and Windows.
 - Skills — small local actions she can take for you, cross-platform on macOS
   and Windows: play music, web search in your default browser, open a URL,
-  open a local app, set a reminder (she notifies you when it's time), and jot a
+  open a local app, set a reminder (she notifies you when it's time), cancel
+  reminders she created, and jot a
   note. She triggers them with a hidden `[[skill:…]]` directive the
   renderer strips (the same way the mood tag works). It is a closed, sanitized
   whitelist — it only opens URLs/apps, never runs arbitrary commands — so it
@@ -84,8 +85,12 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   - Streaming reply → thinking / working; reply finishes → settles into the
     expression she chose; error → a brief cry.
 - Right-click the icon for a context menu: choose Claude Code or Codex as
-  the usage backend, choose chat working directory, reveal the data folder,
-  or quit.
+  the usage backend, choose the active backend's model, choose chat working
+  directory, reveal the data folder, or quit. Codex model choices come from
+  the current local account's visible catalog; if that cannot be read, only
+  the CLI default is shown. Claude has no such catalog command, so it offers a
+  curated set of currently-usable models; if a chosen one isn't available to the
+  account, it auto-falls-back to the default and retries.
 - Persona, memory, rolling long-conversation summary, recent chat transcript,
   working directory, and app settings are shared between backends. Claude Code
   and Codex keep separate resume session ids for their own CLIs.
