@@ -139,15 +139,23 @@ The easiest way to run PRTS — no source checkout required.
 
 **Updates**
 
-- **Windows** updates itself: PRTS checks GitHub on launch, downloads a newer
-  release in the background, and installs it the next time you quit (or use the
-  tray's **Restart to update**). No more re-downloading by hand.
-- **macOS** can't self-install unsigned updates (Apple's restriction), so it
-  only *notifies* you when a newer version exists and opens the downloads page —
-  you still grab the new `.dmg` yourself.
-- Either way, the tray has a **Check for updates…** item. (Auto-update only
-  works from this version onward — older installs have no updater, so update to
-  this build manually once.)
+- **Both Windows and macOS update themselves**: PRTS checks GitHub on launch,
+  downloads + verifies a newer release in the background, then installs and
+  relaunches (macOS swaps the bundle atomically; Windows installs on quit, or
+  use the tray's **Restart to update**). Your conversations and memory are
+  untouched.
+- The tray has a **Check for updates…** item. (Auto-update only works from this
+  version onward — older installs have no updater, so update to this build once
+  manually.)
+
+> ⚠️ **macOS: after an update you may need to re-grant Screen Recording once.**
+> PRTS is unsigned, so macOS ties Screen Recording permission to **each build's
+> signature** — after an update the old grant no longer applies (the stale
+> "PRTS" entry in Settings looks enabled but isn't honored). **Fix:** System
+> Settings → Privacy & Security → Screen Recording, select the old "PRTS", click
+> **"−"** to remove it, then **"+"** to re-add `/Applications/PRTS.app`, and
+> restart PRTS. (She also reminds you of these steps in chat when capture
+> fails.) Windows is unaffected — screenshots need no separate OS permission.
 
 **System requirements**
 

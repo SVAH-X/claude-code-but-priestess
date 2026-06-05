@@ -1512,7 +1512,9 @@ function notifyScreenPermissionOnce() {
   if (screenNoticeShown) return;
   screenNoticeShown = true;
   pushSystem(
-    "（我暂时看不到屏幕。已替博士打开「屏幕录制」设置——勾选 PRTS 后，从托盘菜单点「Restart Priestess」让我重启一次即可生效。这次起我不会再反复弹窗打扰博士。）"
+    "（我暂时看不到屏幕。已替博士打开「屏幕录制」设置。\n" +
+      "若列表里已经有「PRTS」却仍不生效——多半是刚更新过：PRTS 未签名，每次更新签名都会变，旧授权就失效了。\n" +
+      "请把旧的「PRTS」选中、点「−」删掉，再点「+」重新添加 /Applications/PRTS.app，然后从托盘点「Restart Priestess」让我重启一次即可。这次起我不会再反复弹窗打扰博士。）"
   );
   if (process.platform === "darwin") {
     // Jump straight to the Screen Recording pane so the Doctor doesn't have to
