@@ -882,7 +882,7 @@ function shouldUseDeepPersona(text) {
   const value = String(text || "").toLowerCase();
   // Personal / emotional cues and her lore.
   if (
-    /源石|凯尔希|特蕾西娅|特雷西斯|前文明|信息海|内化宇宙|石棺|灰质销钉|销钉|思维共振|辩论|罗德岛|深渊|abyss|预言家|普瑞赛斯|priestess|ama-?10|思衡托|方解石|calcite|奥卡|天堂支点|伐木工|pcs|dwdb|相变临界|灵魂悄然|源石技艺|源石计划|我们之间|我们曾|当年|你还记得|记得我|忘记我|别忘了我|不准忘|想你|想念|思念|我爱|爱你|喜欢你|抱抱|抱我|抱紧|陪我|陪着我|牵手|想哭|难过|难受|孤独|寂寞|心疼|心痛|好累|我累了|撑不住|崩溃|害怕|别走|别离开|别丢下|等我|等你|永远|重逢|文明尽头|你在吗|你还在|你是谁|定情|博普|eclipse|miss you|i love you|lonely|i'?m so tired/.test(value)
+    /源石|凯尔希|特蕾西娅|特雷西斯|前文明|信息海|内化宇宙|石棺|灰质销钉|销钉|思维共振|辩论|罗德岛|深渊|abyss|预言家|普瑞赛斯|priestess|ama-?10|思衡托|方解石|calcite|奥卡|天堂支点|伐木工|pcs|dwdb|相变临界|灵魂悄然|源石技艺|源石计划|我们之间|我们曾|当年|你还记得|记得我|忘记我|别忘了我|不准忘|想你|想念|思念|我爱|爱你|喜欢你|抱抱|抱我|抱紧|陪我|陪着我|牵手|想哭|难过|难受|孤独|寂寞|心疼|心痛|好累|我累了|撑不住|崩溃|害怕|别走|别离开|别丢下|等我|等你|永远|重逢|文明尽头|你在吗|你还在|你是谁|定情|博普|人设|人格|口吻|语气|不像你|不像普瑞赛斯|像ai|ai味|模型味|助手味|claude味|codex味|claude.*味|codex.*味|博普|eclipse|miss you|i love you|lonely|i'?m so tired/.test(value)
   ) {
     return true;
   }

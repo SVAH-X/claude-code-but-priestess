@@ -1,6 +1,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
-const { spawnSync } = require("node:child_process");
+const os = require("node:os");
+const { spawn } = require("node:child_process");
 const {
   app,
   BrowserWindow,
@@ -560,15 +561,129 @@ function collapsePopoverToDesktopPet() {
 // ============================================================
 //  Tray context menu — right-click for settings + quit.
 // ============================================================
+const MENU_TEXT = {
+  zh: {
+    openChat: "打开聊天",
+    appearance: "外观",
+    language: "语言",
+    languageSystem: "跟随系统",
+    languageZh: "简体中文",
+    languageEn: "English",
+    system: "跟随系统",
+    light: "浅色",
+    dark: "深色",
+    skills: "允许她使用技能（音乐 / 搜索 / 应用）",
+    agentMode: "Agent mode（完整屏幕控制）",
+    enableAgentTitle: "开启 agent mode？",
+    enableAgent: "开启 agent mode",
+    cancel: "取消",
+    usageNoCli: "使用后端：未找到本地 CLI",
+    usageBackend: "使用后端",
+    usageBackendOne: (provider) => `使用后端：${provider}`,
+    modelClaude: "模型（Claude）",
+    modelCodex: "模型（Codex）",
+    defaultClaude: "默认（CLI/账户）",
+    defaultCodex: "默认（CLI/config）",
+    opusAlias: "Opus（最新别名）",
+    sonnetAlias: "Sonnet（最新别名）",
+    haikuAlias: "Haiku（最新别名）",
+    currentCustom: (model) => `当前自定义：${model}`,
+    autoScreenshot: "每轮自动截图",
+    desktopPet: "闲置时显示桌宠",
+    showDesktopPet: "立即显示桌宠",
+    desktopPetSize: "桌宠尺寸",
+    sizeSmall: "小",
+    sizeMedium: "中",
+    sizeLarge: "大",
+    setChatDirectory: "设置聊天工作目录…",
+    chooseProjectFolder: "选择聊天使用的项目文件夹",
+    clearChatDirectory: "清除聊天工作目录",
+    restartPriestess: "重启普瑞赛斯",
+    revealDataFolder: "打开数据目录",
+    checkUpdates: "检查更新…",
+    downloadInstallUpdate: (version) => `下载并安装 v${version}…`,
+    restartUpdate: (version) => `重启并更新（v${version}）`,
+    downloadUpdate: (version) => `下载更新（v${version}）…`,
+    quit: "退出"
+  },
+  en: {
+    openChat: "Open Chat",
+    appearance: "Appearance",
+    language: "Language",
+    languageSystem: "System",
+    languageZh: "简体中文",
+    languageEn: "English",
+    system: "System",
+    light: "Light",
+    dark: "Dark",
+    skills: "Let her use skills (music · search · apps)",
+    agentMode: "Agent mode (full screen control)",
+    enableAgentTitle: "Enable agent mode?",
+    enableAgent: "Enable agent mode",
+    cancel: "Cancel",
+    usageNoCli: "Usage backend: no local CLI found",
+    usageBackend: "Usage backend",
+    usageBackendOne: (provider) => `Usage backend: ${provider}`,
+    modelClaude: "Model (Claude)",
+    modelCodex: "Model (Codex)",
+    defaultClaude: "Default (CLI/account)",
+    defaultCodex: "Default (CLI/config)",
+    opusAlias: "Opus (latest alias)",
+    sonnetAlias: "Sonnet (latest alias)",
+    haikuAlias: "Haiku (latest alias)",
+    currentCustom: (model) => `Current custom: ${model}`,
+    autoScreenshot: "Auto-screenshot each turn",
+    desktopPet: "Desktop pet while idle",
+    showDesktopPet: "Show desktop pet now",
+    desktopPetSize: "Desktop pet size",
+    sizeSmall: "Small",
+    sizeMedium: "Medium",
+    sizeLarge: "Large",
+    setChatDirectory: "Set chat directory…",
+    chooseProjectFolder: "Choose project folder for chat",
+    clearChatDirectory: "Clear chat directory",
+    restartPriestess: "Restart Priestess",
+    revealDataFolder: "Reveal data folder",
+    checkUpdates: "Check for updates…",
+    downloadInstallUpdate: (version) => `Download and install v${version}…`,
+    restartUpdate: (version) => `Restart to update (v${version})`,
+    downloadUpdate: (version) => `Download update (v${version})…`,
+    quit: "Quit"
+  }
+};
+
+function menuLanguage() {
+  const selected = String(settings.get("menuLanguage") || "system").toLowerCase();
+  if (selected === "zh" || selected === "en") return selected;
+  try {
+    const preferred = app.getPreferredSystemLanguages?.() || [];
+    if (preferred[0]) return /^zh\b/i.test(String(preferred[0])) ? "zh" : "en";
+  } catch {
+    /* ignore */
+  }
+  try {
+    return /^zh\b/i.test(String(app.getLocale() || "")) ? "zh" : "en";
+  } catch {
+    /* ignore */
+  }
+  return "en";
+}
+
+function mt(key, ...args) {
+  const dict = MENU_TEXT[menuLanguage()] || MENU_TEXT.en;
+  const value = dict[key] ?? MENU_TEXT.en[key] ?? key;
+  return typeof value === "function" ? value(...args) : value;
+}
+
 async function toggleAgentMode(nextValue) {
   if (nextValue) {
     const warning = platform.agentModeWarning();
     const result = await dialog.showMessageBox({
       type: "warning",
-      title: "Enable agent mode?",
+      title: mt("enableAgentTitle"),
       message: warning.message,
       detail: warning.detail,
-      buttons: ["Cancel", "Enable agent mode"],
+      buttons: [mt("cancel"), mt("enableAgent")],
       defaultId: 0,
       cancelId: 0
     });
@@ -583,6 +698,11 @@ function setTheme(value) {
   applyThemeSource();
 }
 
+function setMenuLanguage(value) {
+  const next = value === "zh" || value === "en" ? value : "system";
+  settings.set({ menuLanguage: next });
+}
+
 function buildSettingsState() {
   const providerAvailability = chat.getProviderAvailability({ refresh: false });
   return {
@@ -593,12 +713,12 @@ function buildSettingsState() {
 }
 
 function buildUsageBackendMenuItem() {
-  const availability = chat.refreshProviderAvailability();
+  const availability = chat.getProviderAvailability({ refresh: false });
   const available = availability.availableProviders;
 
   if (available.length === 0) {
     return {
-      label: "Usage backend: no local CLI found",
+      label: mt("usageNoCli"),
       enabled: false
     };
   }
@@ -606,13 +726,13 @@ function buildUsageBackendMenuItem() {
   if (available.length === 1) {
     const provider = availability.providers[available[0]];
     return {
-      label: `Usage backend: ${provider.label}`,
+      label: mt("usageBackendOne", provider.label),
       enabled: false
     };
   }
 
   return {
-    label: "Usage backend",
+    label: mt("usageBackend"),
     submenu: available.map((providerKey) => {
       const provider = availability.providers[providerKey];
       return {
@@ -630,10 +750,10 @@ function buildUsageBackendMenuItem() {
 // current account-visible model catalog via `codex debug models`.
 const MODEL_PRESETS = {
   claude: [
-    { label: "默认（CLI/账户）", value: "" },
-    { label: "Opus（latest alias）", value: "opus" },
-    { label: "Sonnet（latest alias）", value: "sonnet" },
-    { label: "Haiku（latest alias）", value: "haiku" },
+    { labelKey: "defaultClaude", value: "" },
+    { labelKey: "opusAlias", value: "opus" },
+    { labelKey: "sonnetAlias", value: "sonnet" },
+    { labelKey: "haikuAlias", value: "haiku" },
     { type: "separator" },
     { label: "Opus 4.8", value: "claude-opus-4-8" },
     { label: "Opus 4.7", value: "claude-opus-4-7" },
@@ -648,14 +768,15 @@ const MODEL_PRESETS = {
     { label: "Haiku 4.5 (2025-10-01)", value: "claude-haiku-4-5-20251001" }
   ],
   codex: [
-    { label: "默认（CLI/config）", value: "" }
+    { labelKey: "defaultCodex", value: "" }
   ]
 };
 
 let codexModelPresetCache = {
   command: null,
   ts: 0,
-  presets: null
+  presets: null,
+  refreshing: false
 };
 
 function modelSettingKey(provider) {
@@ -663,60 +784,114 @@ function modelSettingKey(provider) {
 }
 
 function parseCodexModelCatalog(stdout) {
-  const line = String(stdout || "")
+  const raw = String(stdout || "").trim();
+  const line = raw
     .split(/\r?\n/)
     .map((part) => part.trim())
     .find((part) => part.startsWith("{") && part.includes("\"models\""));
-  if (!line) return null;
+  for (const candidate of [raw, line].filter(Boolean)) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!Array.isArray(parsed.models)) continue;
+      const models = parsed.models
+        .filter((model) => model && model.visibility === "list" && model.slug)
+        .map((model) => ({
+          label: model.display_name || model.slug,
+          value: model.slug
+        }));
+      if (models.length) return models;
+    } catch {
+      /* try next candidate */
+    }
+  }
+  return null;
+}
+
+function codexDefaultPreset() {
+  return { labelKey: "defaultCodex", value: "" };
+}
+
+function readCodexModelPresetsFromFile() {
   try {
-    const parsed = JSON.parse(line);
-    if (!Array.isArray(parsed.models)) return null;
-    const models = parsed.models
-      .filter((model) => model && model.visibility === "list" && model.slug)
-      .map((model) => ({
-        label: model.display_name || model.slug,
-        value: model.slug
-      }));
-    return models.length ? [{ label: "默认（CLI/config）", value: "" }, ...models] : null;
+    const file = path.join(os.homedir(), ".codex", "models_cache.json");
+    if (!fs.existsSync(file)) return null;
+    return parseCodexModelCatalog(fs.readFileSync(file, "utf8"));
   } catch {
     return null;
   }
 }
 
-function codexModelPresetsFromCli() {
+function setCodexModelPresetCache(command, presets) {
+  if (!presets || !presets.length) return null;
+  codexModelPresetCache = {
+    command,
+    ts: Date.now(),
+    presets: [codexDefaultPreset(), ...presets],
+    refreshing: false
+  };
+  return codexModelPresetCache.presets;
+}
+
+function refreshCodexModelPresetsInBackground(command) {
+  if (!command || codexModelPresetCache.refreshing) return;
+  codexModelPresetCache.refreshing = true;
+  let stdout = "";
+  let killed = false;
+  try {
+    const proc = spawn(command, ["debug", "models"], {
+      env: { ...process.env, NO_COLOR: "1" },
+      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    const timer = setTimeout(() => {
+      killed = true;
+      try {
+        proc.kill();
+      } catch {
+        /* ignore */
+      }
+    }, 3500);
+    proc.stdout.on("data", (chunk) => {
+      if (stdout.length < 8 * 1024 * 1024) stdout += chunk.toString("utf8");
+    });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      codexModelPresetCache.refreshing = false;
+      if (code !== 0 || killed) return;
+      setCodexModelPresetCache(command, parseCodexModelCatalog(stdout));
+    });
+    proc.on("error", () => {
+      clearTimeout(timer);
+      codexModelPresetCache.refreshing = false;
+    });
+  } catch {
+    codexModelPresetCache.refreshing = false;
+  }
+}
+
+function codexModelPresetsForMenu() {
   const availability = chat.getProviderAvailability({ refresh: false });
   const command = availability.providers.codex?.command;
   if (!command) return null;
   const now = Date.now();
   if (
     codexModelPresetCache.command === command &&
-    codexModelPresetCache.presets &&
-    now - codexModelPresetCache.ts < 5 * 60 * 1000
+    codexModelPresetCache.presets
   ) {
+    if (now - codexModelPresetCache.ts > 5 * 60 * 1000) {
+      refreshCodexModelPresetsInBackground(command);
+    }
     return codexModelPresetCache.presets;
   }
-  try {
-    const result = spawnSync(command, ["debug", "models"], {
-      encoding: "utf8",
-      env: { ...process.env, NO_COLOR: "1" },
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
-      timeout: 2500,
-      maxBuffer: 8 * 1024 * 1024
-    });
-    const presets = result.status === 0 ? parseCodexModelCatalog(result.stdout) : null;
-    if (presets) {
-      codexModelPresetCache = { command, ts: now, presets };
-      return presets;
-    }
-  } catch {
-    /* fall back to the static list */
-  }
-  return null;
+
+  const filePresets = setCodexModelPresetCache(command, readCodexModelPresetsFromFile());
+  refreshCodexModelPresetsInBackground(command);
+  return filePresets || MODEL_PRESETS.codex;
 }
 
 function modelPresetsForProvider(provider) {
   if (provider === "codex") {
-    return codexModelPresetsFromCli() || MODEL_PRESETS.codex;
+    return codexModelPresetsForMenu();
   }
   return MODEL_PRESETS[provider] || null;
 }
@@ -726,8 +901,23 @@ function includeCurrentModelPreset(presets, current) {
   return [
     ...presets,
     { type: "separator" },
-    { label: `当前自定义：${current}`, value: current }
+    { label: mt("currentCustom", current), value: current }
   ];
+}
+
+function modelPresetLabel(preset) {
+  if (preset.labelKey) return mt(preset.labelKey);
+  return preset.label || preset.value || "";
+}
+
+function desktopPetSizeLabel(sizeKey) {
+  switch (sizeKey) {
+    case "small": return mt("sizeSmall");
+    case "large": return mt("sizeLarge");
+    case "medium":
+    default:
+      return mt("sizeMedium");
+  }
 }
 
 // A "Model" submenu for whichever backend is active. Returned as an array so it
@@ -744,7 +934,7 @@ function buildModelMenuItems() {
     current = "";
   }
   const visiblePresets = includeCurrentModelPreset(presets, current);
-  const label = provider === "codex" ? "Model (Codex)" : "Model (Claude)";
+  const label = provider === "codex" ? mt("modelCodex") : mt("modelClaude");
   return [
     {
       label,
@@ -752,7 +942,7 @@ function buildModelMenuItems() {
         m.type === "separator"
           ? { type: "separator" }
           : {
-              label: m.label,
+              label: modelPresetLabel(m),
               type: "radio",
               checked: current === m.value,
               click: () => settings.set({ [key]: m.value })
@@ -766,7 +956,7 @@ function buildContextMenu() {
   const all = settings.getAll();
   return Menu.buildFromTemplate([
     {
-      label: "Open Chat",
+      label: mt("openChat"),
       click: () => {
         if (!popover) createPopover();
         if (!popover.isVisible()) {
@@ -778,22 +968,22 @@ function buildContextMenu() {
     },
     { type: "separator" },
     {
-      label: "Appearance",
+      label: mt("appearance"),
       submenu: [
         {
-          label: "System",
+          label: mt("system"),
           type: "radio",
           checked: (all.theme || "system") === "system",
           click: () => setTheme("system")
         },
         {
-          label: "Light",
+          label: mt("light"),
           type: "radio",
           checked: all.theme === "light",
           click: () => setTheme("light")
         },
         {
-          label: "Dark",
+          label: mt("dark"),
           type: "radio",
           checked: all.theme === "dark",
           click: () => setTheme("dark")
@@ -801,13 +991,36 @@ function buildContextMenu() {
       ]
     },
     {
-      label: "Let her use skills (music · search · apps)",
+      label: mt("language"),
+      submenu: [
+        {
+          label: mt("languageSystem"),
+          type: "radio",
+          checked: (all.menuLanguage || "system") === "system",
+          click: () => setMenuLanguage("system")
+        },
+        {
+          label: mt("languageZh"),
+          type: "radio",
+          checked: all.menuLanguage === "zh",
+          click: () => setMenuLanguage("zh")
+        },
+        {
+          label: mt("languageEn"),
+          type: "radio",
+          checked: all.menuLanguage === "en",
+          click: () => setMenuLanguage("en")
+        }
+      ]
+    },
+    {
+      label: mt("skills"),
       type: "checkbox",
       checked: all.skillsEnabled !== false,
       click: (item) => settings.set({ skillsEnabled: item.checked })
     },
     {
-      label: "Agent mode (full screen control)",
+      label: mt("agentMode"),
       type: "checkbox",
       checked: Boolean(all.agentMode),
       click: (item) => {
@@ -817,14 +1030,14 @@ function buildContextMenu() {
     buildUsageBackendMenuItem(),
     ...buildModelMenuItems(),
     {
-      label: "Auto-screenshot each turn",
+      label: mt("autoScreenshot"),
       type: "checkbox",
       visible: Boolean(all.agentMode),
       checked: all.autoScreenshot !== false,
       click: (item) => settings.set({ autoScreenshot: item.checked })
     },
     {
-      label: "Desktop pet while idle",
+      label: mt("desktopPet"),
       type: "checkbox",
       checked: all.desktopPet !== false,
       click: (item) => {
@@ -837,26 +1050,26 @@ function buildContextMenu() {
       }
     },
     {
-      label: "Show desktop pet now",
+      label: mt("showDesktopPet"),
       enabled: all.desktopPet !== false,
       click: () => showDesktopPet()
     },
     {
-      label: "Desktop pet size",
+      label: mt("desktopPetSize"),
       enabled: all.desktopPet !== false,
       submenu: Object.keys(DESKTOP_PET_SIZES).map((sizeKey) => ({
-        label: sizeKey[0].toUpperCase() + sizeKey.slice(1),
+        label: desktopPetSizeLabel(sizeKey),
         type: "radio",
         checked: (all.desktopPetSize || "medium") === sizeKey,
         click: () => setDesktopPetSize(sizeKey)
       }))
     },
     {
-      label: "Set chat directory…",
+      label: mt("setChatDirectory"),
       click: async () => {
         const current = (all.chatCwd || "").trim();
         const result = await dialog.showOpenDialog({
-          title: "Choose project folder for chat",
+          title: mt("chooseProjectFolder"),
           defaultPath: current || app.getPath("home"),
           properties: ["openDirectory", "createDirectory"]
         });
@@ -866,23 +1079,23 @@ function buildContextMenu() {
       }
     },
     {
-      label: "Clear chat directory",
+      label: mt("clearChatDirectory"),
       enabled: Boolean((all.chatCwd || "").trim()),
       click: () => settings.set({ chatCwd: "" })
     },
     { type: "separator" },
     {
-      label: "Restart Priestess",
+      label: mt("restartPriestess"),
       click: () => restartApp()
     },
     {
-      label: "Reveal data folder",
+      label: mt("revealDataFolder"),
       click: () => shell.openPath(app.getPath("userData"))
     },
     ...buildUpdateMenuItems(),
     { type: "separator" },
     {
-      label: "Quit",
+      label: mt("quit"),
       accelerator: "CmdOrCtrl+Q",
       click: () => app.quit()
     }
@@ -901,19 +1114,19 @@ function restartApp() {
 // item (install now on Windows / open the download page on macOS).
 function buildUpdateMenuItems() {
   const pending = updater.getPendingUpdate();
-  const items = [{ label: "Check for updates…", click: () => updater.checkNow() }];
+  const items = [{ label: mt("checkUpdates"), click: () => updater.checkNow() }];
   if (pending) {
     if (pending.action === "install") {
       // macOS downloads + installs in place; Windows restarts into the staged
       // installer.
       const label =
         process.platform === "darwin"
-          ? `下载并安装 v${pending.version}…`
-          : `Restart to update (v${pending.version})`;
+          ? mt("downloadInstallUpdate", pending.version)
+          : mt("restartUpdate", pending.version);
       items.push({ label, click: () => updater.installNow() });
     } else {
       items.push({
-        label: `Download update (v${pending.version})…`,
+        label: mt("downloadUpdate", pending.version),
         click: () => updater.openDownloadPage()
       });
     }

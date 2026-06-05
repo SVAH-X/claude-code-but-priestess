@@ -14,6 +14,9 @@ const DEFAULTS = Object.freeze({
   // flips the renderer's prefers-color-scheme palette and (on macOS) the
   // popover vibrancy material.
   theme: "system",
+  // Menu language: "system" follows the OS preferred language, "zh" forces
+  // Simplified Chinese, and "en" forces English.
+  menuLanguage: "system",
   agentMode: false,
   // Lets Priestess trigger curated local actions (play music, web search, open
   // a URL/app) via hidden [[skill:…]] directives. Closed whitelist + sanitized
