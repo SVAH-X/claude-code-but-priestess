@@ -1,5 +1,6 @@
 const path = require("node:path");
 const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
 const {
   app,
   BrowserWindow,
@@ -624,6 +625,157 @@ function buildUsageBackendMenuItem() {
   };
 }
 
+// Model presets per backend, passed to the CLI as `--model` (empty = the CLI's
+// own default). Claude accepts aliases plus full names; Codex can expose its
+// current model catalog via `codex debug models --bundled`.
+const MODEL_PRESETS = {
+  claude: [
+    { label: "默认（CLI/账户）", value: "" },
+    { label: "Opus（latest alias）", value: "opus" },
+    { label: "Sonnet（latest alias）", value: "sonnet" },
+    { label: "Haiku（latest alias）", value: "haiku" },
+    { type: "separator" },
+    { label: "Opus 4.8", value: "claude-opus-4-8" },
+    { label: "Opus 4.7", value: "claude-opus-4-7" },
+    { label: "Opus 4.6", value: "claude-opus-4-6" },
+    { label: "Opus 4.5 (2025-11-01)", value: "claude-opus-4-5-20251101" },
+    { label: "Opus 4.1 (2025-08-05)", value: "claude-opus-4-1-20250805" },
+    { type: "separator" },
+    { label: "Sonnet 4.6", value: "claude-sonnet-4-6" },
+    { label: "Sonnet 4.5 (2025-09-29)", value: "claude-sonnet-4-5-20250929" },
+    { label: "Sonnet 4 (2025-05-14)", value: "claude-sonnet-4-20250514" },
+    { label: "Sonnet 3.7 (2025-02-19)", value: "claude-3-7-sonnet-20250219" },
+    { type: "separator" },
+    { label: "Haiku 4.5 (2025-10-01)", value: "claude-haiku-4-5-20251001" },
+    { label: "Haiku 3.5 (2024-10-22)", value: "claude-3-5-haiku-20241022" }
+  ],
+  codex: [
+    { label: "默认（CLI/config）", value: "" },
+    { label: "GPT-5.5", value: "gpt-5.5" },
+    { label: "GPT-5.4", value: "gpt-5.4" },
+    { label: "GPT-5.4 mini", value: "gpt-5.4-mini" },
+    { label: "GPT-5.3 Codex", value: "gpt-5.3-codex" },
+    { label: "GPT-5.2", value: "gpt-5.2" },
+    { type: "separator" },
+    { label: "GPT-5（legacy/best-effort）", value: "gpt-5" },
+    { label: "GPT-5 Codex（legacy/best-effort）", value: "gpt-5-codex" }
+  ]
+};
+
+let codexModelPresetCache = {
+  command: null,
+  ts: 0,
+  presets: null
+};
+
+const CODEX_LEGACY_PRESETS = [
+  { label: "GPT-5（legacy/best-effort）", value: "gpt-5" },
+  { label: "GPT-5 Codex（legacy/best-effort）", value: "gpt-5-codex" }
+];
+
+function modelSettingKey(provider) {
+  return provider === "codex" ? "codexModel" : "claudeModel";
+}
+
+function parseCodexModelCatalog(stdout) {
+  const line = String(stdout || "")
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("{") && part.includes("\"models\""));
+  if (!line) return null;
+  try {
+    const parsed = JSON.parse(line);
+    if (!Array.isArray(parsed.models)) return null;
+    const models = parsed.models
+      .filter((model) => model && model.visibility === "list" && model.slug)
+      .map((model) => ({
+        label: model.display_name || model.slug,
+        value: model.slug
+      }));
+    return models.length ? [{ label: "默认（CLI/config）", value: "" }, ...models] : null;
+  } catch {
+    return null;
+  }
+}
+
+function codexModelPresetsFromCli() {
+  const availability = chat.getProviderAvailability({ refresh: false });
+  const command = availability.providers.codex?.command;
+  if (!command) return null;
+  const now = Date.now();
+  if (
+    codexModelPresetCache.command === command &&
+    codexModelPresetCache.presets &&
+    now - codexModelPresetCache.ts < 5 * 60 * 1000
+  ) {
+    return codexModelPresetCache.presets;
+  }
+  try {
+    const result = spawnSync(command, ["debug", "models", "--bundled"], {
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1" },
+      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
+      timeout: 2500,
+      maxBuffer: 8 * 1024 * 1024
+    });
+    const presets = result.status === 0 ? parseCodexModelCatalog(result.stdout) : null;
+    if (presets) {
+      codexModelPresetCache = { command, ts: now, presets };
+      return presets;
+    }
+  } catch {
+    /* fall back to the static list */
+  }
+  return null;
+}
+
+function modelPresetsForProvider(provider) {
+  if (provider === "codex") {
+    const base = codexModelPresetsFromCli() || MODEL_PRESETS.codex;
+    const missingLegacy = CODEX_LEGACY_PRESETS
+      .filter((item) => !base.some((preset) => preset.value === item.value));
+    return missingLegacy.length ? [...base, { type: "separator" }, ...missingLegacy] : base;
+  }
+  return MODEL_PRESETS[provider] || null;
+}
+
+function includeCurrentModelPreset(presets, current) {
+  if (!current || presets.some((item) => item.value === current)) return presets;
+  return [
+    ...presets,
+    { type: "separator" },
+    { label: `当前自定义：${current}`, value: current }
+  ];
+}
+
+// A "Model" submenu for whichever backend is active. Returned as an array so it
+// can be spread into the menu (empty when no backend / presets are available).
+function buildModelMenuItems() {
+  const availability = chat.getProviderAvailability({ refresh: false });
+  const provider = availability.activeProvider;
+  const presets = provider && modelPresetsForProvider(provider);
+  if (!presets) return [];
+  const key = modelSettingKey(provider);
+  const current = String(settings.get(key) || "");
+  const visiblePresets = includeCurrentModelPreset(presets, current);
+  const label = provider === "codex" ? "Model (Codex)" : "Model (Claude)";
+  return [
+    {
+      label,
+      submenu: visiblePresets.map((m) => (
+        m.type === "separator"
+          ? { type: "separator" }
+          : {
+              label: m.label,
+              type: "radio",
+              checked: current === m.value,
+              click: () => settings.set({ [key]: m.value })
+            }
+      ))
+    }
+  ];
+}
+
 function buildContextMenu() {
   const all = settings.getAll();
   return Menu.buildFromTemplate([
@@ -677,6 +829,7 @@ function buildContextMenu() {
       }
     },
     buildUsageBackendMenuItem(),
+    ...buildModelMenuItems(),
     {
       label: "Auto-screenshot each turn",
       type: "checkbox",

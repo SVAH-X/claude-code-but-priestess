@@ -39,7 +39,15 @@ let longMemoryDormant = true;
 let providerAvailability = null;
 let consecutiveQuestionReplies = 0;
 let turnSawToolUse = false;
-let assistantTextAfterLastTool = false;
+let assistantTextAfterLastAction = false;
+let currentTurnHadScreenshot = false;
+// Codex sometimes ends a tool-using turn with only a progress note and no real
+// answer. We auto-continue once per user turn (the close handler re-prompts) so
+// she answers instead of going silent; the guard prevents loops.
+let codexAutoContinued = false;
+let codexContinuationPending = false;
+const CODEX_CONTINUE_NUDGE =
+  "（系统提示：你刚才用了工具，但还没有把回答交给博士。请直接根据看到的屏幕或工具结果，用普瑞赛斯的口吻给出真正的回答；不要只说你做了什么，也不要再运行 screencapture。）";
 const BOUNDARY_QUIT_AFTER = 4;
 // Set when a Claude `result` arrives flagged is_error with no text — usually a
 // stale `--resume` session. The close handler uses it to self-heal (drop the
@@ -670,6 +678,39 @@ function attachToolResult(toolUseId, block) {
   }
 }
 
+function codexToolName(item) {
+  if (!item || typeof item !== "object") return null;
+  if (item.type === "command_execution") return "Bash";
+  return item.name || item.tool_name || item.command || null;
+}
+
+function codexToolSummary(item) {
+  if (!item || typeof item !== "object") return null;
+  if (typeof item.summary === "string" && item.summary.trim()) return item.summary;
+  if (item.type === "command_execution" && typeof item.command === "string") {
+    return `运行 ${collapse(item.command, 80)}`;
+  }
+  return null;
+}
+
+function codexToolCommand(item) {
+  if (!item || typeof item !== "object") return null;
+  return typeof item.command === "string" ? item.command : null;
+}
+
+function attachCodexToolResult(item) {
+  if (!item || typeof item !== "object" || !item.id) return;
+  const output =
+    typeof item.aggregated_output === "string"
+      ? item.aggregated_output
+      : extractCodexText(item.output || item.result);
+  if (!output && item.exit_code == null) return;
+  attachToolResult(item.id, {
+    content: output || "",
+    is_error: item.exit_code != null && item.exit_code !== 0
+  });
+}
+
 function pushSystem(text) {
   const entry = {
     id: `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -687,7 +728,7 @@ function pushSystem(text) {
 function pushTool(name, summary, { toolUseId = null, command = null } = {}) {
   if (!name) return null;
   turnSawToolUse = true;
-  assistantTextAfterLastTool = false;
+  assistantTextAfterLastAction = false;
   const entry = {
     id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "tool",
@@ -924,7 +965,7 @@ function beginAssistant() {
   resetSkillParsing();
   claudeResultErrored = false;
   turnSawToolUse = false;
-  assistantTextAfterLastTool = false;
+  assistantTextAfterLastAction = false;
   pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   pendingAssistantText = "";
   history.push({
@@ -945,7 +986,7 @@ function appendAssistant(text) {
   if (!display) return; // still buffering the leading mood tag
   const visible = skillsEnabled() ? consumeSkillTags(display) : display;
   if (!visible) return; // all of this chunk was a skill tag or a held partial
-  if (turnSawToolUse) assistantTextAfterLastTool = true;
+  if (turnSawToolUse || currentTurnHadScreenshot) assistantTextAfterLastAction = true;
   pendingAssistantText += visible;
   const entry = history.find((h) => h.id === pendingAssistantId);
   if (entry) {
@@ -999,9 +1040,49 @@ function emitToolOnlyFallback() {
   pendingAssistantId = null;
   pendingAssistantText = "";
   turnSawToolUse = false;
-  assistantTextAfterLastTool = false;
+  assistantTextAfterLastAction = false;
+  currentTurnHadScreenshot = false;
   emitHistory();
   return true;
+}
+
+function removeAssistantEntry(entry) {
+  if (!entry) return;
+  const idx = history.indexOf(entry);
+  if (idx !== -1) history.splice(idx, 1);
+}
+
+function requestCodexContinuation(entry) {
+  removeAssistantEntry(entry);
+  pendingAssistantId = null;
+  pendingAssistantText = "";
+  turnSawToolUse = false;
+  assistantTextAfterLastAction = false;
+  currentTurnHadScreenshot = false;
+  if (!codexAutoContinued) {
+    codexContinuationPending = true;
+  } else {
+    pushSystem("（我看到了屏幕或工具结果，但这一轮还是没有生成回答。博士再说一声，我会重新看。）");
+  }
+  emitHistory();
+}
+
+function isBareCodexProgressReply(text) {
+  const clean = String(text || "")
+    .replace(MOOD_TAG_RE, "")
+    .replace(/\[\[\s*skill\s*:[^\]]*?\]\]/gi, "");
+  const body = collapse(clean, 120)
+    .replace(/[，,。.\s]*(博士|Dr\.?)?[。.\s]*$/i, "");
+  if (!body || body.length > 80) return false;
+  return /^(我|普瑞赛斯)?(已经|刚才|方才|这边|先)?(看了|看完了|看过了|读了|读完了|检查了|检查完了|确认了|截屏了|运行了|执行了|做完了|处理完了)$/.test(body);
+}
+
+function shouldContinueCodexTurn(finalText, entry) {
+  if (currentProvider !== PROVIDERS.CODEX) return false;
+  const text = String(finalText || entry?.text || pendingAssistantText || "").trim();
+  if (!text && (turnSawToolUse || currentTurnHadScreenshot)) return true;
+  if ((turnSawToolUse || currentTurnHadScreenshot) && isBareCodexProgressReply(text)) return true;
+  return turnSawToolUse && !assistantTextAfterLastAction && Boolean(text);
 }
 
 function finalizeAssistant(finalText) {
@@ -1013,6 +1094,10 @@ function finalizeAssistant(finalText) {
     if (skillsEnabled()) finalText = stripSkillTags(finalText);
   }
   if (!pendingAssistantId) {
+    if (!finalText && shouldContinueCodexTurn(finalText, null)) {
+      requestCodexContinuation(null);
+      return;
+    }
     if (finalText) {
       beginAssistant();
       appendAssistant(finalText);
@@ -1026,6 +1111,10 @@ function finalizeAssistant(finalText) {
   const entry = history.find((h) => h.id === pendingAssistantId);
   if (entry && finalText && finalText !== entry.text) {
     entry.text = finalText;
+  }
+  if (shouldContinueCodexTurn(finalText, entry)) {
+    requestCodexContinuation(entry);
+    return;
   }
   // A turn that produced no text (errored, cancelled, or swallowed prompt) used
   // to linger as a blank gray bubble. Drop it — but if tools ran, replace it
@@ -1042,19 +1131,6 @@ function finalizeAssistant(finalText) {
   if (entry?.text) {
     noteConsecutiveQuestionReply(entry);
   }
-  if (
-    currentProvider === PROVIDERS.CODEX &&
-    turnSawToolUse &&
-    !assistantTextAfterLastTool &&
-    entry?.text
-  ) {
-    // Codex occasionally completes a tool-using turn after only a visible
-    // progress note ("I will check...") and no post-tool answer. Treat that
-    // note as transient so it does not pollute the shared transcript as if it
-    // were the actual response.
-    entry.ephemeral = true;
-    pushSystem("Codex completed a tool-using turn without a final assistant message after the tools.");
-  }
   if (entry && entry.text && !entry.ephemeral) {
     archiveConversationEntry({
       role: "assistant",
@@ -1066,7 +1142,8 @@ function finalizeAssistant(finalText) {
   pendingAssistantId = null;
   pendingAssistantText = "";
   turnSawToolUse = false;
-  assistantTextAfterLastTool = false;
+  assistantTextAfterLastAction = false;
+  currentTurnHadScreenshot = false;
   emitHistory();
   if (!entry?.ephemeral && outboundQueue.length === 0) {
     updateConversationSummary();
@@ -1257,13 +1334,13 @@ function handleCodexStreamEvent(event) {
     return;
   }
 
-  const itemType = event.item?.type || event.event?.item?.type || event.kind || "";
+  const item = event.item || event.event?.item || null;
+  const itemType = item?.type || event.kind || "";
   const toolName =
     event.name ||
     event.tool_name ||
-    event.item?.name ||
-    event.item?.command ||
-    event.event?.item?.name ||
+    item?.name ||
+    codexToolName(item) ||
     null;
 
   const isToolEvent =
@@ -1275,8 +1352,17 @@ function handleCodexStreamEvent(event) {
 
   if (isToolEvent) {
     const active = !(type.includes("completed") || type.includes("finished") || type.includes("end"));
-    emitTool(active, toolName || "Codex");
-    if (active) pushTool(toolName || "Codex", event.item?.summary || event.summary || null);
+    const summary = codexToolSummary(item) || event.summary || null;
+    const name = toolName || "Codex";
+    emitTool(active, name, summary);
+    if (active) {
+      pushTool(name, summary, {
+        toolUseId: item?.id || null,
+        command: codexToolCommand(item)
+      });
+    } else {
+      attachCodexToolResult(item);
+    }
     return;
   }
 
@@ -1449,6 +1535,11 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     })
   ];
 
+  const claudeModel = String(settings.get("claudeModel") || "").trim();
+  if (claudeModel) {
+    args.push("--model", claudeModel);
+  }
+
   if (agentMode) {
     args.push("--dangerously-skip-permissions");
   } else {
@@ -1496,6 +1587,7 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
 
 function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
   const prompt = buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript);
+  const codexModel = String(settings.get("codexModel") || "").trim();
   let args;
 
   if (sessionIds[PROVIDERS.CODEX]) {
@@ -1505,6 +1597,9 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
       "--json",
       "--skip-git-repo-check"
     ];
+    if (codexModel) {
+      args.push("--model", codexModel);
+    }
     if (screenshotPath) {
       args.push("-i", screenshotPath);
     }
@@ -1522,6 +1617,9 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
       "-C",
       cwd
     ];
+    if (codexModel) {
+      args.push("--model", codexModel);
+    }
     if (screenshotPath) {
       args.push("-i", screenshotPath);
     }
@@ -1572,7 +1670,10 @@ function send(text) {
   return dispatchSend(trimmed);
 }
 
-function dispatchSend(trimmed, { userAlreadyShown = false, chained = false } = {}) {
+function dispatchSend(
+  trimmed,
+  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false } = {}
+) {
   if (currentProcess || turnLaunching) return { ok: false, reason: "busy" };
 
   refreshProviderAvailability();
@@ -1582,7 +1683,15 @@ function dispatchSend(trimmed, { userAlreadyShown = false, chained = false } = {
     return { ok: false, reason: "missing-cli" };
   }
 
-  if (userAlreadyShown) {
+  // A genuine new user turn — reset the Codex auto-continue guard.
+  if (!chained) {
+    codexAutoContinued = false;
+    codexContinuationPending = false;
+  }
+
+  if (silentUser) {
+    // Internal continuation — drive the CLI without showing a user bubble.
+  } else if (userAlreadyShown) {
     activateQueuedUser(trimmed);
   } else {
     pushUser(trimmed, provider);
@@ -1608,21 +1717,34 @@ function dispatchSend(trimmed, { userAlreadyShown = false, chained = false } = {
       cwd: resolveCwd(),
       agentMode,
       sharedTranscript,
-      chained
+      chained,
+      forceScreenshot
     });
   });
 
   return { ok: true };
 }
 
-async function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTranscript, chained }) {
+async function launchProviderTurn({
+  trimmed,
+  provider,
+  cwd,
+  agentMode,
+  sharedTranscript,
+  chained,
+  forceScreenshot = false
+}) {
   if (currentProcess) {
     turnLaunching = false;
     return;
   }
 
   const autoScreenshot = agentMode && settings.get("autoScreenshot") !== false;
-  const screenshotPath = autoScreenshot && !chained ? await takeScreenshot() : null;
+  // Chained turns normally skip the screenshot, but an auto-continuation needs a
+  // fresh screen so she can actually answer what she "saw".
+  const screenshotPath =
+    autoScreenshot && (!chained || forceScreenshot) ? await takeScreenshot() : null;
+  currentTurnHadScreenshot = provider === PROVIDERS.CODEX && Boolean(screenshotPath);
   const invocation = buildProviderInvocation(
     provider,
     trimmed,
@@ -1726,6 +1848,26 @@ async function launchProviderTurn({ trimmed, provider, cwd, agentMode, sharedTra
       currentProcess = null;
       currentProvider = null;
       setImmediate(() => dispatchSend(trimmed, { userAlreadyShown: true, chained: true }));
+      return;
+    }
+
+    // Codex used a tool but never answered — auto-continue once (silently, with
+    // a fresh screenshot) so she gives a real reply instead of going quiet.
+    if (codexContinuationPending && !cancelled) {
+      codexContinuationPending = false;
+      codexAutoContinued = true;
+      if (pendingAssistantId) finalizeAssistant("");
+      currentProcess = null;
+      currentProvider = null;
+      claudeResultErrored = false;
+      resumeRetryInFlight = false;
+      setImmediate(() =>
+        dispatchSend(CODEX_CONTINUE_NUDGE, {
+          chained: true,
+          forceScreenshot: true,
+          silentUser: true
+        })
+      );
       return;
     }
 

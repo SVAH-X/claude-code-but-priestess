@@ -4,6 +4,10 @@ const { app } = require("electron");
 
 const DEFAULTS = Object.freeze({
   chatProvider: process.platform === "win32" ? "codex" : "claude",
+  // Optional model override per backend, passed to the CLI as `--model`. Empty
+  // string = let the CLI / account pick its default.
+  claudeModel: "",
+  codexModel: "",
   chatCwd: "",
   // Appearance: "system" follows the OS light/dark setting; "light"/"dark"
   // force a fixed appearance. Drives nativeTheme.themeSource, which in turn

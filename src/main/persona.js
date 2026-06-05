@@ -10,7 +10,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { app } = require("electron");
 const platform = require("./platform");
-const personaShe = require("./persona-she");
+const personaPrts = require("./persona-prts");
 
 function memoryDir() {
   return path.join(app.getPath("userData"), "memory");
@@ -252,7 +252,7 @@ function buildPersonaPrompt({
   // boundary) only when the conversation has turned personal or touches her
   // lore, so ordinary tasks stay light while she can become fully herself.
   if (deepPersona) {
-    prompt += personaShe.deepCanon();
+    prompt += personaPrts.deepCanon();
   }
 
   prompt +=
@@ -338,10 +338,20 @@ function buildPersonaPrompt({
   }
 
   if (screenshotPath) {
-    prompt +=
-      "【博士此刻的屏幕】\n" +
-      `  ${screenshotPath}\n` +
-      "如有需要，用 Read 工具查看后再回答；若与博士所问无关，不必打扰。\n\n";
+    if (provider === "codex") {
+      // Codex gets the screenshot as a real image input (-i), so it can see it
+      // directly. Tell it NOT to run screencapture — it can't read a file it
+      // captures itself, which is what made it stall after the tool call.
+      prompt +=
+        "【博士此刻的屏幕】\n" +
+        "本轮已把博士当前的屏幕作为图片直接附给你，你能看见它，据此回答即可。\n" +
+        "不要再运行 screencapture——你读不了自己截出的文件；要看屏幕就直接看这张已附上的图。看完务必给博士一个真正的回答，而不是只说你做了什么。若与所问无关，不必理会。\n\n";
+    } else {
+      prompt +=
+        "【博士此刻的屏幕】\n" +
+        `  ${screenshotPath}\n` +
+        "如有需要，用 Read 工具查看后再回答；若与博士所问无关，不必打扰。\n\n";
+    }
   }
 
   prompt +=
