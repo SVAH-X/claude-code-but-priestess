@@ -14,12 +14,16 @@
 //  have no checker); from this version on, Windows updates itself.
 // ============================================================
 
-const { app, shell, Notification } = require("electron");
+const { app, net, shell, Notification } = require("electron");
 
 const REPO_OWNER = "SVAH-X";
 const REPO_NAME = "claude-code-but-priestess";
 const RELEASES_PAGE = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest`;
-const API_LATEST = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest`;
+// Version is read from the release's latest.yml (electron-builder's update
+// metadata, attached to every release). This goes through github.com release
+// downloads — NOT api.github.com, whose 60 req/h unauthenticated limit is
+// trivially exhausted behind a shared proxy/VPN IP (→ 403 → "can't connect").
+const LATEST_YML = `${RELEASES_PAGE}/download/latest.yml`;
 
 const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 const FIRST_CHECK_DELAY_MS = 8 * 1000;
@@ -59,17 +63,19 @@ function isNewer(remote, local) {
   return false;
 }
 
-// macOS / dev / Linux: ask GitHub for the latest release and compare versions.
+// macOS / dev / Linux: read the latest published version from the release's
+// latest.yml and compare. Uses Electron's net.fetch (Chromium stack → respects
+// the system proxy) and a non-rate-limited github.com endpoint.
 async function checkViaApi(manual) {
   try {
-    const res = await fetch(API_LATEST, {
-      headers: { Accept: "application/vnd.github+json", "User-Agent": "PRTS-updater" }
-    });
-    if (!res.ok) throw new Error(`GitHub API ${res.status}`);
-    const json = await res.json();
-    const tag = json.tag_name || json.name || "";
-    if (tag && isNewer(tag, app.getVersion())) {
-      pending = { version: String(tag).replace(/^v/i, ""), action: "download" };
+    const res = await net.fetch(LATEST_YML, { headers: { "User-Agent": "PRTS-updater" } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    const match = text.match(/^version:\s*(.+)$/m);
+    const latest = match ? match[1].trim() : "";
+    if (!latest) throw new Error("no version field in latest.yml");
+    if (isNewer(latest, app.getVersion())) {
+      pending = { version: latest.replace(/^v/i, ""), action: "download" };
       notify(
         "PRTS 有新版本",
         `v${pending.version} 可用 — 点此前往下载。`,
@@ -79,8 +85,12 @@ async function checkViaApi(manual) {
       notify("PRTS 已是最新", `当前 v${app.getVersion()} 已是最新版本。`);
     }
   } catch (error) {
-    console.warn("updater: API check failed", error);
-    if (manual) notify("检查更新失败", "暂时无法连接到更新服务器，请稍后再试。");
+    console.warn("updater: version check failed", error);
+    if (manual) {
+      notify("检查更新失败", "暂时无法获取版本信息，点此打开下载页手动查看。", () =>
+        shell.openExternal(RELEASES_PAGE)
+      );
+    }
   }
 }
 
