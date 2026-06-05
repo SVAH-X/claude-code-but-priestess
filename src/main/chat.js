@@ -1344,8 +1344,19 @@ function notifyScreenPermissionOnce() {
   if (screenNoticeShown) return;
   screenNoticeShown = true;
   pushSystem(
-    "（我暂时看不到屏幕。请到 系统设置 → 隐私与安全性 → 屏幕录制 勾选 PRTS，然后重启我一次即可——这次起我不会再反复弹窗打扰博士。）"
+    "（我暂时看不到屏幕。已替博士打开「屏幕录制」设置——勾选 PRTS 后，从托盘菜单点「Restart Priestess」让我重启一次即可生效。这次起我不会再反复弹窗打扰博士。）"
   );
+  if (process.platform === "darwin") {
+    // Jump straight to the Screen Recording pane so the Doctor doesn't have to
+    // hunt for it. Done once per session (gated by screenNoticeShown).
+    try {
+      require("electron").shell.openExternal(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+      );
+    } catch {
+      /* ignore — the note still tells him where to go */
+    }
+  }
 }
 
 async function takeScreenshot() {

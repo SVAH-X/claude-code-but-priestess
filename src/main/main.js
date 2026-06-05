@@ -733,6 +733,10 @@ function buildContextMenu() {
     },
     { type: "separator" },
     {
+      label: "Restart Priestess",
+      click: () => restartApp()
+    },
+    {
       label: "Reveal data folder",
       click: () => shell.openPath(app.getPath("userData"))
     },
@@ -744,6 +748,14 @@ function buildContextMenu() {
       click: () => app.quit()
     }
   ]);
+}
+
+// Quit and relaunch. The main use is macOS Screen Recording: that permission
+// only takes effect after a restart, so once the Doctor grants it this makes
+// "grant → restart" a single click instead of a manual quit + reopen.
+function restartApp() {
+  app.relaunch();
+  app.exit(0);
 }
 
 // Update controls: a manual check plus, when something is waiting, an action

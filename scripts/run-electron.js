@@ -7,15 +7,18 @@ const electron = require("electron");
 const electronPackage = require("electron/package.json");
 const projectRoot = path.join(__dirname, "..");
 
-// Reuse the PACKAGED app's bundle identifier for the dev app. macOS 26 (Tahoe)
-// gates menu-bar status items behind a per-bundle-ID permission; the installed
-// "PRTS" app is already allowed, so by matching its id the dev app inherits
-// that permission and its tray icon shows too. (A distinct ".dev" id is treated
-// as a brand-new, not-yet-allowed app and stays invisible.)
+// Give the dev app its OWN bundle id (…menubar.dev), distinct from the packaged
+// "PRTS". Both are ad-hoc signed, and macOS TCC keys Screen Recording on
+// (bundle id + ad-hoc cdhash). Sharing one id made dev and packaged fight over a
+// single Screen-Recording slot — granting one wouldn't apply to the other, and
+// System Settings flipped between "PRTS" / "PRTS Dev". A distinct id keeps their
+// permissions separate. (Trade-off: on Tahoe the dev tray icon may need its own
+// one-time allow; that only affects `npm run dev`, never the shipped app.)
 const projectPackage = require(path.join(projectRoot, "package.json"));
 const packagedAppId =
   (projectPackage.build && projectPackage.build.appId) ||
   "local.claude-code-but-priestess.menubar";
+const devAppId = `${packagedAppId}.dev`;
 
 function runPlistBuddy(plistPath, command) {
   return spawnSync("/usr/libexec/PlistBuddy", ["-c", command, plistPath], {
@@ -60,7 +63,7 @@ function ensureDarwinDevApp(electronBinary) {
   const plistPath = path.join(devApp, "Contents", "Info.plist");
   setPlistValue(plistPath, "CFBundleName", "string", "PRTS Dev");
   setPlistValue(plistPath, "CFBundleDisplayName", "string", "PRTS Dev");
-  setPlistValue(plistPath, "CFBundleIdentifier", "string", packagedAppId);
+  setPlistValue(plistPath, "CFBundleIdentifier", "string", devAppId);
   setPlistValue(plistPath, "CFBundleIconFile", "string", "icon.icns");
   setPlistValue(plistPath, "LSApplicationCategoryType", "string", "public.app-category.utilities");
   setPlistValue(plistPath, "LSUIElement", "bool", "true");
