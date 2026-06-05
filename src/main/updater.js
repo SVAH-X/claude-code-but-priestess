@@ -1,38 +1,72 @@
 // ============================================================
 //  Auto-update
 //
-//  Windows: real silent update via electron-updater (NSIS). It downloads in
-//  the background and installs on the next quit; a notification + tray item
-//  let the Doctor restart-to-update immediately.
+//  Windows: real silent update via electron-updater (NSIS) — downloads in the
+//  background, installs on next quit (or tray "Restart to update").
 //
-//  macOS: Squirrel.Mac refuses unsigned updates and these builds are ad-hoc
-//  signed, so we don't try to self-install. Instead we check the GitHub
-//  Releases API, and if a newer version exists we notify and open the
-//  downloads page. (Same lightweight path is used in dev / on Linux.)
+//  macOS: ad-hoc signed, so Squirrel.Mac can't self-install. Instead we do a
+//  custom in-place update (no Apple Developer cert needed): read latest-mac.yml
+//  for the version + zip + sha512, download the zip, VERIFY its hash, extract
+//  it, then hand off to a small helper script that atomically swaps the app
+//  bundle and relaunches. The Doctor's data lives in userData (separate from
+//  the .app), so it is never touched.
 //
-//  The first build that ships this code can't update *older* installs (they
-//  have no checker); from this version on, Windows updates itself.
+//  Everything goes through github.com release downloads (NOT the rate-limited
+//  api.github.com), via Electron net.fetch (respects the system proxy).
 // ============================================================
 
-const { app, net, shell, Notification } = require("electron");
+const { app, net, shell, dialog, Notification } = require("electron");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const { spawn } = require("node:child_process");
 
 const REPO_OWNER = "SVAH-X";
 const REPO_NAME = "claude-code-but-priestess";
 const RELEASES_PAGE = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest`;
-// Version is read from the release's latest.yml (electron-builder's update
-// metadata, attached to every release). This goes through github.com release
-// downloads — NOT api.github.com, whose 60 req/h unauthenticated limit is
-// trivially exhausted behind a shared proxy/VPN IP (→ 403 → "can't connect").
+const LATEST_MAC_YML = `${RELEASES_PAGE}/download/latest-mac.yml`;
 const LATEST_YML = `${RELEASES_PAGE}/download/latest.yml`;
+const UA = { "User-Agent": "PRTS-updater" };
 
 const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 const FIRST_CHECK_DELAY_MS = 8 * 1000;
 
+// Helper that performs the swap AFTER this process exits. Static; the three
+// paths come in as $1/$2/$3 so nothing is interpolated into the script body.
+// Safety: the new app is first copied onto the target volume (while the live
+// app is untouched), then two atomic renames swap it in — the installed app is
+// never left half-written. The old app is kept as a backup and restored if the
+// rename fails.
+const SWAP_SCRIPT = `#!/bin/bash
+APP="$1"; NEW="$2"; PID="$3"
+DIR="$(dirname "$APP")"
+STAGE="$DIR/.prts-update.$$"
+OLD="$APP.old.$$"
+# wait for the running app to exit (up to ~60s)
+for i in $(seq 1 120); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done
+sleep 1
+rm -rf "$STAGE"
+# copy the new bundle onto the target volume while APP is still intact
+if ! /usr/bin/ditto "$NEW" "$STAGE"; then /usr/bin/open "$APP"; exit 1; fi
+/usr/bin/xattr -dr com.apple.quarantine "$STAGE" 2>/dev/null
+# atomic swap (APP is only ever the old or the new bundle, never partial)
+if mv "$APP" "$OLD" 2>/dev/null && mv "$STAGE" "$APP" 2>/dev/null; then
+  rm -rf "$OLD"
+else
+  if [ -d "$OLD" ] && [ ! -e "$APP" ]; then mv "$OLD" "$APP"; fi
+  rm -rf "$STAGE"
+fi
+/usr/bin/open "$APP"
+rm -rf "$NEW" 2>/dev/null
+`;
+
 let winUpdater = null;
-// Update the Doctor can act on. action: "install" (Windows, downloaded and
-// ready) or "download" (macOS, available to fetch from the page).
-let pending = null; // { version, action }
+// What the Doctor can act on. action: "install" (ready — Windows restart, or
+// macOS download+install) or "page" (just open the downloads page).
+let pending = null; // { version, action, zipName?, sha512? }
 let checking = false;
+let installing = false;
 
 function notify(title, body, onClick) {
   if (!Notification.isSupported()) return;
@@ -45,15 +79,10 @@ function notify(title, body, onClick) {
   }
 }
 
-// Numeric semver-ish compare ("0.5.10" > "0.5.2"). Ignores any pre-release
-// suffix, which is fine: our releases are plain x.y.z.
+// Numeric semver-ish compare ("0.5.10" > "0.5.2"). Pre-release suffix ignored.
 function isNewer(remote, local) {
   const norm = (v) =>
-    String(v)
-      .replace(/^v/i, "")
-      .split("-")[0]
-      .split(".")
-      .map((n) => parseInt(n, 10) || 0);
+    String(v).replace(/^v/i, "").split("-")[0].split(".").map((n) => parseInt(n, 10) || 0);
   const a = norm(remote);
   const b = norm(local);
   for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
@@ -63,24 +92,148 @@ function isNewer(remote, local) {
   return false;
 }
 
-// macOS / dev / Linux: read the latest published version from the release's
-// latest.yml and compare. Uses Electron's net.fetch (Chromium stack → respects
-// the system proxy) and a non-rate-limited github.com endpoint.
+async function fetchText(url) {
+  const res = await net.fetch(url, { headers: UA });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+// latest-mac.yml carries version + the update zip's name + its sha512.
+async function fetchMacUpdateInfo() {
+  try {
+    const text = await fetchText(LATEST_MAC_YML);
+    const version = text.match(/^version:\s*(.+)$/m)?.[1]?.trim();
+    const zipName = text.match(/^path:\s*(.+)$/m)?.[1]?.trim();
+    const sha512 = text.match(/^sha512:\s*(.+)$/m)?.[1]?.trim();
+    if (!version) return null;
+    if (zipName && zipName.endsWith(".zip") && sha512) return { version, zipName, sha512 };
+    return { version };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLatestVersion() {
+  try {
+    const text = await fetchText(LATEST_YML);
+    return text.match(/^version:\s*(.+)$/m)?.[1]?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// /Applications/PRTS.app from .../PRTS.app/Contents/MacOS/PRTS.
+function currentAppBundlePath() {
+  const exe = process.execPath || "";
+  const i = exe.indexOf(".app/");
+  return i === -1 ? null : exe.slice(0, i + 4);
+}
+
+function run(cmd, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: "ignore" });
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`))));
+  });
+}
+
+// macOS in-place install: download → verify → extract → atomic swap → relaunch.
+async function downloadAndInstallMac() {
+  if (installing || !pending || pending.action !== "install") return;
+  if (process.platform !== "darwin" || !app.isPackaged) {
+    shell.openExternal(RELEASES_PAGE);
+    return;
+  }
+  const appPath = currentAppBundlePath();
+  if (!appPath || !pending.zipName || !pending.sha512) {
+    shell.openExternal(RELEASES_PAGE);
+    return;
+  }
+
+  const { version, zipName, sha512 } = pending;
+  const choice = await dialog.showMessageBox({
+    type: "info",
+    title: "PRTS 更新",
+    message: `发现新版本 v${version}`,
+    detail:
+      "点「下载并安装」后，普瑞赛斯会下载、校验并自动重启完成更新。\n" +
+      "你的对话、记忆与设置都不受影响（它们存放在别处，不在 app 内）。",
+    buttons: ["稍后", "下载并安装"],
+    defaultId: 1,
+    cancelId: 0
+  });
+  if (choice.response !== 1) return;
+
+  installing = true;
+  const tmpDir = path.join(os.tmpdir(), `prts-update-${Date.now()}`);
+  try {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    notify("PRTS 正在更新", `正在下载 v${version}…`);
+
+    // 1) download — staged in temp, the installed app is untouched throughout.
+    const res = await net.fetch(`${RELEASES_PAGE}/download/${zipName}`, { headers: UA });
+    if (!res.ok) throw new Error(`download HTTP ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+
+    // 2) verify integrity before anything is installed.
+    const got = crypto.createHash("sha512").update(buf).digest("base64");
+    if (got !== sha512) throw new Error("sha512 mismatch — download corrupt");
+
+    const zipPath = path.join(tmpDir, zipName);
+    fs.writeFileSync(zipPath, buf);
+
+    // 3) extract with ditto (preserves the .app bundle's symlinks/attrs).
+    const stage = path.join(tmpDir, "extracted");
+    fs.mkdirSync(stage, { recursive: true });
+    await run("/usr/bin/ditto", ["-x", "-k", zipPath, stage]);
+    const appName = fs.readdirSync(stage).find((n) => n.endsWith(".app"));
+    if (!appName) throw new Error("no .app in update zip");
+    const newApp = path.join(stage, appName);
+    await run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", newApp]).catch(() => {});
+
+    // 4) hand off to the detached swap script, then quit so it can replace us.
+    const scriptPath = path.join(tmpDir, "prts-swap.sh");
+    fs.writeFileSync(scriptPath, SWAP_SCRIPT, { mode: 0o755 });
+    spawn("/bin/bash", [scriptPath, appPath, newApp, String(process.pid)], {
+      detached: true,
+      stdio: "ignore"
+    }).unref();
+    setTimeout(() => app.quit(), 300);
+  } catch (error) {
+    installing = false;
+    console.warn("updater: mac install failed", error);
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+    notify("自动更新失败", "无法完成自动安装，点此打开下载页手动更新。", () =>
+      shell.openExternal(RELEASES_PAGE)
+    );
+  }
+}
+
+// macOS / dev / Linux check. Offers in-place install when we have the verified
+// zip info (packaged macOS); otherwise just points at the downloads page.
 async function checkViaApi(manual) {
   try {
-    const res = await net.fetch(LATEST_YML, { headers: { "User-Agent": "PRTS-updater" } });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    const match = text.match(/^version:\s*(.+)$/m);
-    const latest = match ? match[1].trim() : "";
-    if (!latest) throw new Error("no version field in latest.yml");
-    if (isNewer(latest, app.getVersion())) {
-      pending = { version: latest.replace(/^v/i, ""), action: "download" };
-      notify(
-        "PRTS 有新版本",
-        `v${pending.version} 可用 — 点此前往下载。`,
-        () => shell.openExternal(RELEASES_PAGE)
-      );
+    const info = await fetchMacUpdateInfo();
+    const version = info?.version || (await fetchLatestVersion());
+    if (!version) throw new Error("no version info");
+
+    if (isNewer(version, app.getVersion())) {
+      const canInstall =
+        process.platform === "darwin" && app.isPackaged && info && info.zipName && info.sha512;
+      pending = canInstall
+        ? { version, action: "install", zipName: info.zipName, sha512: info.sha512 }
+        : { version, action: "page" };
+      if (canInstall) {
+        notify("PRTS 有新版本", `v${version} — 点此下载并自动安装。`, () => downloadAndInstallMac());
+      } else {
+        notify("PRTS 有新版本", `v${version} 可用 — 点此前往下载。`, () =>
+          shell.openExternal(RELEASES_PAGE)
+        );
+      }
     } else if (manual) {
       notify("PRTS 已是最新", `当前 v${app.getVersion()} 已是最新版本。`);
     }
@@ -97,7 +250,6 @@ async function checkViaApi(manual) {
 // Windows: electron-updater handles download + install.
 function initWindows() {
   try {
-    // Lazy require so non-Windows / dev never loads it.
     winUpdater = require("electron-updater").autoUpdater;
   } catch (error) {
     console.warn("updater: electron-updater unavailable", error);
@@ -132,8 +284,7 @@ function init() {
   }, RECHECK_INTERVAL_MS);
 }
 
-// Manual "Check for updates…" from the tray. Works in dev too (API path), so
-// the Doctor always gets feedback.
+// Manual "Check for updates…" from the tray. Works in dev too (notify-only).
 function checkNow() {
   if (checking) return;
   checking = true;
@@ -148,8 +299,13 @@ function checkNow() {
 }
 
 function installNow() {
-  if (winUpdater && pending?.action === "install") {
+  if (!pending) return;
+  if (useElectronUpdater() && winUpdater) {
     winUpdater.quitAndInstall();
+  } else if (process.platform === "darwin" && pending.action === "install") {
+    downloadAndInstallMac();
+  } else {
+    shell.openExternal(RELEASES_PAGE);
   }
 }
 
@@ -157,7 +313,6 @@ function openDownloadPage() {
   shell.openExternal(RELEASES_PAGE);
 }
 
-// Null unless an update is waiting; main.js reads this to add a tray item.
 function getPendingUpdate() {
   return pending;
 }

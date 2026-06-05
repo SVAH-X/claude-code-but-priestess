@@ -917,11 +917,20 @@ function buildUpdateMenuItems() {
   const pending = updater.getPendingUpdate();
   const items = [{ label: "Check for updates…", click: () => updater.checkNow() }];
   if (pending) {
-    items.push(
-      pending.action === "install"
-        ? { label: `Restart to update (v${pending.version})`, click: () => updater.installNow() }
-        : { label: `Download update (v${pending.version})…`, click: () => updater.openDownloadPage() }
-    );
+    if (pending.action === "install") {
+      // macOS downloads + installs in place; Windows restarts into the staged
+      // installer.
+      const label =
+        process.platform === "darwin"
+          ? `下载并安装 v${pending.version}…`
+          : `Restart to update (v${pending.version})`;
+      items.push({ label, click: () => updater.installNow() });
+    } else {
+      items.push({
+        label: `Download update (v${pending.version})…`,
+        click: () => updater.openDownloadPage()
+      });
+    }
   }
   return items;
 }
