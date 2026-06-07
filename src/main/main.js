@@ -1,7 +1,6 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
-const { spawn } = require("node:child_process");
 const {
   app,
   BrowserWindow,
@@ -21,6 +20,7 @@ const chat = require("./chat");
 const persona = require("./persona");
 const platform = require("./platform");
 const updater = require("./updater");
+const { spawnCli } = require("./cli-spawn");
 
 let conversationFile = null;
 let saveTimer = null;
@@ -838,9 +838,8 @@ function refreshCodexModelPresetsInBackground(command) {
   let stdout = "";
   let killed = false;
   try {
-    const proc = spawn(command, ["debug", "models"], {
+    const proc = spawnCli(command, ["debug", "models"], {
       env: { ...process.env, NO_COLOR: "1" },
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
       stdio: ["ignore", "pipe", "ignore"]
     });
     const timer = setTimeout(() => {

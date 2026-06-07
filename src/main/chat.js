@@ -3,13 +3,14 @@
 //  Claude Code and Codex keep separate session ids, while persona,
 //  memory, working directory, and renderer state stay shared.
 // ============================================================
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const settings = require("./settings");
 const persona = require("./persona");
 const skills = require("./skills");
+const { spawnCli, spawnCliSync } = require("./cli-spawn");
 
 const PROVIDERS = Object.freeze({
   CLAUDE: "claude",
@@ -124,13 +125,34 @@ function pathEnvDirs() {
 function commonBinDirs() {
   const home = os.homedir();
   if (process.platform === "win32") {
-    return unique([
-      process.env.APPDATA && path.join(process.env.APPDATA, "npm"),
-      process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs"),
-      process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs", "OpenAI", "Codex", "bin"),
-      path.join(home, "AppData", "Local", "Programs", "OpenAI", "Codex", "bin"),
+    const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+    const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+    const programData = process.env.ProgramData || "C:\\ProgramData";
+    const programRoots = unique([
       process.env.ProgramFiles,
+      process.env.ProgramW6432,
       process.env["ProgramFiles(x86)"],
+      "C:\\Program Files",
+      "C:\\Program Files (x86)"
+    ]);
+    return unique([
+      appData && path.join(appData, "npm"),
+      localAppData && path.join(localAppData, "Programs"),
+      localAppData && path.join(localAppData, "Programs", "OpenAI", "Codex", "bin"),
+      localAppData && path.join(localAppData, "pnpm"),
+      localAppData && path.join(localAppData, "Yarn", "bin"),
+      localAppData && path.join(localAppData, "Volta", "bin"),
+      path.join(home, "scoop", "shims"),
+      path.join(home, ".volta", "bin"),
+      path.join(home, "AppData", "Local", "Programs", "OpenAI", "Codex", "bin"),
+      programData && path.join(programData, "chocolatey", "bin"),
+      process.env.NPM_CONFIG_PREFIX,
+      ...programRoots,
+      ...programRoots.flatMap((root) => [
+        path.join(root, "nodejs"),
+        path.join(root, "nodejs", "node_global"),
+        path.join(root, "nodejs", "node_modules", ".bin")
+      ]),
       path.join(home, ".local", "bin"),
       path.join(home, ".codex", "bin"),
       path.join(home, ".claude", "local")
@@ -207,11 +229,10 @@ function canAccessExecutable(candidate) {
 
 function canSpawnExecutable(candidate) {
   try {
-    const probe = spawnSync(candidate, ["--version"], {
+    const probe = spawnCliSync(candidate, ["--version"], {
       env: { ...process.env, CLAUDE_CODE_NONINTERACTIVE: "1" },
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(candidate),
       stdio: "ignore",
-      timeout: 1800
+      timeout: process.platform === "win32" ? 5000 : 1800
     });
     return !probe.error && probe.status === 0;
   } catch {
@@ -317,6 +338,30 @@ function resolveExecutable(command) {
   return ensureProviderAvailability()[normalized]?.command || command;
 }
 
+function createInvocationTempFile(prefix, filename, text) {
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    const file = path.join(dir, filename);
+    fs.writeFileSync(file, String(text || ""), "utf8");
+    return { dir, file };
+  } catch (error) {
+    console.warn("chat: failed to create invocation temp file", error);
+    return null;
+  }
+}
+
+function cleanupInvocation(invocation) {
+  if (!invocation || invocation.cleanedUp) return;
+  invocation.cleanedUp = true;
+  for (const dir of invocation.cleanupDirs || []) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      console.warn("chat: failed to clean invocation temp dir", error);
+    }
+  }
+}
+
 function parseCodexModelCatalog(stdout) {
   const line = String(stdout || "")
     .split(/\r?\n/)
@@ -347,10 +392,9 @@ function loadCodexModelCatalog() {
     return codexModelCatalogCache.values;
   }
   try {
-    const result = spawnSync(command, ["debug", "models"], {
+    const result = spawnCliSync(command, ["debug", "models"], {
       encoding: "utf8",
       env: { ...process.env, NO_COLOR: "1" },
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
       timeout: 3000,
       maxBuffer: 8 * 1024 * 1024
     });
@@ -1614,24 +1658,31 @@ async function takeScreenshot() {
 function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript) {
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
+  const systemPrompt = persona.buildPersonaPrompt({
+    agentMode,
+    screenshotPath,
+    provider: PROVIDERS.CLAUDE,
+    sharedTranscript,
+    includeLongMemory,
+    memoryRecallRequested,
+    skillsEnabled: settings.get("skillsEnabled") !== false,
+    deepPersona: shouldUseDeepPersona(trimmed)
+  });
+  const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
     "-p",
     "--output-format",
     "stream-json",
+    "--input-format",
+    "text",
     "--verbose",
-    "--include-partial-messages",
-    "--append-system-prompt",
-    persona.buildPersonaPrompt({
-      agentMode,
-      screenshotPath,
-      provider: PROVIDERS.CLAUDE,
-      sharedTranscript,
-      includeLongMemory,
-      memoryRecallRequested,
-      skillsEnabled: settings.get("skillsEnabled") !== false,
-      deepPersona: shouldUseDeepPersona(trimmed)
-    })
+    "--include-partial-messages"
   ];
+  if (promptFile) {
+    args.push("--append-system-prompt-file", promptFile.file);
+  } else {
+    args.push("--append-system-prompt", systemPrompt);
+  }
 
   const claudeModel = String(settings.get("claudeModel") || "").trim();
   if (claudeModel) {
@@ -1643,24 +1694,18 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
   } else {
     // Without agent mode she still needs file tools for memory + light helpfulness.
     // Bash and network tools stay off until the Doctor enables agent mode.
-    args.push("--allowedTools", "Read Edit Write Glob Grep LS");
+    args.push("--allowedTools", "Read,Edit,Write,Glob,Grep,LS");
   }
 
   if (sessionIds[PROVIDERS.CLAUDE]) {
     args.push("--resume", sessionIds[PROVIDERS.CLAUDE]);
   }
-  // `--` terminates option parsing. Without it, variadic flags like
-  // `--allowedTools` (which accepts several space-separated tool names as
-  // separate argv entries) greedily swallow the trailing positional prompt,
-  // leaving claude with no input → it exits with "Input must be provided"
-  // and the Doctor sees an empty reply. The separator guarantees the prompt
-  // is always treated as the positional input, even if it begins with "-".
-  args.push("--", trimmed);
 
   return {
     command: resolveExecutable("claude"),
     args,
-    stdin: null
+    stdin: `${trimmed}\n`,
+    cleanupDirs: promptFile ? [promptFile.dir] : []
   };
 }
 
@@ -1858,16 +1903,16 @@ async function launchProviderTurn({
   let proc;
   try {
     turnLaunching = false;
-    proc = spawn(invocation.command, invocation.args, {
+    proc = spawnCli(invocation.command, invocation.args, {
       cwd,
       env: { ...process.env, CLAUDE_CODE_NONINTERACTIVE: "1" },
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(invocation.command)
     });
     if (invocation.stdin != null) {
       proc.stdin.end(invocation.stdin);
     }
   } catch (error) {
     turnLaunching = false;
+    cleanupInvocation(invocation);
     pushSystem(
       `Failed to launch \`${providerLabel(provider)}\`: ${error.message}. Is the CLI installed and on PATH?`
     );
@@ -1904,6 +1949,7 @@ async function launchProviderTurn({
 
   proc.on("error", (error) => {
     if (currentProcess !== proc) return;
+    cleanupInvocation(invocation);
     pushSystem(`\`${providerLabel(provider)}\` process error: ${error.message}`);
     finalizeAssistant("");
     currentProcess = null;
@@ -1943,6 +1989,7 @@ async function launchProviderTurn({
       resumeRetryInFlight = true;
       claudeResultErrored = false;
       if (pendingAssistantId) finalizeAssistant(""); // clears the empty bubble
+      cleanupInvocation(invocation);
       currentProcess = null;
       currentProvider = null;
       setImmediate(() => dispatchSend(trimmed, { userAlreadyShown: true, chained: true }));
@@ -1964,6 +2011,7 @@ async function launchProviderTurn({
       claudeModelInvalid = false;
       if (pendingAssistantId) finalizeAssistant("");
       pushSystem(`Claude 模型 \`${badClaudeModel}\` 当前账号不可用，已切回默认并重试。`);
+      cleanupInvocation(invocation);
       currentProcess = null;
       currentProvider = null;
       setImmediate(() => dispatchSend(trimmed, { userAlreadyShown: true, chained: true }));
@@ -1976,6 +2024,7 @@ async function launchProviderTurn({
       codexContinuationPending = false;
       codexAutoContinued = true;
       if (pendingAssistantId) finalizeAssistant("");
+      cleanupInvocation(invocation);
       currentProcess = null;
       currentProvider = null;
       claudeResultErrored = false;
@@ -2001,6 +2050,7 @@ async function launchProviderTurn({
       );
     }
     if (pendingAssistantId) finalizeAssistant("");
+    cleanupInvocation(invocation);
     currentProcess = null;
     currentProvider = null;
     claudeResultErrored = false;
