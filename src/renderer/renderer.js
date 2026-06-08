@@ -847,10 +847,11 @@ let backendReady = true;
 let currentAssistantId = null;
 let lastHistory = [];
 
-// Tool pills show their command + output expanded by default (the Doctor wants
-// the logs). This tracks the ones she's manually collapsed so the choice
-// survives the frequent full re-renders of the chat stream.
-const toolCollapsed = new Set();
+// Tool pills are collapsed to a compact label by default, so a run of commands
+// and their output can't bury what she actually said (which sits just above the
+// pills). This tracks the ones the Doctor has expanded so the choice survives
+// the frequent full re-renders of the chat stream.
+const toolExpanded = new Set();
 
 // Model-chosen expression for the current reply (from the persona's hidden
 // [[mood:X]] tag). Applied to her face when the reply finishes, so her
@@ -874,14 +875,43 @@ function escapeHtml(text) {
   );
 }
 
+// Inline-level markdown — escape first, then code / bold / italic / links.
+// Shared by the main flow and the contents of list items / blockquotes.
+function inlineMd(text) {
+  let s = escapeHtml(text);
+  s = s.replace(/`([^`\n]+?)`/g, (_, code) => `<code>${code}</code>`);
+  s = s.replace(/\*\*([^*\n][^*]*?)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  return s;
+}
+
 function renderMarkdown(input) {
   if (!input) return "";
   const codeBlocks = [];
   // Pull out fenced blocks first so other rules don't munge their contents.
   let src = String(input).replace(/```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
     codeBlocks.push({ lang: lang.toLowerCase(), code });
-    return `\u0000CB${codeBlocks.length - 1}\u0000`;
+    return `\fCB${codeBlocks.length - 1}\f`;
   });
+
+  // Pull out block elements (lists, blockquotes) into placeholders before the
+  // newline -> <br> flattening, rendering their contents with inlineMd.
+  const htmlBlocks = [];
+  const stash = (html) => `\fHB${htmlBlocks.push(html) - 1}\f`;
+  const listItems = (block, marker) =>
+    block.trimEnd().split("\n")
+      .map((l) => `<li>${inlineMd(l.replace(marker, ""))}</li>`)
+      .join("");
+  src = src.replace(/(?:^[ \t]*[-*][ \t]+.*(?:\n|$))+/gm,
+    (block) => `\n${stash(`<ul>${listItems(block, /^[ \t]*[-*][ \t]+/)}</ul>`)}\n`);
+  src = src.replace(/(?:^[ \t]*\d+\.[ \t]+.*(?:\n|$))+/gm,
+    (block) => `\n${stash(`<ol>${listItems(block, /^[ \t]*\d+\.[ \t]+/)}</ol>`)}\n`);
+  src = src.replace(/(?:^[ \t]*>[ \t]?.*(?:\n|$))+/gm, (block) =>
+    `\n${stash(`<blockquote>${block.trimEnd().split("\n")
+      .map((l) => inlineMd(l.replace(/^[ \t]*>[ \t]?/, ""))).join("<br>")}</blockquote>`)}\n`);
+
   src = escapeHtml(src);
   // Inline code
   src = src.replace(/`([^`\n]+?)`/g, (_, code) => `<code>${code}</code>`);
@@ -894,10 +924,13 @@ function renderMarkdown(input) {
   // Links — http/https only
   src = src.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  // Newlines → <br>; collapse extras
+  // Newlines -> <br>; collapse extras
   src = src.replace(/\n{2,}/g, "<br><br>").replace(/\n/g, "<br>");
-  // Re-insert code blocks
-  src = src.replace(/\u0000CB(\d+)\u0000/g, (_, idx) => {
+  // Re-insert block elements first (absorbing the <br>s the flattening left
+  // around the placeholders, since these are already block-level)…
+  src = src.replace(/(?:<br>)*\fHB(\d+)\f(?:<br>)*/g, (_, idx) => htmlBlocks[Number(idx)]);
+  // …then the fenced code blocks.
+  src = src.replace(/\fCB(\d+)\f/g, (_, idx) => {
     const { lang, code } = codeBlocks[Number(idx)];
     const langClass = lang ? ` class="lang-${escapeHtml(lang)}"` : "";
     return `<pre><code${langClass}>${escapeHtml(code)}</code></pre>`;
@@ -971,13 +1004,13 @@ function buildMsgEl(msg) {
       el.append(detail);
 
       const sync = () => {
-        const open = !toolCollapsed.has(msg.id);
+        const open = toolExpanded.has(msg.id);
         detail.hidden = !open;
         caret.textContent = open ? "▾" : "▸";
       };
       pill.addEventListener("click", () => {
-        if (toolCollapsed.has(msg.id)) toolCollapsed.delete(msg.id);
-        else toolCollapsed.add(msg.id);
+        if (toolExpanded.has(msg.id)) toolExpanded.delete(msg.id);
+        else toolExpanded.add(msg.id);
         sync();
       });
       sync();

@@ -584,6 +584,23 @@ button.tool-pill:hover {
   text-underline-offset: 2px;
 }
 
+.msg.assistant ul,
+.msg.assistant ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.msg.assistant li {
+  margin: 1px 0;
+}
+
+.msg.assistant blockquote {
+  margin: 4px 0;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--muted);
+}
+
 .empty-state {
   text-align: center;
   color: var(--muted);
@@ -673,8 +690,12 @@ button.primary:disabled {
   -webkit-app-region: no-drag;
 }
 
+/* Start the side strips below the 32px header (#dragHandle) so touching the
+   PRTS label / Clear-Stop buttons near a corner can't start a window resize —
+   especially on touchscreens, where a touch easily drifts past the drag
+   threshold. */
 .resize-edge.e {
-  top: 4px;
+  top: 36px;
   bottom: 10px;
   right: 0;
   width: 6px;
@@ -682,7 +703,7 @@ button.primary:disabled {
 }
 
 .resize-edge.w {
-  top: 4px;
+  top: 36px;
   bottom: 10px;
   left: 0;
   width: 6px;
