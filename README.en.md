@@ -233,6 +233,15 @@ claude          # follow the auth flow once
 which claude    # should print a path on your $PATH
 ```
 
+> 💡 **Budget tip**: if you only want to chat with Priestess and don't need a
+> powerful model doing heavy lifting, you can point Claude Code at the cheaper
+> **DeepSeek API** — DeepSeek exposes an Anthropic-compatible endpoint, so you
+> just set the base URL, model and key in `~/.claude/settings.json`. Example
+> walkthrough (Chinese): <https://zhuanlan.zhihu.com/p/2031406587932304990>.
+> Keep the config in `settings.json` (so the `claude` subprocess PRTS spawns
+> inherits it) and leave the tray **Model menu on "default"** — don't pick a
+> Claude-only model, or it'll request a model DeepSeek doesn't have.
+
 For Codex, make sure the local `codex` CLI is installed and authenticated:
 
 ```sh

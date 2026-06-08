@@ -175,6 +175,14 @@ claude          # 第一次运行时按提示登录
 which claude    # 应该能输出路径
 ```
 
+> 💡 **省钱小贴士**：如果你只是想和普瑞赛斯聊天互动，并不需要强模型干重活，可以让
+> Claude Code 接入更便宜的 **DeepSeek API**——DeepSeek 提供 Anthropic 兼容接口，在
+> `~/.claude/settings.json` 里配置后端地址、模型和 key 即可。示例教程：
+> <https://zhuanlan.zhihu.com/p/2031406587932304990> 。
+> 注意：配置写在 `settings.json`（这样 PRTS 拉起的 `claude` 子进程也能继承到），并把
+> 托盘的 **Model 菜单保持「默认」**，不要选 Claude 专有型号（否则会去 DeepSeek 端请求
+> 不存在的模型）。
+
 Codex 需要先安装并登录：
 
 ```sh
