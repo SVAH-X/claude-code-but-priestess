@@ -743,24 +743,38 @@ let winMoveStartX = NaN;
 let winMoveStartY = NaN;
 
 const MOVE_THRESHOLD = 3; // px — ignore sub-pixel jitter on quiet input devices
+const IS_WINDOWS = window.petApi?.isWindows === true;
 
 async function handleHeaderPointerDown(event) {
   if (event.button !== 0) return;
   if (event.target.closest("button")) return;
-  event.preventDefault();
-  event.stopPropagation();
   isWindowMoving = true;
   winMoveStartScreenX = event.screenX;
   winMoveStartScreenY = event.screenY;
+
+  if (IS_WINDOWS) {
+    event.preventDefault();
+    event.stopPropagation();
+    // Tear down any stale listeners from a previous drag whose pointerup
+    // was lost (e.g. released outside the window at a screen edge).
+    document.removeEventListener("pointermove", handleHeaderPointerMove);
+    document.removeEventListener("pointerup", handleHeaderPointerUpOnce);
+    document.removeEventListener("pointercancel", handleHeaderPointerUpOnce);
+    // Document-level listeners avoid Win32 SetCapture() → spurious WM_SIZE
+    // on frameless windows that shrinks the popover while pressed.
+    document.addEventListener("pointermove", handleHeaderPointerMove);
+    document.addEventListener("pointerup", handleHeaderPointerUpOnce);
+    document.addEventListener("pointercancel", handleHeaderPointerUpOnce);
+  } else {
+    try {
+      dragHandle.setPointerCapture(event.pointerId);
+    } catch {
+      /* continue without capture */
+    }
+  }
+
   document.body.classList.add("is-window-moving");
   lockMood("happy", { durationMs: DRAG_LOCK_DURATION });
-
-  // Use document-level listeners instead of setPointerCapture to avoid
-  // Win32 SetCapture() triggering spurious WM_SIZE on Windows frameless
-  // windows — that shrinks the popover continuously while pressed.
-  document.addEventListener("pointermove", handleHeaderPointerMove);
-  document.addEventListener("pointerup", handleHeaderPointerUpOnce);
-  document.addEventListener("pointercancel", handleHeaderPointerUpOnce);
 
   const bounds = await window.petApi?.getPopoverBounds?.();
   if (!isWindowMoving || !bounds) return;
@@ -777,13 +791,13 @@ function handleHeaderPointerMove(event) {
   if (Math.abs(dx) < MOVE_THRESHOLD && Math.abs(dy) < MOVE_THRESHOLD) return;
 
   event.preventDefault();
-  const dpr = window.devicePixelRatio || 1;
   window.petApi?.movePopover?.({
-    x: winMoveStartX + dx * dpr,
-    y: winMoveStartY + dy * dpr
+    x: winMoveStartX + dx,
+    y: winMoveStartY + dy
   })?.catch?.(() => {});
 }
 
+// Windows only: wrapper that tears down document-level listeners
 function handleHeaderPointerUpOnce(event) {
   document.removeEventListener("pointermove", handleHeaderPointerMove);
   document.removeEventListener("pointerup", handleHeaderPointerUpOnce);
@@ -796,16 +810,36 @@ function handleHeaderPointerUp(event) {
   isWindowMoving = false;
   winMoveStartX = NaN;
   winMoveStartY = NaN;
+
+  if (IS_WINDOWS) {
+    // document listeners are torn down by handleHeaderPointerUpOnce above
+  } else {
+    try {
+      dragHandle.releasePointerCapture(event.pointerId);
+    } catch {
+      /* already released */
+    }
+  }
+
   document.body.classList.remove("is-window-moving");
   releaseClickLock();
-  window.petApi?.endMovePopover?.()?.catch?.(() => {});
+
+  if (IS_WINDOWS) {
+    window.petApi?.endMovePopover?.()?.catch?.(() => {});
+  }
 }
 
 dragHandle?.addEventListener("pointerdown", handleHeaderPointerDown);
-// pointermove / pointerup are registered on document during drag so the
-// pointer is tracked even when it leaves the header — without invoking
-// setPointerCapture, whose underlying Win32 SetCapture() causes the
-// spurious WM_SIZE on Windows frameless windows.
+if (IS_WINDOWS) {
+  // pointermove / pointerup are registered on document during drag so the
+  // pointer is tracked even when it leaves the header — without invoking
+  // setPointerCapture, whose underlying Win32 SetCapture() causes the
+  // spurious WM_SIZE on Windows frameless windows.
+} else {
+  dragHandle?.addEventListener("pointermove", handleHeaderPointerMove);
+  dragHandle?.addEventListener("pointerup", handleHeaderPointerUp);
+  dragHandle?.addEventListener("pointercancel", handleHeaderPointerUp);
+}
 
 function handleStageClick(event) {
   if (justDragged) {

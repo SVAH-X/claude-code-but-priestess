@@ -50,6 +50,7 @@ let popover;
 let popoverSizeSaveTimer = null;
 let isMovingPopover = false;
 let popoverSizeAtMoveStart = null;
+let moveEndFallbackTimer = null;
 let desktopPet;
 let desktopPetTimer = null;
 let desktopPetPositionSaveTimer = null;
@@ -166,7 +167,7 @@ function scheduleSavePopoverSize() {
   // Windows may fire a spurious WM_SIZE during setPosition on frameless
   // windows — skip the save while a move is in flight so a transient
   // wrong size is never persisted to settings.
-  if (isMovingPopover) return;
+  if (process.platform === 'win32' && isMovingPopover) return;
   clearTimeout(popoverSizeSaveTimer);
   popoverSizeSaveTimer = setTimeout(() => {
     if (!popover || popover.isDestroyed()) return;
@@ -205,6 +206,20 @@ function resizePopoverDrag({ edge = "se", start = {}, dx = 0, dy = 0 } = {}) {
   return { x, y, width, height };
 }
 
+// Shared fallback: if the renderer crashes or the pointer is released outside
+// the window (no pointerup on document), reset after 5 s of inactivity so the
+// size-save guard does not stay locked forever.  Reset on every move so an
+// active long-press never trips the timeout.
+function resetMoveEndFallback() {
+  clearTimeout(moveEndFallbackTimer);
+  moveEndFallbackTimer = setTimeout(() => {
+    isMovingPopover = false;
+    // popoverSizeAtMoveStart intentionally NOT cleared —
+    // it's the only defense against cumulative WM_SIZE shrinks.
+    // Next getPopoverBounds (new drag) overwrites it with fresh values.
+  }, 5000);
+}
+
 // Move the popover to an absolute screen position, clamped so it stays within
 // the work area of whichever display the target point lands on. Used by the
 // "carry her around the screen" gesture in the renderer.
@@ -221,12 +236,15 @@ function movePopoverTo(point = {}) {
   const work = display.workArea;
   const x = clampNumber(targetX, work.x, work.x + work.width - bounds.width);
   const y = clampNumber(targetY, work.y, work.y + work.height - bounds.height);
-  isMovingPopover = true;
-  // Lock the size to what it was when the drag started so Windows cannot
-  // accumulate spurious WM_SIZE shrinks across successive setBounds calls.
-  const w = popoverSizeAtMoveStart?.width ?? bounds.width;
-  const h = popoverSizeAtMoveStart?.height ?? bounds.height;
-  popover.setBounds({ x, y, width: w, height: h }, false);
+  if (process.platform === 'win32') {
+    isMovingPopover = true;
+    resetMoveEndFallback();
+    const w = popoverSizeAtMoveStart?.width ?? bounds.width;
+    const h = popoverSizeAtMoveStart?.height ?? bounds.height;
+    popover.setBounds({ x, y, width: w, height: h }, false);
+  } else {
+    popover.setPosition(x, y, false);
+  }
   return { x, y };
 }
 
@@ -1365,15 +1383,21 @@ ipcMain.handle("popover:move", (_, point) => movePopoverTo(point));
 
 ipcMain.handle("popover:get-bounds", () => {
   if (!popover || popover.isDestroyed()) return null;
-  isMovingPopover = true;
-  const bounds = popover.getBounds();
-  popoverSizeAtMoveStart = { width: bounds.width, height: bounds.height };
-  return bounds;
+  if (process.platform === 'win32') {
+    isMovingPopover = true;
+    const bounds = popover.getBounds();
+    popoverSizeAtMoveStart = { width: bounds.width, height: bounds.height };
+    resetMoveEndFallback();
+    return bounds;
+  }
+  return popover.getBounds();
 });
 
 ipcMain.handle("popover:move-end", () => {
+  if (process.platform !== 'win32') return;
   isMovingPopover = false;
   popoverSizeAtMoveStart = null;
+  clearTimeout(moveEndFallbackTimer);
 });
 
 ipcMain.handle("popover:resize-drag", (_, payload) => resizePopoverDrag(payload));
