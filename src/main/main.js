@@ -48,6 +48,8 @@ const DESKTOP_PET_SIZES = Object.freeze({
 let tray;
 let popover;
 let popoverSizeSaveTimer = null;
+let isMovingPopover = false;
+let popoverSizeAtMoveStart = null;
 let desktopPet;
 let desktopPetTimer = null;
 let desktopPetPositionSaveTimer = null;
@@ -161,6 +163,10 @@ function initialPopoverSize() {
 
 function scheduleSavePopoverSize() {
   if (!popover || popover.isDestroyed()) return;
+  // Windows may fire a spurious WM_SIZE during setPosition on frameless
+  // windows — skip the save while a move is in flight so a transient
+  // wrong size is never persisted to settings.
+  if (isMovingPopover) return;
   clearTimeout(popoverSizeSaveTimer);
   popoverSizeSaveTimer = setTimeout(() => {
     if (!popover || popover.isDestroyed()) return;
@@ -215,7 +221,12 @@ function movePopoverTo(point = {}) {
   const work = display.workArea;
   const x = clampNumber(targetX, work.x, work.x + work.width - bounds.width);
   const y = clampNumber(targetY, work.y, work.y + work.height - bounds.height);
-  popover.setPosition(x, y, false);
+  isMovingPopover = true;
+  // Lock the size to what it was when the drag started so Windows cannot
+  // accumulate spurious WM_SIZE shrinks across successive setBounds calls.
+  const w = popoverSizeAtMoveStart?.width ?? bounds.width;
+  const h = popoverSizeAtMoveStart?.height ?? bounds.height;
+  popover.setBounds({ x, y, width: w, height: h }, false);
   return { x, y };
 }
 
@@ -1354,7 +1365,15 @@ ipcMain.handle("popover:move", (_, point) => movePopoverTo(point));
 
 ipcMain.handle("popover:get-bounds", () => {
   if (!popover || popover.isDestroyed()) return null;
-  return popover.getBounds();
+  isMovingPopover = true;
+  const bounds = popover.getBounds();
+  popoverSizeAtMoveStart = { width: bounds.width, height: bounds.height };
+  return bounds;
+});
+
+ipcMain.handle("popover:move-end", () => {
+  isMovingPopover = false;
+  popoverSizeAtMoveStart = null;
 });
 
 ipcMain.handle("popover:resize-drag", (_, payload) => resizePopoverDrag(payload));
