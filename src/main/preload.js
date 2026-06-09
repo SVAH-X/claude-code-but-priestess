@@ -9,10 +9,12 @@ function onChannel(channel) {
 }
 
 contextBridge.exposeInMainWorld("petApi", {
+  isWindows: process.platform === 'win32',
   hidePopover: () => ipcRenderer.invoke("popover:hide"),
   getPopoverBounds: () => ipcRenderer.invoke("popover:get-bounds"),
   resizePopoverDrag: (payload) => ipcRenderer.invoke("popover:resize-drag", payload),
   movePopover: (point) => ipcRenderer.invoke("popover:move", point),
+  endMovePopover: () => ipcRenderer.invoke("popover:move-end"),
   notePopoverActivity: () => ipcRenderer.invoke("popover:activity"),
   openChatFromDesktopPet: () => ipcRenderer.invoke("desktop-pet:open-chat"),
   moveDesktopPet: (point) => ipcRenderer.invoke("desktop-pet:move", point),

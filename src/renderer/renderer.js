@@ -736,52 +736,110 @@ const dragHandle = document.getElementById("dragHandle");
 let isWindowMoving = false;
 let winMoveStartScreenX = 0;
 let winMoveStartScreenY = 0;
-let winMoveStartX = 0;
-let winMoveStartY = 0;
+// NaN sentinel — move IPC skips pointer-move events until the main process
+// responds with real bounds, so mixed CSS/device-pixel coordinates on Windows
+// DPI scaling cannot drift the window position toward the wrong corner.
+let winMoveStartX = NaN;
+let winMoveStartY = NaN;
 
-function handleHeaderPointerDown(event) {
+const MOVE_THRESHOLD = 3; // px — ignore sub-pixel jitter on quiet input devices
+const IS_WINDOWS = window.petApi?.isWindows === true;
+
+async function handleHeaderPointerDown(event) {
   if (event.button !== 0) return;
-  // Let the Clear/Stop buttons (and any control) work normally.
   if (event.target.closest("button")) return;
   isWindowMoving = true;
   winMoveStartScreenX = event.screenX;
   winMoveStartScreenY = event.screenY;
-  winMoveStartX = window.screenX;
-  winMoveStartY = window.screenY;
-  try {
-    dragHandle.setPointerCapture(event.pointerId);
-  } catch {
-    /* continue without capture */
+
+  if (IS_WINDOWS) {
+    event.preventDefault();
+    event.stopPropagation();
+    // Tear down any stale listeners from a previous drag whose pointerup
+    // was lost (e.g. released outside the window at a screen edge).
+    document.removeEventListener("pointermove", handleHeaderPointerMove);
+    document.removeEventListener("pointerup", handleHeaderPointerUpOnce);
+    document.removeEventListener("pointercancel", handleHeaderPointerUpOnce);
+    // Document-level listeners avoid Win32 SetCapture() → spurious WM_SIZE
+    // on frameless windows that shrinks the popover while pressed.
+    document.addEventListener("pointermove", handleHeaderPointerMove);
+    document.addEventListener("pointerup", handleHeaderPointerUpOnce);
+    document.addEventListener("pointercancel", handleHeaderPointerUpOnce);
+  } else {
+    try {
+      dragHandle.setPointerCapture(event.pointerId);
+    } catch {
+      /* continue without capture */
+    }
   }
+
   document.body.classList.add("is-window-moving");
   lockMood("happy", { durationMs: DRAG_LOCK_DURATION });
+
+  const bounds = await window.petApi?.getPopoverBounds?.();
+  if (!isWindowMoving || !bounds) return;
+  winMoveStartX = bounds.x;
+  winMoveStartY = bounds.y;
 }
 
 function handleHeaderPointerMove(event) {
   if (!isWindowMoving) return;
+  if (!Number.isFinite(winMoveStartX)) return;
+
+  const dx = event.screenX - winMoveStartScreenX;
+  const dy = event.screenY - winMoveStartScreenY;
+  if (Math.abs(dx) < MOVE_THRESHOLD && Math.abs(dy) < MOVE_THRESHOLD) return;
+
   event.preventDefault();
   window.petApi?.movePopover?.({
-    x: winMoveStartX + (event.screenX - winMoveStartScreenX),
-    y: winMoveStartY + (event.screenY - winMoveStartScreenY)
+    x: winMoveStartX + dx,
+    y: winMoveStartY + dy
   })?.catch?.(() => {});
+}
+
+// Windows only: wrapper that tears down document-level listeners
+function handleHeaderPointerUpOnce(event) {
+  document.removeEventListener("pointermove", handleHeaderPointerMove);
+  document.removeEventListener("pointerup", handleHeaderPointerUpOnce);
+  document.removeEventListener("pointercancel", handleHeaderPointerUpOnce);
+  handleHeaderPointerUp(event);
 }
 
 function handleHeaderPointerUp(event) {
   if (!isWindowMoving) return;
   isWindowMoving = false;
-  try {
-    dragHandle.releasePointerCapture(event.pointerId);
-  } catch {
-    /* already released */
+  winMoveStartX = NaN;
+  winMoveStartY = NaN;
+
+  if (IS_WINDOWS) {
+    // document listeners are torn down by handleHeaderPointerUpOnce above
+  } else {
+    try {
+      dragHandle.releasePointerCapture(event.pointerId);
+    } catch {
+      /* already released */
+    }
   }
+
   document.body.classList.remove("is-window-moving");
   releaseClickLock();
+
+  if (IS_WINDOWS) {
+    window.petApi?.endMovePopover?.()?.catch?.(() => {});
+  }
 }
 
 dragHandle?.addEventListener("pointerdown", handleHeaderPointerDown);
-dragHandle?.addEventListener("pointermove", handleHeaderPointerMove);
-dragHandle?.addEventListener("pointerup", handleHeaderPointerUp);
-dragHandle?.addEventListener("pointercancel", handleHeaderPointerUp);
+if (IS_WINDOWS) {
+  // pointermove / pointerup are registered on document during drag so the
+  // pointer is tracked even when it leaves the header — without invoking
+  // setPointerCapture, whose underlying Win32 SetCapture() causes the
+  // spurious WM_SIZE on Windows frameless windows.
+} else {
+  dragHandle?.addEventListener("pointermove", handleHeaderPointerMove);
+  dragHandle?.addEventListener("pointerup", handleHeaderPointerUp);
+  dragHandle?.addEventListener("pointercancel", handleHeaderPointerUp);
+}
 
 function handleStageClick(event) {
   if (justDragged) {
