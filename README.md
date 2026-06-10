@@ -6,7 +6,8 @@
   <img src="assets/character/睁眼.png" alt="普瑞赛斯" width="220">
 </p>
 
-这是一个 macOS 菜单栏和 Windows 系统托盘桌宠(?)。普瑞赛斯会以一个小头像待在托盘区域；
+这是一个 macOS 菜单栏和 Windows 系统托盘桌宠(?)。Linux请见fork https://github.com/aklnaaw/claude-code-but-priestess
+普瑞赛斯会以一个小头像待在托盘区域；
 点击头像后，会弹出一个带角色立绘和聊天框的 popover。她通过本机已经
 安装并登录的 Claude Code 或 Codex CLI 来回复。
 
