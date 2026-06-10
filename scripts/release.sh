@@ -7,7 +7,7 @@
 #   arm64 Windows binaries otherwise).
 # - latest.yml references the installer as "PRTS-Setup-X.exe" (dashes), but
 #   the file on disk has spaces and GitHub's web drag-drop uploader rewrites
-#   spaces to dots — which 404s the auto-updater's download URL. Uploading
+#   spaces to dots -- which 404s the auto-updater's download URL. Uploading
 #   via gh with the dashed name keeps auto-update working.
 #
 # Usage:  ./scripts/release.sh           # build + upload to draft
@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 
 VERSION=$(node -p "require('./package.json').version")
 TAG="v$VERSION"
-echo "==> Building $TAG (macOS arm64 + Windows x64)…"
+echo "==> Building $TAG (macOS arm64 + Windows x64)..."
 npx electron-builder --mac --publish never
 npx electron-builder --win --x64 --publish never
 
@@ -26,15 +26,15 @@ cd dist
 cp -f "PRTS Setup $VERSION.exe" "PRTS-Setup-$VERSION.exe"
 cp -f "PRTS Setup $VERSION.exe.blockmap" "PRTS-Setup-$VERSION.exe.blockmap"
 
-echo "==> Verifying latest.yml matches the renamed installer…"
+echo "==> Verifying latest.yml matches the renamed installer..."
 grep -q "PRTS-Setup-$VERSION.exe" latest.yml
 
 if ! gh release view "$TAG" > /dev/null 2>&1; then
-  echo "==> Creating draft release $TAG…"
-  gh release create "$TAG" --draft --title "$TAG" --notes "Draft for $TAG — notes TBD."
+  echo "==> Creating draft release $TAG..."
+  gh release create "$TAG" --draft --title "$TAG" --notes "Draft for $TAG -- notes TBD."
 fi
 
-echo "==> Uploading assets to $TAG…"
+echo "==> Uploading assets to $TAG..."
 gh release upload "$TAG" --clobber \
   "PRTS-Setup-$VERSION.exe" \
   "PRTS-Setup-$VERSION.exe.blockmap" \
