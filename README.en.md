@@ -6,7 +6,7 @@ Language: [简体中文](README.md) | **English**
   <img src="assets/character/睁眼.png" alt="Priestess (普瑞赛斯)" width="220">
 </p>
 
-A macOS menu bar and Windows system tray companion. The character (普瑞赛斯, from Arknights) lives in
+A macOS menu bar and Windows system tray companion. Linux see fork https://github.com/aklnaaw/claude-code-but-priestess. The character (普瑞赛斯, from Arknights) lives in
 your tray area as a small head icon. Click her and a popover opens with
 the character on top and a chat box below — you talk to her, she answers
 through your selected local coding CLI.
