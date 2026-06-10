@@ -15,6 +15,32 @@ const cancelBtn = document.getElementById("cancelBtn");
 const clearBtn = document.getElementById("clearBtn");
 const cwdLine = document.getElementById("cwdLine");
 
+// HTML Preview Panel
+const mainArea = document.getElementById("mainArea");
+const htmlPreview = document.getElementById("htmlPreview");
+const previewFrame = document.getElementById("previewFrame");
+const previewDivider = document.getElementById("previewDivider");
+const previewTitle = document.getElementById("previewTitle");
+const openInBrowserBtn = document.getElementById("openInBrowserBtn");
+const closePreviewBtn = document.getElementById("closePreviewBtn");
+
+const PREVIEW_SPLIT_MIN = 0.28;
+const PREVIEW_SPLIT_MAX = 0.68;
+const htmlStore = new Map(); // messageId → htmlContent
+const dismissedPreviewIds = new Set(); // messageIds the user manually closed
+let activePreviewId = null;
+let htmlPanelOpen = false;
+let splitRatio = 0.5;
+try {
+  const saved = localStorage.getItem("htmlPanelSplitRatio");
+  if (saved != null) {
+    const n = parseFloat(saved);
+    if (Number.isFinite(n) && n >= PREVIEW_SPLIT_MIN && n <= PREVIEW_SPLIT_MAX) {
+      splitRatio = n;
+    }
+  }
+} catch { /* localStorage blocked */ }
+
 // ============================================================
 //  Frame loading — same edge-flood-fill technique as before.
 // ============================================================
@@ -1109,6 +1135,144 @@ function buildMsgEl(msg) {
   return el;
 }
 
+// ============================================================
+//  HTML Preview Panel — logic.
+// ============================================================
+function updateLayoutSplit() {
+  if (!htmlPanelOpen) {
+    chatStream.style.flexGrow = "1";
+    if (htmlPreview) htmlPreview.style.flexGrow = "0";
+    return;
+  }
+  const ratio = Math.min(PREVIEW_SPLIT_MAX, Math.max(PREVIEW_SPLIT_MIN, splitRatio));
+  chatStream.style.flexGrow = String(1 - ratio);
+  if (htmlPreview) {
+    htmlPreview.style.flexGrow = String(ratio);
+    htmlPreview.classList.add("open");
+  }
+}
+
+function syncPreviewButtons() {
+  const buttons = chatStream.querySelectorAll(".msg-preview-btn");
+  for (const btn of buttons) {
+    const mid = btn.dataset.previewId;
+    btn.classList.toggle("active", mid === activePreviewId);
+    btn.textContent = mid === activePreviewId ? "▼ Preview" : "▸ Preview";
+  }
+  if (htmlPanelOpen && activePreviewId) {
+    const msg = lastHistory.find((m) => m.id === activePreviewId);
+    const label = msg ? (msg.id || "").slice(-8) : activePreviewId.slice(-8);
+    previewTitle.textContent = `HTML Preview · ${label}`;
+  } else {
+    previewTitle.textContent = "HTML Preview";
+  }
+}
+
+function updatePreviewFrame(html) {
+  if (previewFrame && previewFrame.srcdoc !== html) {
+    previewFrame.srcdoc = html;
+  }
+}
+
+function switchToMessage(messageId) {
+  const html = htmlStore.get(messageId);
+  if (!html) return;
+  activePreviewId = messageId;
+  updatePreviewFrame(html);
+  syncPreviewButtons();
+}
+
+async function openHtmlPanelFor(messageId) {
+  const html = htmlStore.get(messageId);
+  if (!html) return;
+  dismissedPreviewIds.delete(messageId);
+  activePreviewId = messageId;
+  htmlPanelOpen = true;
+  htmlPreview.hidden = false;
+  previewDivider.hidden = false;
+  updatePreviewFrame(html);
+  updateLayoutSplit();
+  syncPreviewButtons();
+  try {
+    await window.previewApi?.open?.({ width: 200 });
+  } catch { /* no-op if IPC missing */ }
+}
+
+async function closeHtmlPanel() {
+  if (!htmlPanelOpen) return;
+  if (activePreviewId) dismissedPreviewIds.add(activePreviewId);
+  htmlPanelOpen = false;
+  activePreviewId = null;
+  htmlPreview.hidden = true;
+  previewDivider.hidden = true;
+  updateLayoutSplit();
+  syncPreviewButtons();
+  try {
+    await window.previewApi?.close?.();
+  } catch { /* no-op */ }
+}
+
+function detectHtmlBlocks() {
+  htmlStore.clear();
+  const codeBlocks = chatStream.querySelectorAll("pre code[class*='lang-html']");
+  let latestId = null;
+  for (const block of codeBlocks) {
+    const msgEl = block.closest(".msg.assistant");
+    if (!msgEl) continue;
+    const messageId = msgEl.dataset.id;
+    if (!messageId) continue;
+    const text = (block.textContent || "").trim();
+    if (!text) continue;
+    htmlStore.set(messageId, text);
+    latestId = messageId;
+  }
+  return latestId;
+}
+
+function addPreviewButtons() {
+  for (const [messageId] of htmlStore) {
+    const msgEl = chatStream.querySelector(`.msg.assistant[data-id="${messageId}"]`);
+    if (!msgEl || msgEl.querySelector(".msg-preview-btn")) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "msg-preview-btn";
+    btn.dataset.previewId = messageId;
+    btn.textContent = messageId === activePreviewId ? "▼ Preview" : "▸ Preview";
+    btn.addEventListener("click", () => {
+      if (htmlPanelOpen && activePreviewId === messageId) return;
+      if (htmlPanelOpen) {
+        switchToMessage(messageId);
+      } else {
+        openHtmlPanelFor(messageId);
+      }
+    });
+    msgEl.append(btn);
+  }
+  syncPreviewButtons();
+}
+
+function checkAndUpdateHtmlPreview() {
+  if (chatRunning) return;
+  // Remember which message IDs were already in the store so we can tell
+  // whether a genuinely new HTML reply arrived (should auto-open) vs an
+  // old one the user dismissed (should stay closed).
+  const oldIds = new Set(htmlStore.keys());
+  const latestId = detectHtmlBlocks();
+  // Newly appeared HTML blocks (from a fresh reply) clear their dismissed
+  // flag so they auto-open even if a previous block was manually closed.
+  for (const id of htmlStore.keys()) {
+    if (!oldIds.has(id)) dismissedPreviewIds.delete(id);
+  }
+  addPreviewButtons();
+  if (latestId) {
+    if (htmlPanelOpen) {
+      switchToMessage(latestId);
+    } else if (!dismissedPreviewIds.has(latestId)) {
+      openHtmlPanelFor(latestId);
+    }
+  }
+}
+
 function renderHistory(history) {
   // Preserve the reading position: every tool pill / output update re-renders
   // the whole stream, and unconditionally jumping to the bottom yanked the
@@ -1127,6 +1291,7 @@ function renderHistory(history) {
     empty.textContent = "Say something to start.";
     chatStream.append(empty);
     currentAssistantId = null;
+    checkAndUpdateHtmlPreview();
     return;
   }
   const assistants = lastHistory.filter((m) => m.role === "assistant");
@@ -1141,6 +1306,7 @@ function renderHistory(history) {
   } else {
     chatStream.scrollTop = prevScrollTop;
   }
+  checkAndUpdateHtmlPreview();
 }
 
 // Typewriter — backends often emit chunks in bursts, which makes the response
@@ -1351,6 +1517,9 @@ clearBtn.addEventListener("click", () => {
   if (!confirm("Clear current session? Long-term memory will be kept.")) return;
   window.chatApi.clear();
   showBubble("Conversation cleared.", 1800);
+  htmlStore.clear();
+  dismissedPreviewIds.clear();
+  if (htmlPanelOpen) closeHtmlPanel();
 });
 
 window.chatApi.onHistory((history) => renderHistory(history));
@@ -1492,6 +1661,65 @@ window.addEventListener("keydown", notePopoverActivity, { passive: true });
 //  Click on the character — angry / threat / wake-up reactions.
 // ============================================================
 stage.addEventListener("click", handleStageClick);
+
+// ============================================================
+//  HTML Preview Panel — divider drag + button handlers.
+// ============================================================
+let splitterDragging = false;
+
+previewDivider.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  splitterDragging = true;
+  previewDivider.classList.add("dragging");
+  document.body.style.userSelect = "none";
+  document.body.style.cursor = "col-resize";
+  try { previewDivider.setPointerCapture(event.pointerId); } catch { /* continue */ }
+});
+
+document.addEventListener("pointermove", (event) => {
+  if (!splitterDragging || !mainArea) return;
+  const rect = mainArea.getBoundingClientRect();
+  if (rect.width <= 0) return;
+  const mouseX = event.clientX - rect.left;
+  const rightRatio = 1 - Math.min(1, Math.max(0, mouseX / rect.width));
+  splitRatio = Math.min(PREVIEW_SPLIT_MAX, Math.max(PREVIEW_SPLIT_MIN, rightRatio));
+  updateLayoutSplit();
+});
+
+document.addEventListener("pointerup", (event) => {
+  if (!splitterDragging) return;
+  splitterDragging = false;
+  previewDivider.classList.remove("dragging");
+  document.body.style.userSelect = "";
+  document.body.style.cursor = "";
+  try { previewDivider.releasePointerCapture(event.pointerId); } catch { /* continue */ }
+  try { localStorage.setItem("htmlPanelSplitRatio", String(splitRatio)); } catch { /* blocked */ }
+});
+
+document.addEventListener("pointercancel", (event) => {
+  if (!splitterDragging) return;
+  splitterDragging = false;
+  previewDivider.classList.remove("dragging");
+  document.body.style.userSelect = "";
+  document.body.style.cursor = "";
+  try { previewDivider.releasePointerCapture(event.pointerId); } catch { /* continue */ }
+});
+
+closePreviewBtn.addEventListener("click", () => closeHtmlPanel());
+
+openInBrowserBtn.addEventListener("click", async () => {
+  const html = activePreviewId ? htmlStore.get(activePreviewId) : null;
+  if (!html) return;
+  try {
+    const result = await window.previewApi?.openInBrowser?.({ html });
+    if (result?.ok) {
+      showBubble("Opened in browser.", 1800);
+    }
+  } catch {
+    showBubble("Failed to open browser.", 3000);
+  }
+});
 
 // ============================================================
 //  Boot

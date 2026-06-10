@@ -289,10 +289,22 @@ button.ghost:disabled {
 }
 
 /* ============================================================
+   Main area — wraps chat-stream + optional HTML preview panel.
+   ============================================================ */
+.main-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+/* ============================================================
    Chat stream — pro-terminal feel.
    ============================================================ */
 .chat-stream {
   flex: 1;
+  min-width: 120px;
   min-height: 112px;
   overflow-y: auto;
   padding: 12px 14px 8px;
@@ -736,4 +748,112 @@ button.primary:disabled {
   background:
     linear-gradient(135deg, transparent 58%, var(--border-strong) 58%, var(--border-strong) 64%, transparent 64%),
     linear-gradient(135deg, transparent 72%, var(--border-strong) 72%, var(--border-strong) 78%, transparent 78%);
+}
+
+/* ============================================================
+   HTML Preview side panel — slides open on the right.
+   ============================================================ */
+.preview-divider {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: var(--border);
+  z-index: 2;
+  transition: background 120ms ease;
+}
+
+.preview-divider:hover,
+.preview-divider.dragging {
+  background: var(--border-strong);
+}
+
+.preview-divider[hidden] {
+  display: none;
+}
+
+.html-preview {
+  flex: 0;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--chat-bg);
+}
+
+.html-preview.open {
+  min-width: 200px;
+}
+
+.html-preview[hidden] {
+  display: none;
+}
+
+.preview-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bar-bg);
+  gap: 8px;
+}
+
+.preview-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.preview-btn {
+  font-size: 10px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.preview-close {
+  font-size: 13px;
+  padding: 2px 5px;
+  line-height: 1;
+}
+
+#previewFrame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+
+/* ---- preview button inside assistant message bubbles ---- */
+.msg-preview-btn {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--her);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.msg-preview-btn:hover {
+  background: var(--her-soft);
+}
+
+.msg-preview-btn.active {
+  background: var(--her-soft);
+  border-color: var(--her-edge);
 }
