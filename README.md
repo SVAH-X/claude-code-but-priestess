@@ -108,7 +108,7 @@
 
 **系统要求**
 
-- **Apple Silicon**（M1 / M2 / M3 / M4）的 macOS——提供预编译 `.dmg`。当前
+- **Apple Silicon**（M系列）的 macOS——提供预编译 `.dmg`。当前
   release 没有 Intel 版本。
 - Windows 10 / 11（x64）——提供预编译安装包 / `.zip`（实验性，未签名）。
 - 本机已安装并登录 [Claude Code](https://claude.ai/code) CLI（`claude`）
