@@ -42,6 +42,92 @@ try {
 } catch { /* localStorage blocked */ }
 
 // ============================================================
+//  i18n — popover UI text follows the language setting (zh / en)
+// ============================================================
+const RENDERER_TEXT = {
+  zh: {
+    chat_empty_hint: "和她说点什么吧。",
+    send_failed: (r) => `发送失败: ${r}`,
+    clear_confirm: "清除当前对话？长期记忆将继续保留。",
+    clear_done: "对话已清除。",
+    error_prefix: (m) => `错误: ${m}`,
+    cancelled: "已停止。",
+    sprite_load_failed: "角色立绘加载失败。",
+    no_cli: "未检测到 CLI",
+    cwd_home: (p) => `${p} · $HOME · 右键托盘菜单设置`,
+    cwd_queue: (n) => `${n} 排队中`,
+    cwd_running: "发送中",
+    ph_ready: "和她说点什么…（Shift+Enter 换行）",
+    ph_running: "她在回复时可以继续输入消息排队…（Shift+Enter 换行）",
+    ph_no_cli: "请先安装 Claude Code 或 Codex CLI…",
+    btn_clear: "清除",
+    btn_clear_title: "清除对话",
+    btn_stop: "停止回复",
+    btn_stop_title: "停止回复",
+    preview_expand: "▼ 预览",
+    preview_collapse: "▸ 预览",
+    preview_title: "HTML 预览",
+    preview_open: "在浏览器中打开",
+    preview_open_title: "在默认浏览器中打开",
+    preview_close_title: "关闭预览",
+    preview_browser_opened: "已在浏览器中打开。",
+    preview_browser_failed: "打开浏览器失败。"
+  },
+  en: {
+    chat_empty_hint: "Say something to her.",
+    send_failed: (r) => `Send failed: ${r}`,
+    clear_confirm: "Clear this conversation? Long-term memory stays.",
+    clear_done: "Conversation cleared.",
+    error_prefix: (m) => `Error: ${m}`,
+    cancelled: "Stopped.",
+    sprite_load_failed: "Failed to load character sprites.",
+    no_cli: "No CLI detected",
+    cwd_home: (p) => `${p} · $HOME · right-click tray to set`,
+    cwd_queue: (n) => `${n} queued`,
+    cwd_running: "sending",
+    ph_ready: "Say something… (Shift+Enter for newline)",
+    ph_running: "You can keep typing while she replies… (Shift+Enter newline)",
+    ph_no_cli: "Install Claude Code or Codex CLI first…",
+    btn_clear: "Clear",
+    btn_clear_title: "Clear conversation",
+    btn_stop: "Stop",
+    btn_stop_title: "Stop replying",
+    preview_expand: "▼ Preview",
+    preview_collapse: "▸ Preview",
+    preview_title: "HTML Preview",
+    preview_open: "Open in Browser",
+    preview_open_title: "Open in default browser",
+    preview_close_title: "Close preview",
+    preview_browser_opened: "Opened in browser.",
+    preview_browser_failed: "Failed to open browser."
+  }
+};
+
+function _l10nLang() {
+  const setting = (lastSettingsPayload?.menuLanguage ?? "system");
+  if (setting === "zh" || setting === "en") return setting;
+  const nav = navigator.language || "";
+  if (/^zh\b/i.test(nav)) return "zh";
+  return "en";
+}
+
+function t(key, ...args) {
+  const lang = _l10nLang();
+  const val = RENDERER_TEXT[lang]?.[key] ?? RENDERER_TEXT.zh[key] ?? key;
+  return typeof val === "function" ? val(...args) : val;
+}
+
+function applyL10n() {
+  clearBtn.textContent = t("btn_clear");
+  clearBtn.title = t("btn_clear_title");
+  cancelBtn.textContent = t("btn_stop");
+  cancelBtn.title = t("btn_stop_title");
+  openInBrowserBtn.textContent = t("preview_open");
+  openInBrowserBtn.title = t("preview_open_title");
+  closePreviewBtn.title = t("preview_close_title");
+}
+
+// ============================================================
 //  Frame loading — same edge-flood-fill technique as before.
 // ============================================================
 const ASSET_DIR = new URL("../../assets/character/", window.location.href);
@@ -1157,14 +1243,14 @@ function syncPreviewButtons() {
   for (const btn of buttons) {
     const mid = btn.dataset.previewId;
     btn.classList.toggle("active", mid === activePreviewId);
-    btn.textContent = mid === activePreviewId ? "▼ Preview" : "▸ Preview";
+    btn.textContent = mid === activePreviewId ? t("preview_expand") : t("preview_collapse");
   }
   if (htmlPanelOpen && activePreviewId) {
     const msg = lastHistory.find((m) => m.id === activePreviewId);
     const label = msg ? (msg.id || "").slice(-8) : activePreviewId.slice(-8);
-    previewTitle.textContent = `HTML Preview · ${label}`;
+    previewTitle.textContent = `${t("preview_title")} · ${label}`;
   } else {
-    previewTitle.textContent = "HTML Preview";
+    previewTitle.textContent = t("preview_title");
   }
 }
 
@@ -1237,7 +1323,7 @@ function addPreviewButtons() {
     btn.type = "button";
     btn.className = "msg-preview-btn";
     btn.dataset.previewId = messageId;
-    btn.textContent = messageId === activePreviewId ? "▼ Preview" : "▸ Preview";
+    btn.textContent = messageId === activePreviewId ? t("preview_expand") : t("preview_collapse");
     btn.addEventListener("click", () => {
       if (htmlPanelOpen && activePreviewId === messageId) return;
       if (htmlPanelOpen) {
@@ -1301,7 +1387,7 @@ function renderHistory(history) {
   if (!lastHistory.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "Say something to start.";
+    empty.textContent = t("chat_empty_hint");
     chatStream.append(empty);
     currentAssistantId = null;
     checkAndUpdateHtmlPreview();
@@ -1520,16 +1606,16 @@ composer.addEventListener("submit", async (event) => {
   }, 200);
   const result = await window.chatApi.send(text);
   if (result?.ok === false) {
-    showBubble(`Send failed: ${result.reason}`, 3000);
+    showBubble(t("send_failed", result.reason), 3000);
   }
 });
 
 cancelBtn.addEventListener("click", () => window.chatApi.cancel());
 
 clearBtn.addEventListener("click", () => {
-  if (!confirm("Clear current session? Long-term memory will be kept.")) return;
+  if (!confirm(t("clear_confirm"))) return;
   window.chatApi.clear();
-  showBubble("Conversation cleared.", 1800);
+  showBubble(t("clear_done"), 1800);
   htmlStore.clear();
   dismissedPreviewIds.clear();
   if (htmlPanelOpen) closeHtmlPanel();
@@ -1552,12 +1638,12 @@ window.chatApi.onStatus((event) => {
     resetInactivityTimers();
     if (event.error) {
       setBaseMood("cry");
-      showBubble(`Error: ${event.error}`, 4000);
+      showBubble(t("error_prefix", event.error), 4000);
       setTimeout(() => {
         if (baseMood === "cry") setBaseMood("idle");
       }, 2200);
     } else if (event.cancelled) {
-      showBubble("Stopped.", 1600);
+      showBubble(t("cancelled"), 1600);
     } else {
       flashPunch(0.08);
       // Settle into the expression she chose for this reply; default to happy.
@@ -1613,14 +1699,14 @@ function refreshComposerMeta() {
       (activeProvider === "codex" ? "Codex" : activeProvider ? "Claude" : "No CLI")
     : "No CLI";
   const cwd = (payload?.chatCwd || "").trim();
-  const queueSuffix = queueLength > 0 ? ` · ${queueLength} queued` : "";
-  const runningSuffix = chatRunning ? " · sends when ready" : "";
+  const queueSuffix = queueLength > 0 ? ` · ${t("cwd_queue", queueLength)}` : "";
+  const runningSuffix = chatRunning ? ` · ${t("cwd_running")}` : "";
   if (cwd) {
     const truncated = cwd.length > 42 ? "…" + cwd.slice(-41) : cwd;
-    cwdLine.textContent = `${provider} · cwd · ${truncated}${queueSuffix}${runningSuffix}`;
+    cwdLine.textContent = `${provider} · ${truncated}${queueSuffix}${runningSuffix}`;
     cwdLine.title = cwd;
   } else {
-    cwdLine.textContent = `${provider} · cwd · $HOME  ·  right-click tray to set${queueSuffix}${runningSuffix}`;
+    cwdLine.textContent = t("cwd_home", provider) + queueSuffix + runningSuffix;
     cwdLine.title = "";
   }
   if (providerBadge) providerBadge.textContent = provider;
@@ -1628,13 +1714,14 @@ function refreshComposerMeta() {
   sendBtn.disabled = !backendReady;
   composerInput.placeholder = backendReady
     ? chatRunning
-      ? "Message queues while she responds…  (Shift+Enter for newline)"
-      : "Talk to her…  (Shift+Enter for newline)"
-    : "Install Claude Code or Codex CLI first…";
+      ? t("ph_running")
+      : t("ph_ready")
+    : t("ph_no_cli");
 }
 
 function renderSettings(payload) {
   lastSettingsPayload = payload;
+  applyL10n();
   refreshComposerMeta();
 }
 
@@ -1727,10 +1814,10 @@ openInBrowserBtn.addEventListener("click", async () => {
   try {
     const result = await window.previewApi?.openInBrowser?.({ html });
     if (result?.ok) {
-      showBubble("Opened in browser.", 1800);
+      showBubble(t("preview_browser_opened"), 1800);
     }
   } catch {
-    showBubble("Failed to open browser.", 3000);
+    showBubble(t("preview_browser_failed"), 3000);
   }
 });
 
@@ -1751,7 +1838,7 @@ loadAllFrames()
   })
   .catch((error) => {
     console.error("Failed to load frames:", error);
-    showBubble("Failed to load character frames.", 6000);
+    showBubble(t("sprite_load_failed"), 6000);
   });
 
 window.chatApi.getHistory().then(renderHistory);
