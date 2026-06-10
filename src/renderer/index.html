@@ -25,7 +25,24 @@
       <div class="bubble" id="petBubble" aria-live="polite"></div>
     </section>
 
-    <main class="chat-stream" id="chatStream" aria-live="polite"></main>
+    <div class="main-area" id="mainArea">
+      <main class="chat-stream" id="chatStream" aria-live="polite"></main>
+      <div class="preview-divider" id="previewDivider" hidden aria-hidden="true"></div>
+      <aside class="html-preview" id="htmlPreview" hidden>
+        <header class="preview-header">
+          <span class="preview-title" id="previewTitle">HTML Preview</span>
+          <div class="preview-actions">
+            <button type="button" id="openInBrowserBtn" class="ghost preview-btn" title="Open in default browser">Open in Browser</button>
+            <button type="button" id="closePreviewBtn" class="ghost preview-btn preview-close" title="Close preview">&times;</button>
+          </div>
+        </header>
+        <iframe id="previewFrame"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
+                srcdoc=""
+                title="HTML Preview"
+                allow="clipboard-write"></iframe>
+      </aside>
+    </div>
 
     <footer class="composer">
       <form id="composer" autocomplete="off">

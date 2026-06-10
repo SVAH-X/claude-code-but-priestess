@@ -24,7 +24,7 @@
   "author": "",
   "license": "UNLICENSED",
   "devDependencies": {
-    "electron": "^42.3.0",
+    "electron": "^42.3.3",
     "electron-builder": "^26.8.1"
   },
   "build": {

@@ -39,6 +39,7 @@ const POPOVER_MIN_HEIGHT = 460;
 // the popover can grow right up to the screen edges on large monitors.
 const POPOVER_EDGE_MARGIN = 8;
 const DESKTOP_PET_IDLE_MS = Number(process.env.PRTS_DESKTOP_PET_IDLE_MS) || 60 * 1000;
+const HTML_PANEL_MIN_WIDTH = 200;
 const DESKTOP_PET_SIZES = Object.freeze({
   small: { width: 120, height: 144 },
   medium: { width: 150, height: 180 },
@@ -61,6 +62,8 @@ let desktopPet;
 let desktopPetTimer = null;
 let desktopPetPositionSaveTimer = null;
 let windowFadeTimer = null;
+let htmlPanelOpen = false;
+let htmlPanelWidth = 0;
 
 // ============================================================
 //  Tray icon — prefer the dedicated centered icon.png, fallback
@@ -155,10 +158,13 @@ function clampNumber(value, min, max) {
 
 function clampPopoverSize(size = {}, display = screen.getPrimaryDisplay()) {
   const work = display.workArea;
-  const maxWidth = Math.max(POPOVER_MIN_WIDTH, work.width - POPOVER_EDGE_MARGIN);
+  const effectiveMinWidth = htmlPanelOpen
+    ? POPOVER_MIN_WIDTH + HTML_PANEL_MIN_WIDTH
+    : POPOVER_MIN_WIDTH;
+  const maxWidth = Math.max(effectiveMinWidth, work.width - POPOVER_EDGE_MARGIN);
   const maxHeight = Math.max(POPOVER_MIN_HEIGHT, work.height - POPOVER_EDGE_MARGIN);
   return {
-    width: clampNumber(size.width ?? POPOVER_DEFAULT_WIDTH, POPOVER_MIN_WIDTH, maxWidth),
+    width: clampNumber(size.width ?? POPOVER_DEFAULT_WIDTH, effectiveMinWidth, maxWidth),
     height: clampNumber(size.height ?? POPOVER_DEFAULT_HEIGHT, POPOVER_MIN_HEIGHT, maxHeight)
   };
 }
@@ -177,7 +183,13 @@ function scheduleSavePopoverSize() {
   clearTimeout(popoverSizeSaveTimer);
   popoverSizeSaveTimer = setTimeout(() => {
     if (!popover || popover.isDestroyed()) return;
-    const size = clampPopoverSize(popover.getBounds(), screen.getDisplayMatching(popover.getBounds()));
+    const bounds = popover.getBounds();
+    const size = clampPopoverSize(bounds, screen.getDisplayMatching(bounds));
+    // Save the base width without the HTML panel, so restarting the app
+    // doesn't open a wide window while the panel is hidden.
+    if (htmlPanelOpen && htmlPanelWidth > 0) {
+      size.width = Math.max(POPOVER_MIN_WIDTH, size.width - htmlPanelWidth);
+    }
     settings.set({ popoverSize: size });
   }, 350);
 }
@@ -195,12 +207,15 @@ function resizePopoverDrag({ edge = "se", start = {}, dx = 0, dy = 0 } = {}) {
   const e = String(edge);
   const right = sx + sw;
   const bottom = sy + sh;
-  const maxWidth = Math.max(POPOVER_MIN_WIDTH, work.width - POPOVER_EDGE_MARGIN);
+  const effectiveMinWidth = htmlPanelOpen
+    ? POPOVER_MIN_WIDTH + HTML_PANEL_MIN_WIDTH
+    : POPOVER_MIN_WIDTH;
+  const maxWidth = Math.max(effectiveMinWidth, work.width - POPOVER_EDGE_MARGIN);
   const maxHeight = Math.max(POPOVER_MIN_HEIGHT, work.height - POPOVER_EDGE_MARGIN);
 
   let width = sw + (e.includes("e") ? dx : 0) - (e.includes("w") ? dx : 0);
   let height = sh + (e.includes("s") ? dy : 0) - (e.includes("n") ? dy : 0);
-  width = clampNumber(width, POPOVER_MIN_WIDTH, maxWidth);
+  width = clampNumber(width, effectiveMinWidth, maxWidth);
   height = clampNumber(height, POPOVER_MIN_HEIGHT, maxHeight);
 
   let x = e.includes("w") ? right - width : sx;
@@ -362,6 +377,8 @@ function createPopover() {
 
   popover.on("closed", () => {
     clearTimeout(popoverSizeSaveTimer);
+    htmlPanelOpen = false;
+    htmlPanelWidth = 0;
     popover = null;
   });
 }
@@ -621,6 +638,37 @@ function collapsePopoverToDesktopPet() {
     popover.setOpacity(1);
     pet.showInactive();
   });
+}
+
+// ============================================================
+//  HTML Preview side panel — expand / shrink the popover width.
+// ============================================================
+function openHtmlPanel(width) {
+  if (htmlPanelOpen || !popover || popover.isDestroyed()) return;
+  const panelWidth = Math.max(HTML_PANEL_MIN_WIDTH, Number.isFinite(width) ? width : HTML_PANEL_MIN_WIDTH);
+  const bounds = popover.getBounds();
+  const display = screen.getDisplayMatching(bounds);
+  const work = display.workArea;
+  const newWidth = Math.min(bounds.width + panelWidth, work.width - POPOVER_EDGE_MARGIN);
+  if (newWidth <= bounds.width) return;
+  let newX = bounds.x;
+  if (bounds.x + newWidth > work.x + work.width - POPOVER_EDGE_MARGIN) {
+    newX = Math.max(work.x + 4, work.x + work.width - newWidth - POPOVER_EDGE_MARGIN);
+  }
+  htmlPanelOpen = true;
+  htmlPanelWidth = panelWidth;
+  popover.setBounds({ x: newX, y: bounds.y, width: newWidth, height: bounds.height }, true);
+  scheduleSavePopoverSize();
+}
+
+function closeHtmlPanel() {
+  if (!htmlPanelOpen || !popover || popover.isDestroyed()) return;
+  htmlPanelOpen = false;
+  const bounds = popover.getBounds();
+  const newWidth = Math.max(POPOVER_MIN_WIDTH, bounds.width - htmlPanelWidth);
+  popover.setBounds({ x: bounds.x, y: bounds.y, width: newWidth, height: bounds.height }, true);
+  htmlPanelWidth = 0;
+  scheduleSavePopoverSize();
 }
 
 // ============================================================
@@ -1478,4 +1526,30 @@ ipcMain.handle("settings:pick-cwd", async () => {
     settings.set({ chatCwd: result.filePaths[0] });
   }
   return buildSettingsState();
+});
+
+ipcMain.handle("popover:preview-open", (_, payload) => {
+  openHtmlPanel(payload?.width);
+});
+
+ipcMain.handle("popover:preview-close", () => {
+  closeHtmlPanel();
+});
+
+ipcMain.handle("html:open-in-browser", async (_, payload) => {
+  const html = String(payload?.html || "");
+  if (!html.trim()) return { ok: false, reason: "empty content" };
+  const tempFile = path.join(os.tmpdir(), `prts-preview-${Date.now()}.html`);
+  try {
+    fs.writeFileSync(tempFile, html, "utf8");
+    const error = await shell.openPath(tempFile);
+    if (error) {
+      console.warn("main: shell.openPath failed:", error);
+      return { ok: false, reason: error };
+    }
+    return { ok: true, path: tempFile };
+  } catch (err) {
+    console.warn("main: failed to write temp HTML:", err);
+    return { ok: false, reason: err.message };
+  }
 });

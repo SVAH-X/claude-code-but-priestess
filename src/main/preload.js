@@ -24,6 +24,12 @@ contextBridge.exposeInMainWorld("petApi", {
   onSettings: onChannel("settings:state")
 });
 
+contextBridge.exposeInMainWorld("previewApi", {
+  open: (payload) => ipcRenderer.invoke("popover:preview-open", payload),
+  close: () => ipcRenderer.invoke("popover:preview-close"),
+  openInBrowser: (payload) => ipcRenderer.invoke("html:open-in-browser", payload)
+});
+
 contextBridge.exposeInMainWorld("chatApi", {
   send: (text) => ipcRenderer.invoke("chat:send", text),
   cancel: () => ipcRenderer.invoke("chat:cancel"),
