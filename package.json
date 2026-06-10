@@ -11,7 +11,8 @@
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
-    "lint": "node scripts/check-assets.js"
+    "lint": "node scripts/check-assets.js",
+    "release": "bash scripts/release.sh"
   },
   "keywords": [
     "menubar",
