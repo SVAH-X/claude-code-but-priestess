@@ -1,8 +1,10 @@
 // ============================================================
 //  Auto-update
 //
-//  Windows: real silent update via electron-updater (NSIS) — downloads in the
-//  background, installs on next quit (or tray "Restart to update").
+//  Windows: electron-updater (NSIS). Checks notify only — the Doctor decides
+//  when to download (connections can be metered or flaky), via the tray menu
+//  or the notification/dialog button. Once the download finishes the update
+//  installs and relaunches automatically.
 //
 //  macOS: ad-hoc signed, so Squirrel.Mac can't self-install. Instead we do a
 //  custom in-place update (no Apple Developer cert needed): resolve the newest
@@ -79,14 +81,16 @@ rm -rf "$NEW" 2>/dev/null
 `;
 
 let winUpdater = null;
-// What the Doctor can act on. action: "install" (ready — Windows restart, or
-// macOS download+install) or "page" (just open the downloads page).
+// What the Doctor can act on. action: "install" (ready — Windows downloaded,
+// or macOS download+install), "download" (Windows: found, waiting for the
+// Doctor to start the download) or "page" (just open the downloads page).
 let pending = null; // { version, tag?, action, zipName?, sha512? }
 let checking = false;
 let installing = false;
 // True while a tray-menu "Check for updates…" is in flight on Windows, so the
 // electron-updater event handlers know to give explicit feedback.
 let manualWinCheck = false;
+let winDownloading = false;
 
 function notify(title, body, onClick) {
   if (!Notification.isSupported()) return;
@@ -349,6 +353,36 @@ async function checkViaApi(manual) {
   }
 }
 
+// Windows: the Doctor starts the download explicitly; install is automatic
+// once it completes.
+function startWindowsDownload() {
+  if (!winUpdater || winDownloading) return;
+  winDownloading = true;
+  notify("PRTS 正在更新", `正在下载 v${pending?.version || ""}…`);
+  winUpdater.downloadUpdate().catch((error) => {
+    winDownloading = false;
+    console.warn("updater: download failed", error);
+    notify("下载更新失败", "可能是网络问题，点此打开下载页手动更新。", () =>
+      shell.openExternal(RELEASES_PAGE)
+    );
+  });
+}
+
+async function offerWindowsDownload(version) {
+  const choice = await dialog.showMessageBox({
+    type: "info",
+    title: "PRTS 更新",
+    message: `发现新版本 v${version}`,
+    detail:
+      "点「下载并安装」开始下载，完成后会自动重启安装。\n" +
+      "也可以稍后从托盘菜单选择「下载并安装」。",
+    buttons: ["稍后", "下载并安装"],
+    defaultId: 1,
+    cancelId: 0
+  });
+  if (choice.response === 1) startWindowsDownload();
+}
+
 // Windows: electron-updater handles download + install.
 function initWindows() {
   try {
@@ -357,22 +391,25 @@ function initWindows() {
     console.warn("updater: electron-updater unavailable", error);
     return;
   }
-  winUpdater.autoDownload = true;
+  // Never download behind the Doctor's back — he decides when (metered or
+  // unstable connections). Kept as a safety net: if the auto-install after a
+  // download somehow doesn't run, the update still lands on next quit.
+  winUpdater.autoDownload = false;
   winUpdater.autoInstallOnAppQuit = true;
   // Stable channel by default; prereleases only for the opt-in developer flag.
   winUpdater.allowPrerelease = onPrereleaseChannel();
   winUpdater.on("update-available", (info) => {
     const version = info?.version || "";
+    pending = { version, action: "download" };
     if (manualWinCheck) {
       manualWinCheck = false;
-      infoDialog(
-        `发现新版本 v${version}`,
-        "正在后台静默下载，完成后会提醒；也可稍后从托盘菜单「重启并更新」。"
-      );
+      offerWindowsDownload(version);
     } else {
-      // Background check — same heads-up macOS users get, so the silent
-      // download isn't a surprise when the "restart to update" item appears.
-      notify("PRTS 有新版本", `v${version} 正在后台下载，完成后会提醒安装。`);
+      notify(
+        "PRTS 有新版本",
+        `v${version} 可用 — 点此下载并自动安装，或稍后从托盘菜单选择。`,
+        () => startWindowsDownload()
+      );
     }
   });
   winUpdater.on("update-not-available", () => {
@@ -382,14 +419,21 @@ function initWindows() {
     }
   });
   winUpdater.on("update-downloaded", (info) => {
-    pending = { version: info?.version || "", action: "install" };
-    notify(
-      "PRTS 更新已就绪",
-      `v${pending.version} 已下载，将在下次退出时安装 — 或从托盘菜单立即重启更新。`,
-      () => installNow()
-    );
+    winDownloading = false;
+    pending = { version: info?.version || pending?.version || "", action: "install" };
+    // The Doctor explicitly chose to download, so finish the job: install and
+    // relaunch right away.
+    notify("PRTS 更新已下载", `正在重启并安装 v${pending.version}…`);
+    setTimeout(() => {
+      try {
+        winUpdater.quitAndInstall(true, true);
+      } catch (error) {
+        console.warn("updater: quitAndInstall failed", error);
+      }
+    }, 800);
   });
   winUpdater.on("error", (error) => {
+    winDownloading = false;
     console.warn("updater: electron-updater error", error);
     if (manualWinCheck) {
       manualWinCheck = false;
@@ -436,7 +480,8 @@ function checkNow() {
 function installNow() {
   if (!pending) return;
   if (useElectronUpdater() && winUpdater) {
-    winUpdater.quitAndInstall();
+    if (pending.action === "download") startWindowsDownload();
+    else winUpdater.quitAndInstall(true, true);
   } else if (process.platform === "darwin" && pending.action === "install") {
     downloadAndInstallMac();
   } else {

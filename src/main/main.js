@@ -1175,7 +1175,9 @@ function restartApp() {
 }
 
 // Update controls: a manual check plus, when something is waiting, an action
-// item (install now on Windows / open the download page on macOS).
+// item. "download" = Windows found an update and the Doctor decides when to
+// download (installs automatically once done); "install" = ready to install;
+// "page" = just open the downloads page.
 function buildUpdateMenuItems() {
   const pending = updater.getPendingUpdate();
   const items = [{ label: mt("checkUpdates"), click: () => updater.checkNow() }];
@@ -1188,6 +1190,11 @@ function buildUpdateMenuItems() {
           ? mt("downloadInstallUpdate", pending.version)
           : mt("restartUpdate", pending.version);
       items.push({ label, click: () => updater.installNow() });
+    } else if (pending.action === "download") {
+      items.push({
+        label: mt("downloadInstallUpdate", pending.version),
+        click: () => updater.installNow()
+      });
     } else {
       items.push({
         label: mt("downloadUpdate", pending.version),
