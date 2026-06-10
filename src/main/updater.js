@@ -5,14 +5,25 @@
 //  background, installs on next quit (or tray "Restart to update").
 //
 //  macOS: ad-hoc signed, so Squirrel.Mac can't self-install. Instead we do a
-//  custom in-place update (no Apple Developer cert needed): read latest-mac.yml
-//  for the version + zip + sha512, download the zip, VERIFY its hash, extract
-//  it, then hand off to a small helper script that atomically swaps the app
-//  bundle and relaunches. The Doctor's data lives in userData (separate from
-//  the .app), so it is never touched.
+//  custom in-place update (no Apple Developer cert needed): resolve the newest
+//  release (GitHub API, prereleases included), read its latest-mac.yml for the
+//  version + zip + sha512, download the zip, VERIFY its hash, extract it, then
+//  hand off to a small helper script that atomically swaps the app bundle and
+//  relaunches. The Doctor's data lives in userData (separate from the .app),
+//  so it is never touched.
 //
-//  Everything goes through github.com release downloads (NOT the rate-limited
-//  api.github.com), via Electron net.fetch (respects the system proxy).
+//  Version discovery goes through api.github.com (releases list) because the
+//  `releases/latest` redirect silently swallows the newest release while it is
+//  still a prerelease — that's how the 0.6.8 prerelease testing round looked
+//  like "no update" on both platforms (issue #4). Prereleases themselves are
+//  only offered on the opt-in "prerelease" channel (settings.json
+//  updateChannel, developers/testers only — regular users stay on stable).
+//  Asset downloads still go through github.com release downloads (not
+//  rate-limited), via Electron net.fetch (respects the system proxy).
+//
+//  Manual "Check for updates…" gives its feedback through dialogs, not
+//  notifications: macOS quietly drops/coalesces repeat notifications from
+//  ad-hoc-signed apps, which made the manual check look like it did nothing.
 // ============================================================
 
 const { app, net, shell, dialog, Notification } = require("electron");
@@ -21,13 +32,19 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
+const settings = require("./settings");
 
 const REPO_OWNER = "SVAH-X";
 const REPO_NAME = "claude-code-but-priestess";
 const RELEASES_PAGE = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest`;
-const LATEST_MAC_YML = `${RELEASES_PAGE}/download/latest-mac.yml`;
-const LATEST_YML = `${RELEASES_PAGE}/download/latest.yml`;
-const UA = { "User-Agent": "PRTS-updater" };
+const RELEASES_API = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=15`;
+const UA = {
+  "User-Agent": "PRTS-updater",
+  // Defeat any intermediate HTTP cache — a stale yml made the checker report
+  // "already latest" right after a release went out.
+  "Cache-Control": "no-cache",
+  Pragma: "no-cache"
+};
 
 const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 const FIRST_CHECK_DELAY_MS = 8 * 1000;
@@ -64,9 +81,12 @@ rm -rf "$NEW" 2>/dev/null
 let winUpdater = null;
 // What the Doctor can act on. action: "install" (ready — Windows restart, or
 // macOS download+install) or "page" (just open the downloads page).
-let pending = null; // { version, action, zipName?, sha512? }
+let pending = null; // { version, tag?, action, zipName?, sha512? }
 let checking = false;
 let installing = false;
+// True while a tray-menu "Check for updates…" is in flight on Windows, so the
+// electron-updater event handlers know to give explicit feedback.
+let manualWinCheck = false;
 
 function notify(title, body, onClick) {
   if (!Notification.isSupported()) return;
@@ -77,6 +97,30 @@ function notify(title, body, onClick) {
   } catch (error) {
     console.warn("updater: notification failed", error);
   }
+}
+
+function infoDialog(message, detail) {
+  return dialog.showMessageBox({
+    type: "info",
+    title: "PRTS 更新",
+    message,
+    detail: detail || undefined,
+    buttons: ["好"],
+    defaultId: 0
+  });
+}
+
+async function failureDialog() {
+  const choice = await dialog.showMessageBox({
+    type: "warning",
+    title: "PRTS 更新",
+    message: "暂时无法完成检查更新",
+    detail: "可能是网络问题。可以打开下载页手动查看最新版本。",
+    buttons: ["关闭", "打开下载页"],
+    defaultId: 1,
+    cancelId: 0
+  });
+  if (choice.response === 1) shell.openExternal(RELEASES_PAGE);
 }
 
 // Numeric semver-ish compare ("0.5.10" > "0.5.2"). Pre-release suffix ignored.
@@ -93,15 +137,55 @@ function isNewer(remote, local) {
 }
 
 async function fetchText(url) {
-  const res = await net.fetch(url, { headers: UA });
+  const res = await net.fetch(url, { headers: UA, cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
 }
 
-// latest-mac.yml carries version + the update zip's name + its sha512.
-async function fetchMacUpdateInfo() {
+// Prerelease builds are for developers/testers only — opt in by hand via
+// settings.json, never through the UI.
+function onPrereleaseChannel() {
+  return String(settings.get("updateChannel") || "stable").toLowerCase() === "prerelease";
+}
+
+// Newest non-draft release. Unlike the `releases/latest` redirect this sees
+// prereleases too, but only the prerelease channel is offered them.
+async function fetchLatestReleaseInfo() {
   try {
-    const text = await fetchText(LATEST_MAC_YML);
+    const res = await net.fetch(RELEASES_API, {
+      headers: { ...UA, Accept: "application/vnd.github+json" },
+      cache: "no-store"
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const releases = await res.json();
+    const allowPre = onPrereleaseChannel();
+    const release = Array.isArray(releases)
+      ? releases.find((r) => r && !r.draft && r.tag_name && (allowPre || !r.prerelease))
+      : null;
+    if (!release) return null;
+    return {
+      tag: String(release.tag_name),
+      version: String(release.tag_name).replace(/^v/i, ""),
+      prerelease: Boolean(release.prerelease)
+    };
+  } catch (error) {
+    console.warn("updater: releases API failed, falling back to latest page", error);
+    return null;
+  }
+}
+
+function releaseDownloadUrl(tag, fileName) {
+  // Tag known → pin to that release; otherwise fall back to the stable-only
+  // `latest` redirect (still correct when the newest release is not a prerelease).
+  return tag
+    ? `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${tag}/${fileName}`
+    : `${RELEASES_PAGE}/download/${fileName}`;
+}
+
+// latest-mac.yml carries version + the update zip's name + its sha512.
+async function fetchMacUpdateInfo(tag) {
+  try {
+    const text = await fetchText(releaseDownloadUrl(tag, "latest-mac.yml"));
     const version = text.match(/^version:\s*(.+)$/m)?.[1]?.trim();
     const zipName = text.match(/^path:\s*(.+)$/m)?.[1]?.trim();
     const sha512 = text.match(/^sha512:\s*(.+)$/m)?.[1]?.trim();
@@ -113,9 +197,9 @@ async function fetchMacUpdateInfo() {
   }
 }
 
-async function fetchLatestVersion() {
+async function fetchLatestVersion(tag) {
   try {
-    const text = await fetchText(LATEST_YML);
+    const text = await fetchText(releaseDownloadUrl(tag, "latest.yml"));
     return text.match(/^version:\s*(.+)$/m)?.[1]?.trim() || null;
   } catch {
     return null;
@@ -150,7 +234,7 @@ async function downloadAndInstallMac() {
     return;
   }
 
-  const { version, zipName, sha512 } = pending;
+  const { version, tag, zipName, sha512 } = pending;
   const choice = await dialog.showMessageBox({
     type: "info",
     title: "PRTS 更新",
@@ -171,7 +255,10 @@ async function downloadAndInstallMac() {
     notify("PRTS 正在更新", `正在下载 v${version}…`);
 
     // 1) download — staged in temp, the installed app is untouched throughout.
-    const res = await net.fetch(`${RELEASES_PAGE}/download/${zipName}`, { headers: UA });
+    const res = await net.fetch(releaseDownloadUrl(tag, zipName), {
+      headers: UA,
+      cache: "no-store"
+    });
     if (!res.ok) throw new Error(`download HTTP ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
 
@@ -217,17 +304,36 @@ async function downloadAndInstallMac() {
 // zip info (packaged macOS); otherwise just points at the downloads page.
 async function checkViaApi(manual) {
   try {
-    const info = await fetchMacUpdateInfo();
-    const version = info?.version || (await fetchLatestVersion());
+    const release = await fetchLatestReleaseInfo();
+    const tag = release?.tag || null;
+    const info = process.platform === "darwin" ? await fetchMacUpdateInfo(tag) : null;
+    const version = release?.version || info?.version || (await fetchLatestVersion(tag));
     if (!version) throw new Error("no version info");
 
     if (isNewer(version, app.getVersion())) {
       const canInstall =
         process.platform === "darwin" && app.isPackaged && info && info.zipName && info.sha512;
       pending = canInstall
-        ? { version, action: "install", zipName: info.zipName, sha512: info.sha512 }
-        : { version, action: "page" };
-      if (canInstall) {
+        ? { version, tag, action: "install", zipName: info.zipName, sha512: info.sha512 }
+        : { version, tag, action: "page" };
+      if (manual) {
+        // The Doctor explicitly asked — answer with the install dialog (or the
+        // download page offer) directly instead of a droppable notification.
+        if (canInstall) {
+          await downloadAndInstallMac();
+        } else {
+          const choice = await dialog.showMessageBox({
+            type: "info",
+            title: "PRTS 更新",
+            message: `发现新版本 v${version}`,
+            detail: "这个安装方式不支持自动更新，请前往下载页手动更新。",
+            buttons: ["稍后", "打开下载页"],
+            defaultId: 1,
+            cancelId: 0
+          });
+          if (choice.response === 1) shell.openExternal(RELEASES_PAGE);
+        }
+      } else if (canInstall) {
         notify("PRTS 有新版本", `v${version} — 点此下载并自动安装。`, () => downloadAndInstallMac());
       } else {
         notify("PRTS 有新版本", `v${version} 可用 — 点此前往下载。`, () =>
@@ -235,15 +341,11 @@ async function checkViaApi(manual) {
         );
       }
     } else if (manual) {
-      notify("PRTS 已是最新", `当前 v${app.getVersion()} 已是最新版本。`);
+      await infoDialog(`当前 v${app.getVersion()} 已是最新版本。`);
     }
   } catch (error) {
     console.warn("updater: version check failed", error);
-    if (manual) {
-      notify("检查更新失败", "暂时无法获取版本信息，点此打开下载页手动查看。", () =>
-        shell.openExternal(RELEASES_PAGE)
-      );
-    }
+    if (manual) await failureDialog();
   }
 }
 
@@ -257,6 +359,28 @@ function initWindows() {
   }
   winUpdater.autoDownload = true;
   winUpdater.autoInstallOnAppQuit = true;
+  // Stable channel by default; prereleases only for the opt-in developer flag.
+  winUpdater.allowPrerelease = onPrereleaseChannel();
+  winUpdater.on("update-available", (info) => {
+    const version = info?.version || "";
+    if (manualWinCheck) {
+      manualWinCheck = false;
+      infoDialog(
+        `发现新版本 v${version}`,
+        "正在后台静默下载，完成后会提醒；也可稍后从托盘菜单「重启并更新」。"
+      );
+    } else {
+      // Background check — same heads-up macOS users get, so the silent
+      // download isn't a surprise when the "restart to update" item appears.
+      notify("PRTS 有新版本", `v${version} 正在后台下载，完成后会提醒安装。`);
+    }
+  });
+  winUpdater.on("update-not-available", () => {
+    if (manualWinCheck) {
+      manualWinCheck = false;
+      infoDialog(`当前 v${app.getVersion()} 已是最新版本。`);
+    }
+  });
   winUpdater.on("update-downloaded", (info) => {
     pending = { version: info?.version || "", action: "install" };
     notify(
@@ -265,7 +389,13 @@ function initWindows() {
       () => installNow()
     );
   });
-  winUpdater.on("error", (error) => console.warn("updater: electron-updater error", error));
+  winUpdater.on("error", (error) => {
+    console.warn("updater: electron-updater error", error);
+    if (manualWinCheck) {
+      manualWinCheck = false;
+      failureDialog();
+    }
+  });
   winUpdater.checkForUpdates().catch((error) => console.warn("updater: check failed", error));
 }
 
@@ -284,14 +414,19 @@ function init() {
   }, RECHECK_INTERVAL_MS);
 }
 
-// Manual "Check for updates…" from the tray. Works in dev too (notify-only).
+// Manual "Check for updates…" from the tray. Works in dev too (dialog-only).
 function checkNow() {
   if (checking) return;
   checking = true;
   const done = () => {
     checking = false;
+    manualWinCheck = false;
   };
   if (useElectronUpdater() && winUpdater) {
+    manualWinCheck = true;
+    // Re-read the channel so flipping settings.json takes effect without a
+    // full restart.
+    winUpdater.allowPrerelease = onPrereleaseChannel();
     winUpdater.checkForUpdates().then(done, done);
   } else {
     checkViaApi(true).then(done, done);

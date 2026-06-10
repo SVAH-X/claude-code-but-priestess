@@ -11,7 +11,7 @@ function onChannel(channel) {
 contextBridge.exposeInMainWorld("petApi", {
   isWindows: process.platform === 'win32',
   hidePopover: () => ipcRenderer.invoke("popover:hide"),
-  getPopoverBounds: () => ipcRenderer.invoke("popover:get-bounds"),
+  getPopoverBounds: (options) => ipcRenderer.invoke("popover:get-bounds", options),
   resizePopoverDrag: (payload) => ipcRenderer.invoke("popover:resize-drag", payload),
   movePopover: (point) => ipcRenderer.invoke("popover:move", point),
   endMovePopover: () => ipcRenderer.invoke("popover:move-end"),

@@ -776,7 +776,7 @@ async function handleHeaderPointerDown(event) {
   document.body.classList.add("is-window-moving");
   lockMood("happy", { durationMs: DRAG_LOCK_DURATION });
 
-  const bounds = await window.petApi?.getPopoverBounds?.();
+  const bounds = await window.petApi?.getPopoverBounds?.({ forMove: true });
   if (!isWindowMoving || !bounds) return;
   winMoveStartX = bounds.x;
   winMoveStartY = bounds.y;
@@ -1110,6 +1110,15 @@ function buildMsgEl(msg) {
 }
 
 function renderHistory(history) {
+  // Preserve the reading position: every tool pill / output update re-renders
+  // the whole stream, and unconditionally jumping to the bottom yanked the
+  // Doctor away from her words (which sit above the pills) on every command.
+  // Stay pinned only if he was already at the bottom, or he just sent a new
+  // message; otherwise restore where he was.
+  const nearBottom =
+    chatStream.scrollHeight - chatStream.scrollTop - chatStream.clientHeight < 80;
+  const prevScrollTop = chatStream.scrollTop;
+  const prevIds = new Set(lastHistory.map((m) => m.id));
   lastHistory = history || [];
   chatStream.innerHTML = "";
   if (!lastHistory.length) {
@@ -1125,7 +1134,13 @@ function renderHistory(history) {
   for (const msg of lastHistory) {
     chatStream.append(buildMsgEl(msg));
   }
-  chatStream.scrollTop = chatStream.scrollHeight;
+  const last = lastHistory[lastHistory.length - 1];
+  const sentNewMessage = Boolean(last && last.role === "user" && !prevIds.has(last.id));
+  if (nearBottom || sentNewMessage) {
+    chatStream.scrollTop = chatStream.scrollHeight;
+  } else {
+    chatStream.scrollTop = prevScrollTop;
+  }
 }
 
 // Typewriter — backends often emit chunks in bursts, which makes the response

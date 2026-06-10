@@ -22,6 +22,11 @@ const DEFAULTS = Object.freeze({
   // a URL/app) via hidden [[skill:…]] directives. Closed whitelist + sanitized
   // args, so it's safe without agent mode. PRTS-internal only.
   skillsEnabled: true,
+  // Update channel: "stable" (default) only ever offers full releases.
+  // "prerelease" is a developer/tester flag — there is deliberately no menu
+  // option for it; flip it by hand in settings.json (tray → 打开数据目录) to
+  // receive prerelease builds for testing before they are promoted.
+  updateChannel: "stable",
   autoScreenshot: true,
   desktopPet: true,
   desktopPetSize: "medium",
