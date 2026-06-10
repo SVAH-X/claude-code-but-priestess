@@ -20,6 +20,7 @@ const chat = require("./chat");
 const persona = require("./persona");
 const platform = require("./platform");
 const updater = require("./updater");
+const priestessProvider = require("./priestess-provider");
 const { spawnCli } = require("./cli-spawn");
 
 let conversationFile = null;
@@ -62,6 +63,47 @@ let desktopPet;
 let desktopPetTimer = null;
 let desktopPetPositionSaveTimer = null;
 let windowFadeTimer = null;
+let priestessSettingsWindow = null;
+
+// ============================================================
+//  Built-in Priestess backend settings — a small local-only window. The
+//  server URL / API key / model are stored in settings.json inside userData
+//  and are only ever sent to the server the Doctor configures there.
+// ============================================================
+function openPriestessSettings() {
+  if (priestessSettingsWindow && !priestessSettingsWindow.isDestroyed()) {
+    priestessSettingsWindow.show();
+    priestessSettingsWindow.focus();
+    return;
+  }
+  priestessSettingsWindow = new BrowserWindow({
+    width: 460,
+    height: 560,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    title: "PRTS · 内置普瑞赛斯",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#11151a" : "#e9edf2",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  priestessSettingsWindow.setMenuBarVisibility?.(false);
+  priestessSettingsWindow.loadFile(
+    path.join(__dirname, "..", "renderer", "priestess-settings.html")
+  );
+  priestessSettingsWindow.once("ready-to-show", () => {
+    priestessSettingsWindow?.show();
+    priestessSettingsWindow?.focus();
+  });
+  priestessSettingsWindow.on("closed", () => {
+    priestessSettingsWindow = null;
+  });
+}
 let htmlPanelOpen = false;
 let htmlPanelWidth = 0;
 
@@ -693,6 +735,7 @@ const MENU_TEXT = {
     usageNoCli: "使用后端：未找到本地 CLI",
     usageBackend: "使用后端",
     usageBackendOne: (provider) => `使用后端：${provider}`,
+    priestessSettings: "内置普瑞赛斯设置…",
     modelClaude: "模型（Claude）",
     modelCodex: "模型（Codex）",
     defaultClaude: "默认（CLI/账户）",
@@ -737,6 +780,7 @@ const MENU_TEXT = {
     usageNoCli: "Usage backend: no local CLI found",
     usageBackend: "Usage backend",
     usageBackendOne: (provider) => `Usage backend: ${provider}`,
+    priestessSettings: "Built-in Priestess settings…",
     modelClaude: "Model (Claude)",
     modelCodex: "Model (Codex)",
     defaultClaude: "Default (CLI/account)",
@@ -1144,6 +1188,10 @@ function buildContextMenu() {
     buildUsageBackendMenuItem(),
     ...buildModelMenuItems(),
     {
+      label: mt("priestessSettings"),
+      click: () => openPriestessSettings()
+    },
+    {
       label: mt("autoScreenshot"),
       type: "checkbox",
       visible: Boolean(all.agentMode),
@@ -1526,6 +1574,37 @@ ipcMain.handle("settings:pick-cwd", async () => {
     settings.set({ chatCwd: result.filePaths[0] });
   }
   return buildSettingsState();
+});
+
+// Built-in Priestess backend config — read/written only to local settings.json.
+ipcMain.handle("priestess:get-config", () => ({
+  enabled: Boolean(settings.get("priestessEnabled")),
+  baseUrl: String(settings.get("priestessBaseUrl") || ""),
+  apiKey: String(settings.get("priestessApiKey") || ""),
+  model: String(settings.get("priestessModel") || "")
+}));
+
+ipcMain.handle("priestess:set-config", (_, cfg) => {
+  settings.set({
+    priestessEnabled: Boolean(cfg?.enabled),
+    priestessBaseUrl: String(cfg?.baseUrl ?? "").trim(),
+    priestessApiKey: String(cfg?.apiKey ?? "").trim(),
+    priestessModel: String(cfg?.model ?? "").trim()
+  });
+  chat.refreshProviderAvailability();
+  syncTrayTooltip();
+  return { ok: true };
+});
+
+ipcMain.handle("priestess:test-connection", (_, cfg) =>
+  priestessProvider.testConnection({
+    baseUrl: String(cfg?.baseUrl ?? settings.get("priestessBaseUrl") ?? ""),
+    apiKey: String(cfg?.apiKey ?? settings.get("priestessApiKey") ?? "")
+  })
+);
+
+ipcMain.handle("priestess:close-settings", () => {
+  priestessSettingsWindow?.close();
 });
 
 ipcMain.handle("popover:preview-open", (_, payload) => {

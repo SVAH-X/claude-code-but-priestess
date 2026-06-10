@@ -8,6 +8,14 @@ const DEFAULTS = Object.freeze({
   // string = let the CLI / account pick its default.
   claudeModel: "",
   codexModel: "",
+  // Built-in "Priestess" backend — she speaks to an OpenAI-compatible server
+  // directly (no local CLI needed). Defaults to a local LiteLLM proxy. The
+  // API key and URL live ONLY in this local settings.json (userData); they
+  // are never sent anywhere except the server the Doctor configures.
+  priestessEnabled: false,
+  priestessBaseUrl: "http://127.0.0.1:4000",
+  priestessApiKey: "",
+  priestessModel: "",
   chatCwd: "",
   // Appearance: "system" follows the OS light/dark setting; "light"/"dark"
   // force a fixed appearance. Drives nativeTheme.themeSource, which in turn

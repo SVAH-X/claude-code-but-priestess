@@ -30,6 +30,13 @@ contextBridge.exposeInMainWorld("previewApi", {
   openInBrowser: (payload) => ipcRenderer.invoke("html:open-in-browser", payload)
 });
 
+contextBridge.exposeInMainWorld("priestessApi", {
+  getConfig: () => ipcRenderer.invoke("priestess:get-config"),
+  setConfig: (cfg) => ipcRenderer.invoke("priestess:set-config", cfg),
+  testConnection: (cfg) => ipcRenderer.invoke("priestess:test-connection", cfg),
+  closeSettings: () => ipcRenderer.invoke("priestess:close-settings")
+});
+
 contextBridge.exposeInMainWorld("chatApi", {
   send: (text) => ipcRenderer.invoke("chat:send", text),
   cancel: () => ipcRenderer.invoke("chat:cancel"),

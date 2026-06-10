@@ -203,24 +203,37 @@ binary).
 
 ## Usage backends
 
-This app only talks to local CLI backends. It does not use cloud API keys
-directly and it does not support arbitrary agents.
+Three backends are supported: two local CLIs, plus a built-in direct
+connection ("Priestess herself").
 
 Supported local CLIs:
 
-- Claude Code: `claude`
+- Claude Code: `claude` (including the latest Claude models such as
+  Fable 5 / Opus 4.8, selectable from the tray Model menu)
 - Codex CLI: `codex`
+
+Built-in backend (no CLI required):
+
+- Tray right-click → **"Built-in Priestess settings…"**, enter a server URL
+  and you're done. It speaks to any **OpenAI-compatible** server — defaults
+  to a local [LiteLLM](https://github.com/BerriAI/litellm) proxy
+  (`http://127.0.0.1:4000`), and also works with Ollama / LM Studio / vLLM /
+  OpenRouter / DeepSeek, etc.
+- **Privacy**: the server URL, API key, and model name are stored only in
+  `settings.json` inside the local data folder and are sent only to the
+  server you configure — nowhere else.
+- This backend is a pure chat channel: skills (music / search / reminders…),
+  mood sprites, and long-term memory injection all work as usual; it has no
+  terminal or file tools, so agent mode does not apply.
 
 Backend selection is automatic:
 
-- If both `claude` and `codex` are available, the tray context menu shows both
-  choices. Claude Code is the default on macOS; Codex is the default on Windows.
-- If only `claude` is available, the app locks to Claude Code and does not
-  show Codex as a selectable option.
-- If only `codex` is available, the app locks to Codex and does not show
-  Claude Code as a selectable option.
-- If neither CLI is found, the popover shows `No CLI`, sending is disabled,
-  and the tray menu shows `Usage backend: no local CLI found`.
+- Every available backend appears in the tray "Usage backend" menu.
+  Claude Code is the default on macOS; Codex is the default on Windows.
+- If only one backend is available, the app locks to it.
+- If nothing is available, the popover shows `No CLI`, sending is disabled,
+  and the tray menu shows `Usage backend: no local CLI found` — you can
+  still open "Built-in Priestess settings…" to enable the direct backend.
 
 Detection runs at startup, when opening the usage-backend menu, and before
 sending a message. It checks the current `PATH`, common local binary

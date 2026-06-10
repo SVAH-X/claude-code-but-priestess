@@ -148,22 +148,33 @@ npm run dist          # 为当前机器架构构建
 
 ## 后端支持
 
-这个应用只支持本地 CLI 后端，不直接使用云端 API key，也不支持任意
-第三方 agent。
+支持三种后端：两个本地 CLI，以及一个内置的「普瑞赛斯直连」后端。
 
 支持的本地 CLI：
 
-- Claude Code：`claude`
+- Claude Code：`claude`（含最新 Claude 模型，如 Fable 5 / Opus 4.8，
+  可在托盘 Model 菜单中选择）
 - Codex CLI：`codex`
+
+内置后端（普瑞赛斯本体）：
+
+- 托盘右键 → **「内置普瑞赛斯设置…」**，填服务器地址即可使用，无需任何
+  本地 CLI。它直连任意 **OpenAI 兼容** 服务——默认 [LiteLLM](https://github.com/BerriAI/litellm)
+  代理（`http://127.0.0.1:4000`），也支持 Ollama / LM Studio / vLLM /
+  OpenRouter / DeepSeek 等。
+- **隐私**：服务器地址、API key 和模型名只保存在本机数据目录的
+  `settings.json` 中，除了你填写的那台服务器，不会发送给任何人。
+- 该后端是纯聊天通道：技能（放歌 / 搜索 / 提醒…）、心情立绘、长期记忆
+  注入照常工作；但没有终端与文件工具，因此不支持 agent mode。
 
 后端选择规则：
 
-- 如果本机同时有 `claude` 和 `codex`，右键菜单里可以切换；macOS 默认
+- 可用的后端会出现在右键菜单「使用后端」里自由切换；macOS 默认
   使用 Claude Code，Windows 默认使用 Codex。
-- 如果本机只有 `claude`，应用会锁定 Claude Code，不显示 Codex 选项。
-- 如果本机只有 `codex`，应用会锁定 Codex，不显示 Claude Code 选项。
-- 如果两个都没有，popover 顶部显示 `No CLI`，发送按钮禁用，右键菜单
-  显示 `Usage backend: no local CLI found`。
+- 只有一个可用时会锁定该后端，不显示其他选项。
+- 一个都没有时，popover 顶部显示 `No CLI`，发送按钮禁用，右键菜单
+  显示 `Usage backend: no local CLI found`——此时也可以打开
+  「内置普瑞赛斯设置…」启用直连后端。
 
 探测会在启动时、打开后端菜单时、发送消息前执行。它会检查当前 `PATH`、
 常见本地二进制目录，以及 VS Code / Cursor 的 OpenAI 扩展内置 Codex

@@ -10,11 +10,16 @@ const path = require("node:path");
 const settings = require("./settings");
 const persona = require("./persona");
 const skills = require("./skills");
+const priestessProvider = require("./priestess-provider");
 const { spawnCli, spawnCliSync } = require("./cli-spawn");
 
 const PROVIDERS = Object.freeze({
   CLAUDE: "claude",
-  CODEX: "codex"
+  CODEX: "codex",
+  // Built-in backend: PRTS speaks to an OpenAI-compatible server directly
+  // (LiteLLM by default) — no local CLI required. Chat + skills + memory
+  // injection work; CLI file tools and agent mode do not apply.
+  PRIESTESS: "priestess"
 });
 const SHARED_TRANSCRIPT_MAX_CHARS = 9000;
 const RECENT_TRANSCRIPT_MESSAGE_LIMIT = 24;
@@ -90,7 +95,9 @@ let skillTailBuffer = "";
 let skillExecutedThisTurn = new Set();
 
 function normalizeProvider(provider) {
-  return provider === PROVIDERS.CODEX ? PROVIDERS.CODEX : PROVIDERS.CLAUDE;
+  if (provider === PROVIDERS.CODEX) return PROVIDERS.CODEX;
+  if (provider === PROVIDERS.PRIESTESS) return PROVIDERS.PRIESTESS;
+  return PROVIDERS.CLAUDE;
 }
 
 function activeProvider() {
@@ -99,11 +106,15 @@ function activeProvider() {
 }
 
 function providerLabel(provider = activeProvider()) {
-  return provider === PROVIDERS.CODEX ? "Codex" : "Claude Code";
+  if (provider === PROVIDERS.CODEX) return "Codex";
+  if (provider === PROVIDERS.PRIESTESS) return "Priestess (built-in)";
+  return "Claude Code";
 }
 
 function providerShortLabel(provider = activeProvider()) {
-  return provider === PROVIDERS.CODEX ? "Codex" : "Claude";
+  if (provider === PROVIDERS.CODEX) return "Codex";
+  if (provider === PROVIDERS.PRIESTESS) return "Priestess";
+  return "Claude";
 }
 
 function executableNames(command) {
@@ -266,10 +277,26 @@ function detectProvider(provider) {
   };
 }
 
+// The built-in backend has no executable — it is "available" when the Doctor
+// enabled it and gave it a server URL in the local settings.
+function detectPriestessProvider() {
+  const available =
+    Boolean(settings.get("priestessEnabled")) &&
+    Boolean(String(settings.get("priestessBaseUrl") || "").trim());
+  return {
+    provider: PROVIDERS.PRIESTESS,
+    label: providerLabel(PROVIDERS.PRIESTESS),
+    shortLabel: providerShortLabel(PROVIDERS.PRIESTESS),
+    available,
+    command: null
+  };
+}
+
 function scanProviderAvailability() {
   return {
     [PROVIDERS.CLAUDE]: detectProvider(PROVIDERS.CLAUDE),
-    [PROVIDERS.CODEX]: detectProvider(PROVIDERS.CODEX)
+    [PROVIDERS.CODEX]: detectProvider(PROVIDERS.CODEX),
+    [PROVIDERS.PRIESTESS]: detectPriestessProvider()
   };
 }
 
@@ -281,21 +308,17 @@ function ensureProviderAvailability() {
 }
 
 function emptyProviderAvailability() {
+  const empty = (provider) => ({
+    provider,
+    label: providerLabel(provider),
+    shortLabel: providerShortLabel(provider),
+    available: false,
+    command: null
+  });
   return {
-    [PROVIDERS.CLAUDE]: {
-      provider: PROVIDERS.CLAUDE,
-      label: providerLabel(PROVIDERS.CLAUDE),
-      shortLabel: providerShortLabel(PROVIDERS.CLAUDE),
-      available: false,
-      command: null
-    },
-    [PROVIDERS.CODEX]: {
-      provider: PROVIDERS.CODEX,
-      label: providerLabel(PROVIDERS.CODEX),
-      shortLabel: providerShortLabel(PROVIDERS.CODEX),
-      available: false,
-      command: null
-    }
+    [PROVIDERS.CLAUDE]: empty(PROVIDERS.CLAUDE),
+    [PROVIDERS.CODEX]: empty(PROVIDERS.CODEX),
+    [PROVIDERS.PRIESTESS]: empty(PROVIDERS.PRIESTESS)
   };
 }
 
@@ -304,6 +327,7 @@ function selectAvailableProvider(requested, availability = ensureProviderAvailab
   if (availability[normalized]?.available) return normalized;
   if (availability[PROVIDERS.CODEX]?.available) return PROVIDERS.CODEX;
   if (availability[PROVIDERS.CLAUDE]?.available) return PROVIDERS.CLAUDE;
+  if (availability[PROVIDERS.PRIESTESS]?.available) return PROVIDERS.PRIESTESS;
   return null;
 }
 
@@ -320,7 +344,7 @@ function getProviderAvailability(options = {}) {
   const availability = options.refresh === false
     ? providerAvailability || emptyProviderAvailability()
     : ensureProviderAvailability();
-  const availableProviders = [PROVIDERS.CLAUDE, PROVIDERS.CODEX]
+  const availableProviders = [PROVIDERS.CLAUDE, PROVIDERS.CODEX, PROVIDERS.PRIESTESS]
     .filter((provider) => availability[provider]?.available);
   const active = selectAvailableProvider(settings.get("chatProvider"), availability);
   return {
@@ -328,7 +352,8 @@ function getProviderAvailability(options = {}) {
     availableProviders,
     providers: {
       [PROVIDERS.CLAUDE]: { ...availability[PROVIDERS.CLAUDE] },
-      [PROVIDERS.CODEX]: { ...availability[PROVIDERS.CODEX] }
+      [PROVIDERS.CODEX]: { ...availability[PROVIDERS.CODEX] },
+      [PROVIDERS.PRIESTESS]: { ...(availability[PROVIDERS.PRIESTESS] || detectPriestessProvider()) }
     }
   };
 }
@@ -1868,6 +1893,82 @@ function dispatchSend(
   return { ok: true };
 }
 
+// Recent conversational turns as proper chat-completions messages. The current
+// user message is already in history (pushed by dispatchSend); the empty
+// assistant bubble is skipped by the empty-text filter.
+function buildPriestessMessages() {
+  const messages = [];
+  for (const entry of history) {
+    if (!entry || entry.ephemeral || entry.queued) continue;
+    if (!["user", "assistant"].includes(entry.role)) continue;
+    const text = String(entry.text || "").trim();
+    if (!text) continue;
+    messages.push({ role: entry.role, content: text });
+  }
+  return messages.slice(-RECENT_TRANSCRIPT_MESSAGE_LIMIT);
+}
+
+// Built-in backend turn: stream straight from the configured OpenAI-compatible
+// server. Mood tags, skill directives, and the typewriter all ride the same
+// appendAssistant path the CLIs use.
+function launchPriestessTurn(trimmed) {
+  turnLaunching = false;
+  const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
+  const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
+  const system = persona.buildPersonaPrompt({
+    agentMode: false,
+    screenshotPath: null,
+    provider: PROVIDERS.PRIESTESS,
+    // History is sent as real chat messages below, so the transcript is not
+    // duplicated into the system prompt.
+    sharedTranscript: "",
+    includeLongMemory,
+    memoryRecallRequested,
+    skillsEnabled: settings.get("skillsEnabled") !== false,
+    deepPersona: shouldUseDeepPersona(trimmed)
+  });
+
+  const finishCommon = () => {
+    currentProcess = null;
+    currentProvider = null;
+    const cancelled = cancelRequested;
+    cancelRequested = false;
+    return cancelled;
+  };
+
+  const handle = priestessProvider.startTurn({
+    baseUrl: settings.get("priestessBaseUrl"),
+    apiKey: settings.get("priestessApiKey"),
+    model: settings.get("priestessModel"),
+    system,
+    messages: buildPriestessMessages(),
+    onDelta: (text) => {
+      if (currentProcess === handle) appendAssistant(text);
+    },
+    onDone: () => {
+      if (currentProcess !== handle) return;
+      finalizeAssistant(pendingAssistantText);
+      const cancelled = finishCommon();
+      finishTurn(cancelled ? { cancelled: true } : {});
+    },
+    onError: (error) => {
+      if (currentProcess !== handle) return;
+      const cancelled = cancelRequested || error?.name === "AbortError";
+      if (!cancelled) {
+        pushSystem(
+          `内置普瑞赛斯后端出错：${String(error?.message || error).slice(0, 300)}\n` +
+            "请在托盘菜单「内置普瑞赛斯设置…」中确认服务器地址、API Key 与模型名。"
+        );
+      }
+      if (pendingAssistantId) finalizeAssistant(pendingAssistantText);
+      finishCommon();
+      finishTurn(cancelled ? { cancelled: true } : { error: String(error?.message || error) });
+    }
+  });
+  currentProcess = handle;
+  currentTurnHadScreenshot = false;
+}
+
 async function launchProviderTurn({
   trimmed,
   provider,
@@ -1879,6 +1980,11 @@ async function launchProviderTurn({
 }) {
   if (currentProcess) {
     turnLaunching = false;
+    return;
+  }
+
+  if (provider === PROVIDERS.PRIESTESS) {
+    launchPriestessTurn(trimmed);
     return;
   }
 
