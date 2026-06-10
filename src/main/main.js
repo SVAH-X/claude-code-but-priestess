@@ -820,6 +820,8 @@ const MODEL_PRESETS = {
     { labelKey: "sonnetAlias", value: "sonnet" },
     { labelKey: "haikuAlias", value: "haiku" },
     { type: "separator" },
+    { label: "Fable 5", value: "claude-fable-5" },
+    { type: "separator" },
     { label: "Opus 4.8", value: "claude-opus-4-8" },
     { label: "Opus 4.7", value: "claude-opus-4-7" },
     { label: "Opus 4.6", value: "claude-opus-4-6" },
