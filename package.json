@@ -41,6 +41,8 @@
       "src/**/*",
       "assets/**/*",
       "!**/.DS_Store",
+      "!assets/character/Nano Banana Workspace Image.png",
+      "!assets/character/new*.png",
       "package.json"
     ],
     "directories": {

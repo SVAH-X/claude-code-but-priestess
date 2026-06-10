@@ -1251,6 +1251,11 @@ function addPreviewButtons() {
   syncPreviewButtons();
 }
 
+// HTML replies restored from a previous run must not pop the panel open the
+// moment the app boots — only replies that arrive in THIS session auto-open.
+// The Preview button still works for restored ones.
+let previewBootstrapped = false;
+
 function checkAndUpdateHtmlPreview() {
   if (chatRunning) return;
   // Remember which message IDs were already in the store so we can tell
@@ -1258,6 +1263,14 @@ function checkAndUpdateHtmlPreview() {
   // old one the user dismissed (should stay closed).
   const oldIds = new Set(htmlStore.keys());
   const latestId = detectHtmlBlocks();
+  if (!previewBootstrapped) {
+    // First render is always the boot getHistory result: whatever HTML blocks
+    // exist now were restored from disk, not freshly generated.
+    previewBootstrapped = true;
+    for (const id of htmlStore.keys()) dismissedPreviewIds.add(id);
+    addPreviewButtons();
+    return;
+  }
   // Newly appeared HTML blocks (from a fresh reply) clear their dismissed
   // flag so they auto-open even if a previous block was manually closed.
   for (const id of htmlStore.keys()) {

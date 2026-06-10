@@ -699,6 +699,9 @@ function openHtmlPanel(width) {
   }
   htmlPanelOpen = true;
   htmlPanelWidth = panelWidth;
+  // Keep the authoritative size in sync — otherwise the Windows spurious-
+  // WM_SIZE guard in the resize handler reverts the expansion immediately.
+  popoverExpectedSize = { width: newWidth, height: bounds.height };
   popover.setBounds({ x: newX, y: bounds.y, width: newWidth, height: bounds.height }, true);
   scheduleSavePopoverSize();
 }
@@ -708,6 +711,7 @@ function closeHtmlPanel() {
   htmlPanelOpen = false;
   const bounds = popover.getBounds();
   const newWidth = Math.max(POPOVER_MIN_WIDTH, bounds.width - htmlPanelWidth);
+  popoverExpectedSize = { width: newWidth, height: bounds.height };
   popover.setBounds({ x: bounds.x, y: bounds.y, width: newWidth, height: bounds.height }, true);
   htmlPanelWidth = 0;
   scheduleSavePopoverSize();

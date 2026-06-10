@@ -36,8 +36,13 @@
             <button type="button" id="closePreviewBtn" class="ghost preview-btn preview-close" title="Close preview">&times;</button>
           </div>
         </header>
+        <!-- No allow-same-origin: combined with allow-scripts on a srcdoc
+             iframe it would defeat the sandbox entirely — the (model- or
+             web-derived) HTML would be same-origin with the app UI and could
+             reach window.parent and the bridged IPC APIs. Without it, scripts
+             still run but in an opaque origin that cannot touch the app. -->
         <iframe id="previewFrame"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
+                sandbox="allow-scripts allow-forms allow-modals"
                 srcdoc=""
                 title="HTML Preview"
                 allow="clipboard-write"></iframe>
