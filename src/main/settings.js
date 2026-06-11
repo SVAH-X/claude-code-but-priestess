@@ -25,6 +25,10 @@ const DEFAULTS = Object.freeze({
   // Menu language: "system" follows the OS preferred language, "zh" forces
   // Simplified Chinese, and "en" forces English.
   menuLanguage: "system",
+  // Her outfit: "formal" (正装 — the classic coat, assets/character root) or
+  // "casual" (休闲 — the white butterfly dress, assets/character/casual).
+  // Both sets share the same nine expression frames.
+  outfit: "formal",
   agentMode: false,
   // Lets Priestess trigger curated local actions (play music, web search, open
   // a URL/app) via hidden [[skill:…]] directives. Closed whitelist + sanitized
@@ -36,6 +40,24 @@ const DEFAULTS = Object.freeze({
   // receive prerelease builds for testing before they are promoted.
   updateChannel: "stable",
   autoScreenshot: true,
+  // Proactive care — she periodically looks at the screen and decides whether
+  // anything is worth saying (off by default; the tray toggle shows a consent
+  // dialog because every check is a paid model call and needs screen access).
+  // Interval/cooldown are minutes; quiet hours are local "HH:MM" and may wrap
+  // past midnight; the daily cap counts checks. The tuning knobs have no menu
+  // UI — edit them here by hand (tray → 打开数据目录), like updateChannel.
+  proactiveEnabled: false,
+  proactiveIntervalMin: 20,
+  proactiveCooldownMin: 10,
+  proactiveDailyCap: 20,
+  proactiveQuietStart: "00:30",
+  proactiveQuietEnd: "08:30",
+  // Observation journal — lets her keep a local-only JSONL of one-line "what
+  // the Doctor is doing" notes whenever she has seen the screen. Off by
+  // default; lives in memory/OBSERVATIONS.jsonl.
+  observationJournal: false,
+  // Timestamp of the last automatic memory-curation pass (see proactive.js).
+  memoryCuratedAt: 0,
   desktopPet: true,
   desktopPetSize: "medium",
   desktopPetPosition: null,

@@ -34,6 +34,15 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
 > macOS `.dmg` and Windows `.exe`/`.zip`, no Node toolchain required.
 > (Windows builds are experimental and unsigned — see below.)
 
+## Which file should I download?
+
+| You are… | Download this | You also need |
+| --- | --- | --- |
+| macOS user (Apple Silicon) | [`PRTS-<version>-arm64.dmg`](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest) | A local, authenticated `claude` or `codex` CLI (or configure the built-in direct backend from the tray) |
+| Windows 10 / 11 (x64) user | [`PRTS.Setup.<version>.exe`](https://github.com/SVAH-X/claude-code-but-priestess/releases/latest), or portable `PRTS-<version>-win.zip` | Same as above; Windows builds are experimental and unsigned |
+| Linux user | See the [fork](https://github.com/aklnaaw/claude-code-but-priestess) | — |
+| Developer | Clone the repo, `npm install && npm run dev` | Node + npm |
+
 ## Features
 
 - Menu bar accessory (`LSUIElement = true`), no Dock icon.
@@ -60,6 +69,10 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   Right-click the tray icon → **Appearance** to follow the system theme
   (default) or force Light / Dark. The text palette and the popover background
   flip together, so it reads the same on macOS and Windows.
+- **Outfits**: tray right-click → **"Her outfit"** switches between 正装
+  (Formal — the classic coat, default) and 休闲 (Casual — the white butterfly
+  dress). Both sets carry all nine expressions; the switch applies instantly
+  to the chat window and the desktop pet, no restart needed.
 - Skills — small local actions she can take for you, cross-platform on macOS
   and Windows: play music, web search in your default browser, open a URL,
   open a local app, set a reminder (she notifies you when it's time), cancel
@@ -82,8 +95,24 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
 - Mood reactions:
   - She picks her own expression to match each reply (calm, smile, sad, angry,
     sleepy, threat) via a hidden tag the renderer reads and strips.
+  - Long replies can change mood mid-stream: she re-tags at the turning point
+    and her sprite follows along live instead of freezing on one face.
   - Streaming reply → thinking / working; reply finishes → settles into the
     expression she chose; error → a brief cry.
+- **Proactive care (optional, off by default)** — when enabled she peeks at
+  your screen every so often and decides whether anything is worth saying
+  (stuck on the same problem for ages, working too long, up too late…). If
+  yes, she speaks up briefly and you get a system notification with her words;
+  if not, she stays silent and nothing appears anywhere. See
+  [Proactive care](#proactive-care) below.
+- **Observation journal (optional, off by default)** — when enabled, each time
+  she has seen the screen she may keep a one-line local note of what you were
+  doing (`memory/OBSERVATIONS.jsonl`). Local-only; it feeds proactive care and
+  her memory.
+- **Automatic memory curation** — when `MEMORY.md` grows large she quietly
+  tidies it about once a week while the chat is idle: merging duplicates,
+  re-filing entries, condensing stale trivia without losing anything that
+  matters. The pass never appears in chat.
 - Right-click the icon for a context menu: choose Claude Code or Codex as
   the usage backend, choose the active backend's model, choose chat working
   directory, reveal the data folder, or quit. Codex model choices come from
@@ -265,6 +294,41 @@ which codex    # should print a path on your $PATH
 Optionally set a project directory via the tray menu (`Set chat directory…`)
 so the selected backend can use the right working tree.
 
+## Proactive care
+
+Tray right-click → **"Proactive care (peeks at your screen)"**. Entirely
+optional and off by default; enabling shows a consent dialog first, because it
+means periodic screenshots plus one model call per check.
+
+When enabled:
+
+- Roughly every 20 minutes she takes a screenshot and lets the current backend
+  decide **whether anything is worth saying** — you seem stuck on the same
+  problem, you've been at it too long, it's deep into the night, or the screen
+  shows something you two talked about.
+- **Silence is the norm**: the model answers with a hidden `[[silent]]` marker
+  when there's nothing worth saying, and in that case nothing appears anywhere.
+  Only when she actually speaks does the message join the chat, along with a
+  system notification carrying her words (click it to open the chat).
+- Guardrails: a **hard off-switch** (the tray checkbox), the check **interval**,
+  a **cooldown** after recent conversation (she won't butt in right after you
+  talked), **quiet hours** (00:30–08:30 by default), and a **daily cap**
+  (20 checks by default, to bound cost).
+- Works only with the Claude Code / Codex backends (the built-in direct backend
+  can't see the screen). On macOS it needs Screen Recording permission; if the
+  screenshot fails, the check is skipped rather than run blind.
+
+The tuning knobs have no menu UI — edit `settings.json` by hand (tray →
+Reveal data folder): `proactiveIntervalMin` / `proactiveCooldownMin` /
+`proactiveQuietStart` / `proactiveQuietEnd` (`HH:MM`, may wrap past midnight) /
+`proactiveDailyCap`.
+
+The companion **observation journal** has its own tray toggle (also off by
+default): when on, each time she has seen the screen she may append one
+objective line about what you were doing to `memory/OBSERVATIONS.jsonl`.
+Local-only, size-capped, and fed back into proactive care (so she doesn't
+repeat herself) and her memory.
+
 ## Data and memory storage
 
 All persistent app-owned data is stored in Electron's `userData` directory,
@@ -290,11 +354,12 @@ Files stored there:
 
 | File | Purpose |
 | --- | --- |
-| `settings.json` | App settings: selected backend, chat working directory, agent mode, skills (music / search / open URL/app), auto-screenshot setting, appearance (system / light / dark), and popover size. |
+| `settings.json` | App settings: selected backend, chat working directory, agent mode, skills (music / search / open URL/app), proactive care (toggle + interval/cooldown/quiet hours/daily cap), observation journal toggle, auto-screenshot setting, appearance (system / light / dark), and popover size. |
 | `conversation.json` | Current visible chat session, per-backend resume session ids, and the long-memory dormant flag. |
-| `memory/MEMORY.md` | Curated long-term memory about the Doctor: preferences, projects, recurring topics, and facts worth remembering. |
+| `memory/MEMORY.md` | Curated long-term memory about the Doctor: preferences, projects, recurring topics, and facts worth remembering. Auto-tidied periodically once it grows large. |
 | `memory/CONVERSATION_SUMMARY.md` | Rolling bounded summary of older conversations. Used when long context needs to be recovered. |
 | `memory/CONVERSATION_ARCHIVE.jsonl` | Full shared user/assistant archive for both Claude Code and Codex, capped to roughly 5 MB and pruned from the oldest entries. |
+| `memory/OBSERVATIONS.jsonl` | (Optional, off by default) Observation journal: her one-line notes of what the Doctor was doing when she saw the screen. Local-only, size-capped. |
 
 What does not get written by the memory system:
 
@@ -345,7 +410,8 @@ These files define the important behavior:
 | File | Role |
 | --- | --- |
 | `src/main/persona.js` | Constructs the 普瑞赛斯 / Priestess persona prompt, defines memory file paths, and controls when long memory is injected. |
-| `src/main/chat.js` | Detects local Claude/Codex CLIs, chooses the active backend, launches subprocesses, parses streaming output, persists archive/summary data, and shares context across backends. |
+| `src/main/chat.js` | Detects local Claude/Codex CLIs, chooses the active backend, launches subprocesses, parses streaming output and hidden directives (mood / skill / observe / silent), persists archive/summary data, and shares context across backends. |
+| `src/main/proactive.js` | Background scheduler for proactive care and memory curation: interval, cooldown, quiet hours, daily cap, screen and backend gating. |
 | `src/main/main.js` | Electron main process: tray icon, context menu, backend menu rendering, settings persistence, conversation persistence, and app lifecycle. |
 | `src/main/settings.js` | Default app settings and `settings.json` persistence. |
 | `src/main/preload.js` | Safe IPC bridge between Electron main and renderer. |
@@ -354,15 +420,29 @@ These files define the important behavior:
 
 ## Character Assets
 
-The renderer expects these files in `assets/character`:
+Two outfits, each with the same nine expression frames (`睁眼 / 半眯眼 /
+快闭眼 / 闭眼 / 笑 / 生气 / 威胁 / 哭唧唧 / 睡觉`), plus `icon.png` for the
+centered menu bar icon:
 
-- `睁眼.png`, `半眯眼.png`, `快闭眼.png`, `闭眼.png`
-- `笑.png`, `生气.png`, `威胁.png`, `哭唧唧.png`, `睡觉.png`
-- `icon.png` for the centered menu bar icon
+- **Formal (default)**: `assets/character/*.png` — the classic coat. The white
+  background (including the enclosed white gaps inside her hair that an
+  edge-connected fill can never reach) is baked out offline by
+  `scripts/flatten-character-assets.js`, while her eye whites and other
+  in-character white areas stay untouched.
+- **Casual**: `assets/character/casual/*.png` — the white butterfly dress,
+  composed by the pipeline under `scripts/art/` from `new睁眼.png` and the
+  4-in-1 expression sheet (`Nano Banana Workspace Image.png`, kept as
+  sources): all nine frames share one body, expressions are transplanted or
+  synthesized per frame, and the threat frame darkens the whole character
+  with only the eye diamonds glowing. Ships transparent.
 
-The PNGs are not modified on disk; the renderer flood-fills the
-edge-connected white background at runtime so the character sits cleanly on
-the popover's vibrancy panel.
+The renderer therefore skips its startup flood fill; the runtime fill remains
+as a fallback for unprocessed custom art (opaque corners). After replacing the
+formal art, re-bake with
+`npx electron scripts/flatten-character-assets.js --inspect / --apply / --verify`
+(careful: her face, dress panels, butterfly ornament and eye glints are all
+enclosed near-white regions — never bulk-remove white; see the note in
+`scripts/flatten-hole-seeds.json`).
 
 ## Notes
 

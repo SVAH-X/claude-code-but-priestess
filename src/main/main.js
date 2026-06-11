@@ -19,6 +19,7 @@ const settings = require("./settings");
 const chat = require("./chat");
 const persona = require("./persona");
 const platform = require("./platform");
+const proactive = require("./proactive");
 const updater = require("./updater");
 const priestessProvider = require("./priestess-provider");
 const { spawnCli } = require("./cli-spawn");
@@ -93,6 +94,7 @@ function openPriestessSettings() {
     }
   });
   priestessSettingsWindow.setMenuBarVisibility?.(false);
+  hardenWebContents(priestessSettingsWindow.webContents);
   priestessSettingsWindow.loadFile(
     path.join(__dirname, "..", "renderer", "priestess-settings.html")
   );
@@ -117,12 +119,19 @@ function buildTrayIcon() {
     return prepareTrayImage(dedicated, { size: 22 });
   }
 
-  const base = nativeImage.createFromPath(path.join(ASSETS_DIR, "笑.png"));
+  // Fallback: crop the smiling frame's head from the active outfit. The head
+  // sits higher in the formal art than in the casual dress art.
+  const casual = settings.get("outfit") === "casual";
+  const base = nativeImage.createFromPath(
+    casual
+      ? path.join(ASSETS_DIR, "casual", "笑.png")
+      : path.join(ASSETS_DIR, "笑.png")
+  );
   if (base.isEmpty()) return nativeImage.createEmpty();
 
-  // The chibi sprite sits centered in a 1254x1254 canvas. The head occupies
-  // roughly the top-center quarter; this rectangle isolates it.
-  const head = base.crop({ x: 377, y: 110, width: 500, height: 500 });
+  const head = casual
+    ? base.crop({ x: 377, y: 290, width: 500, height: 500 })
+    : base.crop({ x: 377, y: 110, width: 500, height: 500 });
   return prepareTrayImage(head, { chromaKeyLightPixels: true, size: 20 });
 }
 
@@ -343,6 +352,20 @@ function syncPopoverBackground() {
   }
 }
 
+// All windows load only local files. Any window.open / navigation that points
+// elsewhere goes to the system browser instead of a new Electron window —
+// markdown links in chat are target="_blank", and a file dropped onto the
+// popover must not navigate the UI away.
+function hardenWebContents(contents) {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  contents.on("will-navigate", (event, url) => {
+    if (url !== contents.getURL()) event.preventDefault();
+  });
+}
+
 function createPopover() {
   const size = initialPopoverSize();
   popoverExpectedSize = { width: size.width, height: size.height };
@@ -381,6 +404,7 @@ function createPopover() {
     }
   });
 
+  hardenWebContents(popover.webContents);
   popover.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   // Sit in the normal window stacking order — other apps can come over the
   // top. The popover still only disappears when the tray icon is clicked
@@ -520,6 +544,7 @@ function createDesktopPet() {
       nodeIntegration: false
     }
   });
+  hardenWebContents(desktopPet.webContents);
   desktopPet.loadFile(path.join(__dirname, "..", "renderer", "desktop-pet.html"));
   desktopPet.on("closed", () => {
     desktopPet = null;
@@ -731,10 +756,26 @@ const MENU_TEXT = {
     system: "跟随系统",
     light: "浅色",
     dark: "深色",
+    outfit: "她的服装",
+    outfitFormal: "正装（默认）",
+    outfitCasual: "休闲",
     skills: "允许她使用技能（音乐 / 搜索 / 应用）",
     agentMode: "Agent mode（完整屏幕控制）",
     enableAgentTitle: "开启 agent mode？",
     enableAgent: "开启 agent mode",
+    proactiveCare: "主动关心（定时看一眼屏幕）",
+    observationJournal: "观察日志（记下博士在做什么）",
+    enableProactiveTitle: "开启主动关心？",
+    enableProactive: "开启主动关心",
+    proactiveWarnMessage: "让普瑞赛斯定时看一眼屏幕，并在值得时主动开口？",
+    proactiveWarnDetail:
+      "开启后，她会每隔约 20 分钟截取一次屏幕，交给当前 backend 判断是否值得说话；大多数时候她会保持沉默。\n\n" +
+      "· 每次查看都是一次模型调用（消耗额度/计费）\n" +
+      "· 仅在 Claude Code / Codex backend 下生效\n" +
+      "· macOS 需要「屏幕录制」权限\n" +
+      "· 默认深夜不打扰、每天最多 20 次（间隔 / 安静时段 / 上限可在 settings.json 调整）",
+    responseDone: "回复完成。",
+    notificationTitle: "PRTS · 普瑞赛斯",
     cancel: "取消",
     usageNoCli: "使用后端：未找到本地 CLI",
     usageBackend: "使用后端",
@@ -776,10 +817,26 @@ const MENU_TEXT = {
     system: "System",
     light: "Light",
     dark: "Dark",
+    outfit: "Her outfit",
+    outfitFormal: "正装 · Formal (default)",
+    outfitCasual: "休闲 · Casual",
     skills: "Let her use skills (music · search · apps)",
     agentMode: "Agent mode (full screen control)",
     enableAgentTitle: "Enable agent mode?",
     enableAgent: "Enable agent mode",
+    proactiveCare: "Proactive care (peeks at your screen)",
+    observationJournal: "Observation journal (what you're up to)",
+    enableProactiveTitle: "Enable proactive care?",
+    enableProactive: "Enable proactive care",
+    proactiveWarnMessage: "Let Priestess periodically look at your screen and speak up when it matters?",
+    proactiveWarnDetail:
+      "When enabled she takes a screenshot every ~20 minutes and lets the current backend decide whether anything is worth saying; most checks stay silent.\n\n" +
+      "- Every check is one model call (quota/billing)\n" +
+      "- Works only with the Claude Code / Codex backends\n" +
+      "- macOS needs Screen Recording permission\n" +
+      "- Quiet hours and a 20/day cap apply by default (tune interval / quiet hours / cap in settings.json)",
+    responseDone: "Response complete.",
+    notificationTitle: "PRTS · Priestess",
     cancel: "Cancel",
     usageNoCli: "Usage backend: no local CLI found",
     usageBackend: "Usage backend",
@@ -834,6 +891,24 @@ function mt(key, ...args) {
   const dict = MENU_TEXT[menuLanguage()] || MENU_TEXT.en;
   const value = dict[key] ?? MENU_TEXT.en[key] ?? key;
   return typeof value === "function" ? value(...args) : value;
+}
+
+// Proactive care is opt-in behind a consent dialog, like agent mode: it means
+// periodic screenshots and a model call per check.
+async function toggleProactive(nextValue) {
+  if (nextValue) {
+    const result = await dialog.showMessageBox({
+      type: "warning",
+      title: mt("enableProactiveTitle"),
+      message: mt("proactiveWarnMessage"),
+      detail: mt("proactiveWarnDetail"),
+      buttons: [mt("cancel"), mt("enableProactive")],
+      defaultId: 0,
+      cancelId: 0
+    });
+    if (result.response !== 1) return;
+  }
+  settings.set({ proactiveEnabled: Boolean(nextValue) });
 }
 
 async function toggleAgentMode(nextValue) {
@@ -1153,6 +1228,23 @@ function buildContextMenu() {
       ]
     },
     {
+      label: mt("outfit"),
+      submenu: [
+        {
+          label: mt("outfitFormal"),
+          type: "radio",
+          checked: all.outfit !== "casual",
+          click: () => settings.set({ outfit: "formal" })
+        },
+        {
+          label: mt("outfitCasual"),
+          type: "radio",
+          checked: all.outfit === "casual",
+          click: () => settings.set({ outfit: "casual" })
+        }
+      ]
+    },
+    {
       label: mt("language"),
       submenu: [
         {
@@ -1188,6 +1280,20 @@ function buildContextMenu() {
       click: (item) => {
         toggleAgentMode(item.checked);
       }
+    },
+    {
+      label: mt("proactiveCare"),
+      type: "checkbox",
+      checked: all.proactiveEnabled === true,
+      click: (item) => {
+        toggleProactive(item.checked);
+      }
+    },
+    {
+      label: mt("observationJournal"),
+      type: "checkbox",
+      checked: all.observationJournal === true,
+      click: (item) => settings.set({ observationJournal: item.checked })
     },
     buildUsageBackendMenuItem(),
     ...buildModelMenuItems(),
@@ -1272,6 +1378,9 @@ function buildContextMenu() {
 // only takes effect after a restart, so once the Doctor grants it this makes
 // "grant → restart" a single click instead of a manual quit + reopen.
 function restartApp() {
+  // app.exit() skips before-quit — kill a mid-turn CLI subprocess explicitly
+  // so it doesn't keep running (and billing) past the restart.
+  chat.cancel();
   app.relaunch();
   app.exit(0);
 }
@@ -1385,9 +1494,41 @@ function wipePersistedConversation() {
   }
 }
 
+// She spoke up on her own (proactive care) — surface it with a notification
+// carrying her words, unless the Doctor is already looking at the chat.
+// Clicking the notification opens the popover.
+function notifyProactiveMessage(text) {
+  if (popover && popover.isVisible() && popover.isFocused()) return;
+  if (!Notification.isSupported()) return;
+  try {
+    const notification = new Notification({
+      title: mt("notificationTitle"),
+      body: String(text).replace(/\s+/g, " ").trim().slice(0, 160),
+      silent: false
+    });
+    notification.on("click", () => {
+      try {
+        hideDesktopPet();
+        if (!popover) createPopover();
+        if (!popover.isVisible()) {
+          positionPopover();
+          showPopover();
+        } else {
+          popover.focus();
+        }
+      } catch (error) {
+        console.warn("main: failed to open chat from notification", error);
+      }
+    });
+    notification.show();
+  } catch (error) {
+    console.warn("main: proactive notification failed", error);
+  }
+}
+
 function maybeNotifyDoneNotification(event) {
   if (event.status !== "idle") return;
-  if (event.error || event.cancelled) return;
+  if (event.error || event.cancelled || event.silent) return;
   const duration = chat.getLastTurnDurationMs();
   if (duration < 20000) return;
   // Only fire if the popover isn't currently focused — no point notifying
@@ -1397,7 +1538,7 @@ function maybeNotifyDoneNotification(event) {
   try {
     new Notification({
       title: "PRTS",
-      body: "Response complete.",
+      body: mt("responseDone"),
       silent: false
     }).show();
   } catch (error) {
@@ -1449,6 +1590,11 @@ app.whenReady().then(() => {
   // download page). No-op in dev / unpackaged builds.
   updater.init();
 
+  // Background self-turns: proactive screen checks (opt-in) and occasional
+  // memory tidy-ups. All gating — interval, cooldown, quiet hours, daily cap,
+  // backend availability — lives in proactive.js.
+  proactive.start();
+
   setTimeout(() => {
     chat.refreshProviderAvailability();
     syncTrayTooltip();
@@ -1457,10 +1603,18 @@ app.whenReady().then(() => {
     }
   }, 0);
 
-  settings.subscribe(() => {
+  settings.subscribe((_, patch) => {
     syncTrayTooltip();
+    // The dedicated icon.png doesn't change with the outfit, but the cropped
+    // head fallback does — refresh it so the tray follows an outfit switch.
+    if (patch && "outfit" in patch && tray) {
+      tray.setImage(buildTrayIcon());
+    }
     if (popover && !popover.isDestroyed()) {
       popover.webContents.send("settings:state", buildSettingsState());
+    }
+    if (patch && "outfit" in patch && desktopPet && !desktopPet.isDestroyed()) {
+      desktopPet.webContents.send("settings:state", buildSettingsState());
     }
   });
 
@@ -1469,11 +1623,22 @@ app.whenReady().then(() => {
       scheduleSaveConversation();
     } else if (event.kind === "status") {
       maybeNotifyDoneNotification(event);
-      if (event.status === "running") {
-        hideDesktopPet();
-      } else if (event.status === "idle") {
-        scheduleDesktopPet();
+      // Silent self-turns (proactive checks, memory upkeep) must not make the
+      // desktop pet blink out and back for something invisible.
+      if (!event.silent) {
+        if (event.status === "running") {
+          hideDesktopPet();
+        } else if (event.status === "idle") {
+          scheduleDesktopPet();
+        }
       }
+    } else if (event.kind === "proactive") {
+      if (event.spoke && event.text) notifyProactiveMessage(event.text);
+    } else if (event.kind === "quit") {
+      // Boundary quit must run even if the popover window is gone.
+      wipePersistedConversation();
+      setTimeout(() => app.exit(0), 1500);
+      return;
     }
     if (!popover || popover.isDestroyed()) return;
     if (event.kind === "history") {
@@ -1493,9 +1658,11 @@ app.whenReady().then(() => {
       });
     } else if (event.kind === "mood") {
       popover.webContents.send("chat:mood", { mood: event.mood });
-    } else if (event.kind === "quit") {
-      wipePersistedConversation();
-      setTimeout(() => app.exit(0), 1500);
+    } else if (event.kind === "proactive") {
+      popover.webContents.send("chat:proactive", {
+        spoke: Boolean(event.spoke),
+        text: event.text || ""
+      });
     } else if (event.kind === "queue") {
       popover.webContents.send("chat:queue", { length: event.length });
     }
@@ -1507,6 +1674,12 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   // Menu bar accessory — never quit on window close.
+});
+
+app.on("before-quit", () => {
+  // Don't orphan a mid-turn CLI subprocess — it would keep running (and
+  // consuming the Doctor's quota) with no UI attached.
+  chat.cancel();
 });
 
 // ============================================================

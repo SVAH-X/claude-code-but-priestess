@@ -72,27 +72,37 @@ const MAX_TOOL_OUTPUT_CHARS = 4000;
 let codexModelCatalogCache = { command: null, ts: 0, values: null };
 let lastInvalidCodexModelNotice = "";
 
-// Expression tag parsing — she begins each reply with a hidden [[mood:X]]
-// marker (see persona.js) that drives her on-screen face. We strip it out of
-// everything the Doctor sees or that gets archived, and emit a "mood" event.
-const MOOD_TAG_RE = /^\s*\[\[\s*mood\s*:\s*([a-zA-Z]+)\s*\]\]\s*/;
-const MOOD_TAG_PREFIX = "[[mood:";
-const MOOD_HEAD_MAX = 48;
-let moodHeadBuffer = "";
-let moodHeadResolved = false;
-let moodEmittedThisTurn = false;
-
-// Skill directives — she may emit a hidden [[skill:NAME ARG]] marker (see
-// persona.js) to trigger a curated local action (play music, search, open a
-// URL/app). Like the mood tag, PRTS strips it from everything the Doctor sees
-// or that gets archived, and runs it through skills.js. These can appear
-// anywhere in the reply (persona asks for the end), so the stream redactor
-// below generalizes the mood-head buffering to hold a tag that spans chunks.
-const SKILL_TAG_RE = /\[\[\s*skill\s*:\s*([a-z_]+)(?:\s+([^\]]*?))?\s*\]\]/gi;
-const SKILL_PARTIAL_MAX = 64;
-const SKILL_TAG_PREFIX = "[[skill:";
-let skillTailBuffer = "";
+// Hidden directive tags — she begins each reply with [[mood:X]] and may emit
+// more directives anywhere in it: additional [[mood:X]] switches when the tone
+// shifts mid-reply (her face follows along), [[skill:NAME ARG]] curated local
+// actions (see skills.js), [[observe:…]] observation-journal lines, and
+// [[silent]] ("nothing worth saying", proactive checks only). One streaming
+// redactor strips them all from everything the Doctor sees or that gets
+// archived, holding back a trailing partial tag that might still be forming
+// across chunks. Handling tags anywhere (not just the reply head) also fixes
+// the Claude leak where a second text block after a tool call opened with a
+// fresh [[mood:X]] that used to slip through verbatim.
+const DIRECTIVE_RE = /\[\[\s*(?:mood\s*[:：]\s*([^\]]*?)|skill\s*:\s*([a-z_]+)(?:\s+([^\]]*?))?|observe\s*[:：]\s*([^\]]*?)|silent)\s*\]\]/gi;
+// Lenient head catcher for the finalize pass: models sometimes write the
+// opening mood tag malformed ("mood:smile", "[mood:smile]"). Streaming can't
+// strip those without risking real prose, but once the reply is complete a
+// mood-shaped head is safe to consume (the final re-render cleans the UI).
+const LENIENT_MOOD_HEAD_RE = /^\s*[\[（(]{0,2}\s*mood\s*[:：]\s*([a-zA-Z]+)\s*[\]）)]{0,2}[,，.。:：\s]*/i;
+const DIRECTIVE_PREFIXES = ["[[mood:", "[[skill:", "[[observe:", "[[silent]]"];
+// Generous because [[observe:…]] carries a free-form sentence.
+const DIRECTIVE_PARTIAL_MAX = 240;
+const OBSERVATION_MAX_PER_TURN = 3;
+let directiveTailBuffer = "";
 let skillExecutedThisTurn = new Set();
+let observedThisTurn = new Set();
+let lastEmittedMood = null;
+let sawSilentDirective = false;
+
+// Silent self-turns — proactive screen checks and memory maintenance run
+// through the normal turn machinery but never show in chat: no user bubble,
+// no tool pills, no streaming. A proactive reply only surfaces if she chose
+// to speak (no [[silent]] and real text). null | "proactive" | "maintenance".
+let silentTurnKind = null;
 
 function normalizeProvider(provider) {
   if (provider === PROVIDERS.CODEX) return PROVIDERS.CODEX;
@@ -303,6 +313,7 @@ function scanProviderAvailability() {
 function ensureProviderAvailability() {
   if (!providerAvailability) {
     providerAvailability = scanProviderAvailability();
+    providerAvailabilityScannedAt = Date.now();
   }
   return providerAvailability;
 }
@@ -331,8 +342,34 @@ function selectAvailableProvider(requested, availability = ensureProviderAvailab
   return null;
 }
 
+// CLI probing spawns `claude --version` / `codex --version` synchronously
+// (seconds on slow Windows shims) and used to run before every message,
+// freezing the main process — and with it every window. Once a CLI has been
+// seen, trust the scan for a while; keep rescanning eagerly only while no CLI
+// is available, so a fresh install is still picked up on the very next send.
+const PROVIDER_RESCAN_TTL_MS = 60 * 1000;
+let providerAvailabilityScannedAt = 0;
+
+function anyCliAvailable(availability) {
+  return Boolean(
+    availability?.[PROVIDERS.CLAUDE]?.available || availability?.[PROVIDERS.CODEX]?.available
+  );
+}
+
 function refreshProviderAvailability() {
-  providerAvailability = scanProviderAvailability();
+  const now = Date.now();
+  const fresh =
+    providerAvailability &&
+    now - providerAvailabilityScannedAt < PROVIDER_RESCAN_TTL_MS &&
+    anyCliAvailable(providerAvailability);
+  if (fresh) {
+    // The built-in backend's availability is just settings — keep it live
+    // within the TTL so toggling it in the settings window applies instantly.
+    providerAvailability[PROVIDERS.PRIESTESS] = detectPriestessProvider();
+  } else {
+    providerAvailability = scanProviderAvailability();
+    providerAvailabilityScannedAt = now;
+  }
   const selected = selectAvailableProvider(settings.get("chatProvider"), providerAvailability);
   if (selected && settings.get("chatProvider") !== selected) {
     settings.set({ chatProvider: selected });
@@ -566,63 +603,25 @@ function normalizeMood(raw) {
   }
 }
 
+// Emit each mood the reply chooses (deduping immediate repeats) so her face
+// can change mid-reply; the renderer settles on the last one at finish.
 function emitMood(raw) {
-  if (moodEmittedThisTurn) return;
   const mood = normalizeMood(raw);
-  if (!mood) return;
-  moodEmittedThisTurn = true;
+  if (!mood || mood === lastEmittedMood) return;
+  lastEmittedMood = mood;
   notify({ kind: "mood", mood });
 }
 
-function resetMoodParsing() {
-  moodHeadBuffer = "";
-  moodHeadResolved = false;
-  moodEmittedThisTurn = false;
-}
-
-// Pull a leading [[mood:X]] tag out of the streaming head. Returns the text
-// safe to display now (the tag is consumed, never shown). While the head might
-// still be forming a tag, returns "" and keeps buffering.
-function consumeMoodHead(text) {
-  if (moodHeadResolved) return text;
-  moodHeadBuffer += text;
-  const match = moodHeadBuffer.match(MOOD_TAG_RE);
-  if (match) {
-    emitMood(match[1]);
-    const rest = moodHeadBuffer.slice(match[0].length);
-    moodHeadResolved = true;
-    moodHeadBuffer = "";
-    return rest;
-  }
-  const lead = moodHeadBuffer.replace(/^\s+/, "");
-  const couldBeTag = lead.length <= MOOD_TAG_PREFIX.length
-    ? MOOD_TAG_PREFIX.startsWith(lead)
-    : lead.startsWith(MOOD_TAG_PREFIX);
-  if (couldBeTag && moodHeadBuffer.length < MOOD_HEAD_MAX) {
-    return ""; // still possibly a tag — wait for more
-  }
-  moodHeadResolved = true;
-  const out = moodHeadBuffer;
-  moodHeadBuffer = "";
-  return out;
-}
-
-function stripLeadingMoodTag(text) {
-  const match = String(text).match(MOOD_TAG_RE);
-  if (match) {
-    emitMood(match[1]);
-    return String(text).slice(match[0].length);
-  }
-  return text;
+function resetDirectiveParsing() {
+  directiveTailBuffer = "";
+  skillExecutedThisTurn = new Set();
+  observedThisTurn = new Set();
+  lastEmittedMood = null;
+  sawSilentDirective = false;
 }
 
 function skillsEnabled() {
   return settings.get("skillsEnabled") !== false;
-}
-
-function resetSkillParsing() {
-  skillTailBuffer = "";
-  skillExecutedThisTurn = new Set();
 }
 
 // A small left-aligned receipt pill ("♪ 为博士播放 …") so the Doctor sees the
@@ -665,47 +664,112 @@ function runSkillDirective(full, name, arg) {
   triggerSkill(String(name).toLowerCase(), arg ? String(arg).trim() : "");
 }
 
-function couldStartSkillTag(tail) {
-  const norm = tail.replace(/\s+/g, "").toLowerCase();
-  return norm.length <= SKILL_TAG_PREFIX.length
-    ? SKILL_TAG_PREFIX.startsWith(norm)
-    : norm.startsWith(SKILL_TAG_PREFIX);
+// Append one line to her local-only observation journal ("what the Doctor
+// was doing"), strictly opt-in via the observationJournal setting.
+function recordObservation(text) {
+  if (settings.get("observationJournal") !== true) return;
+  const line = collapse(text, 200);
+  if (!line || observedThisTurn.size >= OBSERVATION_MAX_PER_TURN || observedThisTurn.has(line)) {
+    return;
+  }
+  observedThisTurn.add(line);
+  try {
+    const file = persona.ensureObservationJournalFile();
+    fs.appendFileSync(file, `${JSON.stringify({ ts: Date.now(), text: line })}\n`, "utf8");
+    pruneObservationJournalIfNeeded();
+  } catch (error) {
+    console.warn("chat: failed to record observation", error);
+  }
 }
 
-// Streaming redactor: drop complete [[skill:…]] tags (running them) and hold
-// back a trailing partial that might still become one, so the directive never
+const OBSERVATION_MAX_BYTES = 256 * 1024;
+const OBSERVATION_TARGET_BYTES = 192 * 1024;
+
+function pruneObservationJournalIfNeeded() {
+  try {
+    const file = persona.ensureObservationJournalFile();
+    const stat = fs.statSync(file);
+    if (stat.size <= OBSERVATION_MAX_BYTES) return;
+    const lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
+    const kept = [];
+    let bytes = 0;
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const lineBytes = Buffer.byteLength(lines[i], "utf8") + 1;
+      if (kept.length && bytes + lineBytes > OBSERVATION_TARGET_BYTES) break;
+      kept.push(lines[i]);
+      bytes += lineBytes;
+    }
+    kept.reverse();
+    fs.writeFileSync(file, `${kept.join("\n")}${kept.length ? "\n" : ""}`, "utf8");
+  } catch (error) {
+    console.warn("chat: failed to prune observation journal", error);
+  }
+}
+
+// Handle one complete directive tag pulled from the stream (or the finalize
+// pass — skills dedupe per turn so nothing re-fires). Always returns "" so it
+// can be used directly as a String.replace handler.
+function handleDirective(full, mood, skillName, skillArg, observe) {
+  if (mood !== undefined) {
+    emitMood(mood);
+  } else if (skillName) {
+    // Strip the tag even when execution is gated off. Silent self-turns never
+    // run skills — a proactive peek must not open browsers/apps on its own.
+    if (skillsEnabled() && !silentTurnKind) runSkillDirective(full, skillName, skillArg);
+  } else if (observe !== undefined) {
+    // Maintenance turns have no screen — ignore any observation they invent.
+    if (silentTurnKind !== "maintenance") recordObservation(observe);
+  } else {
+    sawSilentDirective = true;
+  }
+  return "";
+}
+
+function couldStartDirective(tail) {
+  const norm = tail.replace(/\s+/g, "").toLowerCase();
+  return DIRECTIVE_PREFIXES.some((prefix) =>
+    norm.length <= prefix.length ? prefix.startsWith(norm) : norm.startsWith(prefix)
+  );
+}
+
+// Streaming redactor: drop complete directive tags (acting on them) and hold
+// back a trailing partial that might still become one, so no directive ever
 // flashes on screen. Returns the text safe to display now.
-function consumeSkillTags(text) {
-  skillTailBuffer += text;
-  let out = skillTailBuffer.replace(SKILL_TAG_RE, (full, name, arg) => {
-    runSkillDirective(full, name, arg);
-    return "";
-  });
+function consumeDirectives(text) {
+  directiveTailBuffer += text;
+  const out = directiveTailBuffer.replace(DIRECTIVE_RE, handleDirective);
   const lastOpen = out.lastIndexOf("[[");
   if (lastOpen !== -1 && !out.slice(lastOpen).includes("]]")) {
     const tail = out.slice(lastOpen);
-    if (couldStartSkillTag(tail) && tail.length < SKILL_PARTIAL_MAX) {
-      skillTailBuffer = tail;
+    if (couldStartDirective(tail) && tail.length < DIRECTIVE_PARTIAL_MAX) {
+      directiveTailBuffer = tail;
       return out.slice(0, lastOpen);
     }
   }
-  skillTailBuffer = "";
+  // A chunk can end exactly between the two opening brackets — hold the lone
+  // "[" so "[[mood:…" split as "[" + "[mood:…" is still caught next chunk.
+  if (out.endsWith("[")) {
+    directiveTailBuffer = "[";
+    return out.slice(0, -1);
+  }
+  directiveTailBuffer = "";
   return out;
 }
 
-// Finalize safety net: clean any directive that slipped through (and run ones
-// not already executed during streaming) so stored/archived text stays clean.
-function stripSkillTags(text) {
+// Finalize safety net: act on any directive that slipped through streaming and
+// scrub the stored/archived text, including a malformed mood head and a
+// dangling unterminated tag fragment at the very end.
+function stripDirectiveTags(text) {
   if (!text) return text;
-  skillTailBuffer = "";
-  return String(text)
-    .replace(SKILL_TAG_RE, (full, name, arg) => {
-      runSkillDirective(full, name, arg);
-      return "";
-    })
-    // Drop a dangling, unterminated directive fragment (malformed output) so a
-    // truncated "[[skill:…" at the very end never leaks into the visible text.
-    .replace(/\[\[\s*skill\s*:[^\]]*$/i, "")
+  let out = String(text);
+  const head = out.match(LENIENT_MOOD_HEAD_RE);
+  if (head) {
+    emitMood(head[1]);
+    out = out.slice(head[0].length);
+  }
+  return out
+    .replace(DIRECTIVE_RE, handleDirective)
+    .replace(/\[?\[\s*(?:mood|skill|observe|silent)\b[^\]]*$/i, "")
     .trim();
 }
 
@@ -865,6 +929,8 @@ function pushSystem(text) {
 // is the full command/target shown when the pill is expanded.
 function pushTool(name, summary, { toolUseId = null, command = null } = {}) {
   if (!name) return null;
+  // Silent self-turns keep their housekeeping invisible — no pills.
+  if (silentTurnKind) return null;
   turnSawToolUse = true;
   assistantTextAfterLastAction = false;
   const entry = {
@@ -1000,27 +1066,6 @@ function archiveConversationEntry(entry) {
   }
 }
 
-function readConversationArchive() {
-  try {
-    const file = persona.ensureConversationArchiveFile();
-    const raw = fs.readFileSync(file, "utf8").trim();
-    if (!raw) return [];
-    return raw
-      .split("\n")
-      .map((line) => {
-        try {
-          return JSON.parse(line);
-        } catch {
-          return null;
-        }
-      })
-      .filter((entry) => entry && entry.text && ["user", "assistant"].includes(entry.role));
-  } catch (error) {
-    console.warn("chat: failed to read conversation archive", error);
-    return [];
-  }
-}
-
 function backfillArchiveFromHistoryIfEmpty() {
   const conversational = history.filter(
     (entry) => entry && !entry.ephemeral && entry.text && ["user", "assistant"].includes(entry.role)
@@ -1057,9 +1102,11 @@ function buildSharedTranscript() {
 }
 
 function buildConversationSummaryContent() {
-  const conversational = readConversationArchive();
+  // Tail read only: this runs on every archived message, and only the newest
+  // entries can fit the summary budget anyway.
+  const conversational = persona.readArchiveTailEntries();
   const folded = conversational.slice(0, -RECENT_TRANSCRIPT_MESSAGE_LIMIT);
-  const header = [
+  const headerText = [
     "# 长期对话摘要",
     "",
     "_这份文件由 PRTS 自动从较早的聊天记录生成，用来让 Claude Code 与 Codex 在长对话和切换 backend 时保持连续。_",
@@ -1069,24 +1116,29 @@ function buildConversationSummaryContent() {
     "",
     "## 折叠的较早对话",
     ""
-  ];
+  ].join("\n");
 
   if (!folded.length) {
-    return `${header.join("\n")}_暂时还没有需要折叠的对话。_\n`;
+    return `${headerText}_暂时还没有需要折叠的对话。_\n`;
   }
 
-  const lines = folded.map((entry) => {
+  // Build newest-first within the budget. (The previous shift()-while-too-long
+  // loop re-joined every line per iteration — quadratic once the archive grew,
+  // and it formatted entries that could never fit.)
+  const lines = [];
+  let total = headerText.length + 1;
+  for (let i = folded.length - 1; i >= 0; i -= 1) {
+    const entry = folded[i];
     const label = entry.role === "user" ? "博士" : "普瑞赛斯";
     const provider = entry.provider ? ` (${entry.provider})` : "";
-    const text = compactForSummary(entry.text);
-    return `- ${formatSummaryTimestamp(entry.ts)} ${label}${provider}: ${text}`;
-  });
-
-  while (lines.length > 1 && `${header.join("\n")}${lines.join("\n")}\n`.length > SUMMARY_MAX_CHARS) {
-    lines.shift();
+    const line = `- ${formatSummaryTimestamp(entry.ts)} ${label}${provider}: ${compactForSummary(entry.text)}`;
+    if (lines.length && total + line.length + 1 > SUMMARY_MAX_CHARS) break;
+    lines.push(line);
+    total += line.length + 1;
   }
+  lines.reverse();
 
-  return `${header.join("\n")}${lines.join("\n")}\n`;
+  return `${headerText}${lines.join("\n")}\n`;
 }
 
 function updateConversationSummary() {
@@ -1099,14 +1151,16 @@ function updateConversationSummary() {
 }
 
 function beginAssistant() {
-  resetMoodParsing();
-  resetSkillParsing();
+  resetDirectiveParsing();
   claudeResultErrored = false;
   claudeModelInvalid = false;
   turnSawToolUse = false;
   assistantTextAfterLastAction = false;
   pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   pendingAssistantText = "";
+  // Silent self-turns stay invisible — no bubble unless finishSilentTurn
+  // decides she actually has something to say.
+  if (silentTurnKind) return;
   history.push({
     id: pendingAssistantId,
     role: "assistant",
@@ -1121,17 +1175,19 @@ function appendAssistant(text) {
   if (!pendingAssistantId) {
     beginAssistant();
   }
-  const display = consumeMoodHead(text);
-  if (!display) return; // still buffering the leading mood tag
-  const visible = skillsEnabled() ? consumeSkillTags(display) : display;
-  if (!visible) return; // all of this chunk was a skill tag or a held partial
+  let visible = consumeDirectives(text);
+  if (!visible) return; // the whole chunk was a directive or a held partial
+  // The opening mood tag no longer swallows its trailing space — trim the
+  // reply head so bubbles don't start with stray whitespace.
+  if (!pendingAssistantText) visible = visible.replace(/^\s+/, "");
+  if (!visible) return;
   if (turnSawToolUse || currentTurnHadScreenshot) assistantTextAfterLastAction = true;
   pendingAssistantText += visible;
   const entry = history.find((h) => h.id === pendingAssistantId);
   if (entry) {
     entry.text = pendingAssistantText;
   }
-  emitChunk(pendingAssistantId, visible);
+  if (!silentTurnKind) emitChunk(pendingAssistantId, visible);
 }
 
 // Action labels for the tools used in the current turn, oldest-first. Read
@@ -1208,9 +1264,8 @@ function requestCodexContinuation(entry) {
 }
 
 function isBareCodexProgressReply(text) {
-  const clean = String(text || "")
-    .replace(MOOD_TAG_RE, "")
-    .replace(/\[\[\s*skill\s*:[^\]]*?\]\]/gi, "");
+  // Plain string replacement — no directive side effects here.
+  const clean = String(text || "").replace(DIRECTIVE_RE, "");
   const body = collapse(clean, 120)
     .replace(/[，,。.\s]*(博士|Dr\.?)?[。.\s]*$/i, "");
   if (!body || body.length > 80) return false;
@@ -1218,6 +1273,8 @@ function isBareCodexProgressReply(text) {
 }
 
 function shouldContinueCodexTurn(finalText, entry) {
+  // Silent self-turns never auto-continue — staying quiet is a valid outcome.
+  if (silentTurnKind) return false;
   if (currentProvider !== PROVIDERS.CODEX) return false;
   const text = String(finalText || entry?.text || pendingAssistantText || "").trim();
   if (!text && (turnSawToolUse || currentTurnHadScreenshot)) return true;
@@ -1225,13 +1282,55 @@ function shouldContinueCodexTurn(finalText, entry) {
   return turnSawToolUse && !assistantTextAfterLastAction && Boolean(text);
 }
 
+// End of a silent self-turn. Maintenance turns are always discarded; a
+// proactive check only surfaces when she chose to speak — no [[silent]] and
+// real text — in which case the reply joins history like a normal message
+// and main.js raises a notification with her words.
+function finishSilentTurn(finalText) {
+  const kind = silentTurnKind;
+  silentTurnKind = null;
+  const text = String(finalText || pendingAssistantText || "").trim();
+  pendingAssistantId = null;
+  pendingAssistantText = "";
+  turnSawToolUse = false;
+  assistantTextAfterLastAction = false;
+  currentTurnHadScreenshot = false;
+  const stayedSilent = sawSilentDirective || !text;
+  sawSilentDirective = false;
+  if (kind !== "proactive" || stayedSilent) {
+    notify({ kind: "proactive", spoke: false, turnKind: kind });
+    return;
+  }
+  const entry = {
+    id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    role: "assistant",
+    text,
+    ts: Date.now(),
+    ephemeral: false,
+    proactive: true
+  };
+  history.push(entry);
+  archiveConversationEntry({
+    role: "assistant",
+    provider: currentProvider || activeProvider(),
+    text,
+    ts: entry.ts
+  });
+  emitHistory();
+  updateConversationSummary();
+  notify({ kind: "proactive", spoke: true, text });
+}
+
 function finalizeAssistant(finalText) {
   // Anything the stream redactor was still holding is, by construction, an
-  // incomplete [[skill:…]] prefix (never prose) — drop it.
-  skillTailBuffer = "";
+  // incomplete directive prefix (never prose) — drop it.
+  directiveTailBuffer = "";
   if (typeof finalText === "string" && finalText) {
-    finalText = stripLeadingMoodTag(finalText);
-    if (skillsEnabled()) finalText = stripSkillTags(finalText);
+    finalText = stripDirectiveTags(finalText);
+  }
+  if (silentTurnKind) {
+    finishSilentTurn(finalText);
+    return;
   }
   if (!pendingAssistantId) {
     if (!finalText && shouldContinueCodexTurn(finalText, null)) {
@@ -1419,9 +1518,14 @@ function handleClaudeStreamEvent(event) {
     if (event.is_error && event.api_error_status === 404) {
       claudeModelInvalid = true;
     }
+    const wasSilentTurn = Boolean(silentTurnKind);
     emitTool(false);
     finalizeAssistant(finalText || pendingAssistantText);
-    emitStatus("idle", { provider: PROVIDERS.CLAUDE, sessionId: sessionIds[PROVIDERS.CLAUDE] });
+    emitStatus("idle", {
+      provider: PROVIDERS.CLAUDE,
+      sessionId: sessionIds[PROVIDERS.CLAUDE],
+      silent: wasSilentTurn || undefined
+    });
     return;
   }
 }
@@ -1549,9 +1653,14 @@ function handleCodexStreamEvent(event) {
 
   if (isCodexCompletionType(type)) {
     if (text) appendReconciledAssistantText(text);
+    const wasSilentTurn = Boolean(silentTurnKind);
     emitTool(false);
     finalizeAssistant(pendingAssistantText);
-    emitStatus("idle", { provider: PROVIDERS.CODEX, sessionId: sessionIds[PROVIDERS.CODEX] });
+    emitStatus("idle", {
+      provider: PROVIDERS.CODEX,
+      sessionId: sessionIds[PROVIDERS.CODEX],
+      silent: wasSilentTurn || undefined
+    });
   }
 }
 
@@ -1691,7 +1800,9 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     includeLongMemory,
     memoryRecallRequested,
     skillsEnabled: settings.get("skillsEnabled") !== false,
-    deepPersona: shouldUseDeepPersona(trimmed)
+    deepPersona: shouldUseDeepPersona(trimmed),
+    observeEnabled:
+      settings.get("observationJournal") === true && (Boolean(screenshotPath) || agentMode)
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -1746,7 +1857,9 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
       includeLongMemory,
       memoryRecallRequested,
       skillsEnabled: settings.get("skillsEnabled") !== false,
-      deepPersona: shouldUseDeepPersona(trimmed)
+      deepPersona: shouldUseDeepPersona(trimmed),
+      observeEnabled:
+        settings.get("observationJournal") === true && (Boolean(screenshotPath) || agentMode)
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
@@ -1867,7 +1980,12 @@ function dispatchSend(
   beginAssistant();
   turnStartedAt = Date.now();
   currentProvider = provider;
-  emitStatus("running", { provider, chained, pending: chained });
+  emitStatus("running", {
+    provider,
+    chained,
+    pending: chained,
+    silent: Boolean(silentTurnKind) || undefined
+  });
 
   const sharedTranscript = buildSharedTranscript();
   const agentMode = Boolean(settings.get("agentMode"));
@@ -1893,6 +2011,11 @@ function dispatchSend(
   return { ok: true };
 }
 
+// Token-cost guard for the built-in backend: the CLI paths cap their shared
+// transcript at SHARED_TRANSCRIPT_MAX_CHARS, so this path gets a budget too
+// (a bit larger, since these are her only context besides the system prompt).
+const PRIESTESS_MESSAGES_MAX_CHARS = 16000;
+
 // Recent conversational turns as proper chat-completions messages. The current
 // user message is already in history (pushed by dispatchSend); the empty
 // assistant bubble is skipped by the empty-text filter.
@@ -1903,9 +2026,26 @@ function buildPriestessMessages() {
     if (!["user", "assistant"].includes(entry.role)) continue;
     const text = String(entry.text || "").trim();
     if (!text) continue;
+    // Merge consecutive same-role messages (e.g. a proactive remark right
+    // after a normal reply) — strict servers require alternating roles.
+    const last = messages[messages.length - 1];
+    if (last && last.role === entry.role) {
+      last.content += `\n\n${text}`;
+      continue;
+    }
     messages.push({ role: entry.role, content: text });
   }
-  return messages.slice(-RECENT_TRANSCRIPT_MESSAGE_LIMIT);
+  // Newest-first, keep messages while they fit the budget; the current user
+  // message is always kept even if it alone exceeds it.
+  const kept = [];
+  let total = 0;
+  for (let i = messages.length - 1; i >= 0 && kept.length < RECENT_TRANSCRIPT_MESSAGE_LIMIT; i -= 1) {
+    const length = messages[i].content.length;
+    if (kept.length && total + length > PRIESTESS_MESSAGES_MAX_CHARS) break;
+    kept.push(messages[i]);
+    total += length;
+  }
+  return kept.reverse();
 }
 
 // Built-in backend turn: stream straight from the configured OpenAI-compatible
@@ -1988,11 +2128,26 @@ async function launchProviderTurn({
     return;
   }
 
+  const silentTurn = Boolean(silentTurnKind);
+  const proactiveCheck = silentTurnKind === "proactive";
   const autoScreenshot = agentMode && settings.get("autoScreenshot") !== false;
   // Chained turns normally skip the screenshot, but an auto-continuation needs a
-  // fresh screen so she can actually answer what she "saw".
+  // fresh screen so she can actually answer what she "saw". Proactive checks
+  // exist to look at the screen, so they always capture one regardless of
+  // agent mode.
   const screenshotPath =
-    autoScreenshot && (!chained || forceScreenshot) ? await takeScreenshot() : null;
+    proactiveCheck || (autoScreenshot && (!chained || forceScreenshot))
+      ? await takeScreenshot()
+      : null;
+  if (proactiveCheck && !screenshotPath) {
+    // Screen access is the whole point of a proactive check — without it
+    // (e.g. macOS Screen Recording not granted) skip instead of running blind.
+    turnLaunching = false;
+    if (pendingAssistantId) finalizeAssistant("");
+    currentProvider = null;
+    finishTurn({ silent: true });
+    return;
+  }
   currentTurnHadScreenshot = provider === PROVIDERS.CODEX && Boolean(screenshotPath);
   const invocation = buildProviderInvocation(
     provider,
@@ -2064,7 +2219,11 @@ async function launchProviderTurn({
     resumeRetryInFlight = false;
     const cancelled = cancelRequested;
     cancelRequested = false;
-    finishTurn({ error: error.message, cancelled: cancelled || undefined });
+    finishTurn({
+      error: error.message,
+      cancelled: cancelled || undefined,
+      silent: silentTurn || undefined
+    });
   });
 
   proc.on("close", (code) => {
@@ -2094,11 +2253,18 @@ async function launchProviderTurn({
       sessionIds[PROVIDERS.CLAUDE] = null;
       resumeRetryInFlight = true;
       claudeResultErrored = false;
+      const retrySilentKind = silentTurnKind;
       if (pendingAssistantId) finalizeAssistant(""); // clears the empty bubble
       cleanupInvocation(invocation);
       currentProcess = null;
       currentProvider = null;
-      setImmediate(() => dispatchSend(trimmed, { userAlreadyShown: true, chained: true }));
+      // Replay keeps the turn's silent nature (finalize just reset it).
+      silentTurnKind = retrySilentKind;
+      setImmediate(() => dispatchSend(trimmed, {
+        userAlreadyShown: true,
+        chained: true,
+        silentUser: Boolean(retrySilentKind)
+      }));
       return;
     }
 
@@ -2115,12 +2281,18 @@ async function launchProviderTurn({
       settings.set({ claudeModel: "" });
       claudeModelFallbackInFlight = true;
       claudeModelInvalid = false;
+      const retrySilentKind = silentTurnKind;
       if (pendingAssistantId) finalizeAssistant("");
       pushSystem(`Claude 模型 \`${badClaudeModel}\` 当前账号不可用，已切回默认并重试。`);
       cleanupInvocation(invocation);
       currentProcess = null;
       currentProvider = null;
-      setImmediate(() => dispatchSend(trimmed, { userAlreadyShown: true, chained: true }));
+      silentTurnKind = retrySilentKind;
+      setImmediate(() => dispatchSend(trimmed, {
+        userAlreadyShown: true,
+        chained: true,
+        silentUser: Boolean(retrySilentKind)
+      }));
       return;
     }
 
@@ -2163,7 +2335,11 @@ async function launchProviderTurn({
     resumeRetryInFlight = false;
     claudeModelFallbackInFlight = false;
     claudeModelInvalid = false;
-    finishTurn(cancelled ? { cancelled: true } : {});
+    finishTurn(
+      cancelled
+        ? { cancelled: true, silent: silentTurn || undefined }
+        : { silent: silentTurn || undefined }
+    );
   });
 }
 
@@ -2187,6 +2363,8 @@ function clear() {
   consecutiveQuestionReplies = 0;
   claudeResultErrored = false;
   resumeRetryInFlight = false;
+  silentTurnKind = null;
+  sawSilentDirective = false;
   updateConversationSummary();
   emitHistory();
 }
@@ -2202,6 +2380,8 @@ function wipeSession() {
   consecutiveQuestionReplies = 0;
   claudeResultErrored = false;
   resumeRetryInFlight = false;
+  silentTurnKind = null;
+  sawSilentDirective = false;
   emitHistory();
 }
 
@@ -2240,6 +2420,97 @@ function hydrate({
   emitHistory();
 }
 
+// ============================================================
+//  Silent self-turns — proactive care + memory maintenance entry points.
+//  Scheduling/gating lives in proactive.js; these only know how to run one.
+// ============================================================
+function buildProactivePrompt() {
+  const lines = [
+    "（PRTS 系统提示——这不是博士说的话，博士也看不到这条提示。这是你定时的一次主动关心：你自己抬眼看了一眼博士此刻的屏幕（截图见上方说明）。",
+    "- 只有确实值得开口时才说话：博士似乎在同一个问题上卡了很久、连续工作太久该歇一歇了、深夜还没休息、或屏幕上正是与你们聊过的事相关的东西。用普瑞赛斯的口吻轻声说一两句，简短自然，最多两三句。",
+    "- 若没有值得说的，必须只回复 [[silent]]，不带任何其他文字。沉默是常态，开口是例外；不要为了说话而说话，也不要重复你最近主动说过的话。",
+    "- 除查看屏幕截图外，这一轮不要做任何其他操作。）"
+  ];
+  if (settings.get("observationJournal") === true) {
+    lines.splice(
+      3,
+      0,
+      "- 无论说不说话，都请在回复最末尾附一行 [[observe:用一句话客观描述博士此刻在做什么]]——博士看不到，它会存入你的观察日志。"
+    );
+    const recent = persona.readRecentObservations(8);
+    if (recent.length) {
+      lines.push("", "【你最近的观察日志】");
+      for (const obs of recent) {
+        lines.push(`- ${formatSummaryTimestamp(obs.ts)} ${obs.text}`);
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+const MAINTENANCE_PROMPT = [
+  "（PRTS 系统提示——这不是博士说的话，博士看不到这条提示，也看不到你这一轮的回复。现在是定期的记忆整理时间。",
+  "请用文件编辑工具整理你的长期记忆 MEMORY.md（路径见上方记忆部分）：",
+  "- 合并重复或意思相近的条目；把放错位置的条目移进合适的章节；保留条目原有的日期。",
+  "- 久远而琐碎的小事可以压缩成更简短的概括，但绝不能丢失真正重要的记忆：姓名、约定、博士的喜好与习惯、重要的事件与心情。",
+  "- 整理后全文尽量控制在 9000 字符以内。",
+  "做完后只回复 [[silent]]，不要任何其他文字。）"
+].join("\n");
+
+function canRunSilentTurn() {
+  if (quitPending || currentProcess || turnLaunching || outboundQueue.length > 0) {
+    return { ok: false, reason: "busy" };
+  }
+  refreshProviderAvailability();
+  const provider = activeProvider();
+  if (provider !== PROVIDERS.CLAUDE && provider !== PROVIDERS.CODEX) {
+    // The built-in backend can't see the screen and has no file tools.
+    return { ok: false, reason: "provider" };
+  }
+  if (!ensureProviderAvailability()[provider]?.available) {
+    return { ok: false, reason: "missing-cli" };
+  }
+  return { ok: true };
+}
+
+// A self-initiated check (proactive care): she looks at the screen and decides
+// whether anything is worth saying. Nothing appears in chat unless she speaks.
+function sendProactive() {
+  const gate = canRunSilentTurn();
+  if (!gate.ok) return gate;
+  silentTurnKind = "proactive";
+  const result = dispatchSend(buildProactivePrompt(), { silentUser: true });
+  if (!result?.ok) silentTurnKind = null;
+  return result;
+}
+
+// A memory-curation pass: she tidies MEMORY.md with her file tools and stays
+// silent. The reply is always discarded.
+function sendMaintenance() {
+  const gate = canRunSilentTurn();
+  if (!gate.ok) return gate;
+  silentTurnKind = "maintenance";
+  const result = dispatchSend(MAINTENANCE_PROMPT, { silentUser: true });
+  if (!result?.ok) silentTurnKind = null;
+  return result;
+}
+
+function isBusy() {
+  return Boolean(currentProcess || turnLaunching || outboundQueue.length > 0);
+}
+
+// Timestamp of the most recent real conversation message — proactive.js uses
+// it as the "don't butt in right after we talked" cooldown anchor.
+function getLastConversationTs() {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry && !entry.ephemeral && entry.text && ["user", "assistant"].includes(entry.role)) {
+      return Number(entry.ts) || 0;
+    }
+  }
+  return 0;
+}
+
 function getSessionId() {
   return sessionIds[activeProvider()] || null;
 }
@@ -2258,6 +2529,10 @@ function isLongMemoryDormant() {
 
 module.exports = {
   send,
+  sendProactive,
+  sendMaintenance,
+  isBusy,
+  getLastConversationTs,
   cancel,
   clear,
   wipeSession,

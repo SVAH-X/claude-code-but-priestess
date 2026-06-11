@@ -47,5 +47,6 @@ contextBridge.exposeInMainWorld("chatApi", {
   onHistory: onChannel("chat:history"),
   onTool: onChannel("chat:tool"),
   onMood: onChannel("chat:mood"),
+  onProactive: onChannel("chat:proactive"),
   onQueue: onChannel("chat:queue")
 });

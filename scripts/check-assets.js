@@ -14,6 +14,7 @@ const required = [
   path.join("src", "renderer", "desktop-pet.css"),
   path.join("src", "renderer", "renderer.js"),
   path.join("src", "renderer", "styles.css"),
+  // 正装 (formal, default outfit)
   path.join("assets", "character", "睁眼.png"),
   path.join("assets", "character", "半眯眼.png"),
   path.join("assets", "character", "快闭眼.png"),
@@ -23,6 +24,16 @@ const required = [
   path.join("assets", "character", "威胁.png"),
   path.join("assets", "character", "哭唧唧.png"),
   path.join("assets", "character", "睡觉.png"),
+  // 休闲 (casual outfit)
+  path.join("assets", "character", "casual", "睁眼.png"),
+  path.join("assets", "character", "casual", "半眯眼.png"),
+  path.join("assets", "character", "casual", "快闭眼.png"),
+  path.join("assets", "character", "casual", "闭眼.png"),
+  path.join("assets", "character", "casual", "笑.png"),
+  path.join("assets", "character", "casual", "生气.png"),
+  path.join("assets", "character", "casual", "威胁.png"),
+  path.join("assets", "character", "casual", "哭唧唧.png"),
+  path.join("assets", "character", "casual", "睡觉.png"),
   path.join("assets", "character", "icon.png")
 ];
 

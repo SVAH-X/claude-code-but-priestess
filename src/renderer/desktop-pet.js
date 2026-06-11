@@ -1,6 +1,17 @@
 const canvas = document.getElementById("petCanvas");
 const ctx = canvas.getContext("2d");
-const ASSET_DIR = new URL("../../assets/character/", window.location.href);
+// Outfit folders mirror the popover renderer: "formal" = assets/character
+// root (default), "casual" = assets/character/casual.
+const CHARACTER_DIR = new URL("../../assets/character/", window.location.href);
+
+function assetDirFor(outfit) {
+  return outfit === "casual" ? new URL("casual/", CHARACTER_DIR) : CHARACTER_DIR;
+}
+
+function outfitFrom(payload) {
+  return payload?.outfit === "casual" ? "casual" : "formal";
+}
+
 const FRAME_FILES = {
   idle: "睁眼.png",
   halfClosed: "半眯眼.png",
@@ -41,6 +52,34 @@ function isEdgeBackground(data, index) {
   return a > 0 && 765 - r - g - b < 95 && Math.max(r, g, b) - Math.min(r, g, b) < 30;
 }
 
+function cropToOpaqueBbox(source, data, width, height) {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] > 0) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+  if (maxX < minX || maxY < minY) return source;
+  const pad = 12;
+  const x = Math.max(0, minX - pad);
+  const y = Math.max(0, minY - pad);
+  const w = Math.min(width - x, maxX - minX + 1 + pad * 2);
+  const h = Math.min(height - y, maxY - minY + 1 + pad * 2);
+  const cropped = document.createElement("canvas");
+  cropped.width = w;
+  cropped.height = h;
+  cropped.getContext("2d").drawImage(source, x, y, w, h, 0, 0, w, h);
+  return cropped;
+}
+
 function prepareTransparentFrame(image) {
   const source = document.createElement("canvas");
   source.width = image.naturalWidth;
@@ -49,6 +88,20 @@ function prepareTransparentFrame(image) {
   sourceCtx.drawImage(image, 0, 0);
   const imageData = sourceCtx.getImageData(0, 0, source.width, source.height);
   const { data, width, height } = imageData;
+
+  // Pre-flattened frames (transparent corners) skip the background fill —
+  // see scripts/flatten-character-assets.js; the fill below remains as a
+  // fallback for unprocessed art.
+  const corners = [
+    3,
+    (width - 1) * 4 + 3,
+    (height - 1) * width * 4 + 3,
+    (width * height - 1) * 4 + 3
+  ];
+  if (corners.every((i) => data[i] === 0)) {
+    return cropToOpaqueBbox(source, data, width, height);
+  }
+
   const transparent = new Uint8Array(width * height);
   const queue = new Int32Array(width * height);
   let head = 0;
@@ -111,18 +164,32 @@ function prepareTransparentFrame(image) {
   return cropped;
 }
 
-async function loadFrame(fileName) {
+async function loadFrame(fileName, dir) {
   const image = new Image();
-  image.src = new URL(fileName, ASSET_DIR).href;
+  image.src = new URL(fileName, dir).href;
   await image.decode();
   return prepareTransparentFrame(image);
 }
 
-async function loadFrames() {
+async function loadFrames(outfit) {
+  const dir = assetDirFor(outfit);
   const entries = await Promise.all(
-    Object.entries(FRAME_FILES).map(async ([name, file]) => [name, await loadFrame(file)])
+    Object.entries(FRAME_FILES).map(async ([name, file]) => [name, await loadFrame(file, dir)])
   );
-  frames = Object.fromEntries(entries);
+  return Object.fromEntries(entries);
+}
+
+let loadedOutfit = null;
+let outfitLoadToken = 0;
+
+async function applyOutfit(payload) {
+  const outfit = outfitFrom(payload);
+  if (outfit === loadedOutfit) return;
+  const token = ++outfitLoadToken;
+  const next = await loadFrames(outfit);
+  if (token !== outfitLoadToken) return;
+  frames = next;
+  loadedOutfit = outfit;
 }
 
 function draw(now = performance.now()) {
@@ -187,7 +254,11 @@ canvas.addEventListener("pointerdown", (event) => {
   startScreenY = event.screenY;
   startWindowX = window.screenX;
   startWindowY = window.screenY;
-  canvas.setPointerCapture(event.pointerId);
+  try {
+    canvas.setPointerCapture(event.pointerId);
+  } catch {
+    /* continue without capture */
+  }
   document.body.classList.add("is-dragging");
 });
 
@@ -201,7 +272,18 @@ canvas.addEventListener("pointermove", (event) => {
 
 canvas.addEventListener("pointerup", (event) => {
   dragging = false;
-  canvas.releasePointerCapture(event.pointerId);
+  try {
+    canvas.releasePointerCapture(event.pointerId);
+  } catch {
+    /* already released */
+  }
+  document.body.classList.remove("is-dragging");
+});
+
+canvas.addEventListener("pointercancel", () => {
+  // A cancelled pointer never delivers pointerup — without this the pet would
+  // keep tracking the cursor on the next hover.
+  dragging = false;
   document.body.classList.remove("is-dragging");
 });
 
@@ -215,7 +297,15 @@ canvas.addEventListener("click", () => {
   });
 });
 
-loadFrames().then(() => {
-  scheduleBlink();
-  requestAnimationFrame(draw);
+window.petApi?.onSettings?.((payload) => {
+  applyOutfit(payload).catch((error) => console.error("Failed to switch outfit:", error));
 });
+
+(window.petApi?.getSettings?.() ?? Promise.resolve(null))
+  .catch(() => null)
+  .then((payload) => applyOutfit(payload))
+  .then(() => {
+    scheduleBlink();
+    requestAnimationFrame(draw);
+  })
+  .catch((error) => console.error("Failed to load frames:", error));

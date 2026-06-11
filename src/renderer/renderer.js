@@ -130,7 +130,19 @@ function applyL10n() {
 // ============================================================
 //  Frame loading — same edge-flood-fill technique as before.
 // ============================================================
-const ASSET_DIR = new URL("../../assets/character/", window.location.href);
+// Two outfits ship with the app,同样的九种表情: "formal" (正装, the classic
+// coat, assets/character root — default) and "casual" (休闲, the white
+// butterfly dress, assets/character/casual). The tray menu switches them.
+const CHARACTER_DIR = new URL("../../assets/character/", window.location.href);
+
+function assetDirFor(outfit) {
+  return outfit === "casual" ? new URL("casual/", CHARACTER_DIR) : CHARACTER_DIR;
+}
+
+function outfitFrom(payload) {
+  return payload?.outfit === "casual" ? "casual" : "formal";
+}
+
 const FRAME_FILES = {
   idle: "睁眼.png",
   halfClosed: "半眯眼.png",
@@ -215,6 +227,29 @@ function isEdgeBackground(data, index) {
   return a > 0 && lightnessGap < 95 && colorSpan < 30;
 }
 
+// Bounding box of meaningfully-opaque pixels — shared by the pre-flattened
+// fast path and the legacy fill path.
+function opaqueBbox(data, width, height, alphaMin = 1) {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (data[(y * width + x) * 4 + 3] >= alphaMin) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX || maxY < minY) {
+    return { minX: 0, minY: 0, maxX: width - 1, maxY: height - 1 };
+  }
+  return { minX, minY, maxX, maxY };
+}
+
 function prepareTransparentFrame(image) {
   const source = document.createElement("canvas");
   source.width = image.naturalWidth;
@@ -223,6 +258,22 @@ function prepareTransparentFrame(image) {
   srcCtx.drawImage(image, 0, 0);
   const imageData = srcCtx.getImageData(0, 0, source.width, source.height);
   const { data, width, height } = imageData;
+
+  // Shipped frames have their background (and the enclosed hair gaps, which
+  // an edge fill can never reach) baked out by scripts/
+  // flatten-character-assets.js. Transparent corners mean there is nothing
+  // left to remove — skip the fill and just measure the character. The full
+  // fill below stays as a fallback for unprocessed/custom art.
+  const cornerIndices = [
+    3,
+    (width - 1) * 4 + 3,
+    (height - 1) * width * 4 + 3,
+    (width * height - 1) * 4 + 3
+  ];
+  if (cornerIndices.every((i) => data[i] === 0)) {
+    return { canvas: source, bbox: opaqueBbox(data, width, height) };
+  }
+
   const transparent = new Uint8Array(width * height);
   const queue = new Int32Array(width * height);
   let head = 0;
@@ -316,17 +367,18 @@ function prepareTransparentFrame(image) {
   return { canvas: source, bbox: { minX, minY, maxX, maxY } };
 }
 
-async function loadFrame(fileName) {
+async function loadFrame(fileName, dir) {
   const image = new Image();
   image.decoding = "async";
-  image.src = new URL(fileName, ASSET_DIR).href;
+  image.src = new URL(fileName, dir).href;
   await image.decode();
   return prepareTransparentFrame(image);
 }
 
-async function loadAllFrames() {
+async function loadAllFrames(outfit) {
+  const dir = assetDirFor(outfit);
   const entries = await Promise.all(
-    Object.entries(FRAME_FILES).map(async ([name, file]) => [name, await loadFrame(file)])
+    Object.entries(FRAME_FILES).map(async ([name, file]) => [name, await loadFrame(file, dir)])
   );
 
   // Crop every frame to the SAME union bounding box. Each pose has a slightly
@@ -356,13 +408,37 @@ async function loadAllFrames() {
   const cropW = uMaxX - uMinX + 1;
   const cropH = uMaxY - uMinY + 1;
 
-  frames = {};
+  const loaded = {};
   for (const [name, { canvas }] of entries) {
     const out = document.createElement("canvas");
     out.width = cropW;
     out.height = cropH;
     out.getContext("2d").drawImage(canvas, uMinX, uMinY, cropW, cropH, 0, 0, cropW, cropH);
-    frames[name] = out;
+    loaded[name] = out;
+  }
+  return loaded;
+}
+
+// Swap her wardrobe. Loads are token-guarded so a rapid double-switch can't
+// install stale frames; the swap itself is a single atomic assignment, safe
+// mid-blink and mid-drag.
+let loadedOutfit = null;
+let pendingOutfit = null;
+let outfitLoadToken = 0;
+
+async function applyOutfit(outfit) {
+  if (outfit === loadedOutfit || outfit === pendingOutfit) return;
+  pendingOutfit = outfit;
+  const token = ++outfitLoadToken;
+  try {
+    const next = await loadAllFrames(outfit);
+    if (token !== outfitLoadToken) return;
+    frames = next;
+    loadedOutfit = outfit;
+    resizeCanvas();
+    renderExpression(MOOD_FRAME[state.mood] || state.mood);
+  } finally {
+    if (token === outfitLoadToken) pendingOutfit = null;
   }
 }
 
@@ -1108,6 +1184,20 @@ function renderMarkdown(input) {
   return src;
 }
 
+// Rendered-markdown cache. Every history event (each tool pill, each tool
+// result) re-renders the whole stream, which made re-parsing every finished
+// bubble the hot path in long sessions. Keyed by message id, invalidated by
+// text change; pruned in renderHistory so it never outlives the history.
+const mdCache = new Map(); // messageId -> { text, html }
+
+function renderMarkdownCached(msg) {
+  const cached = mdCache.get(msg.id);
+  if (cached && cached.text === msg.text) return cached.html;
+  const html = renderMarkdown(msg.text || "");
+  mdCache.set(msg.id, { text: msg.text, html });
+  return html;
+}
+
 let moodResetTimer = null;
 
 function clearMoodResetTimer() {
@@ -1211,7 +1301,7 @@ function buildMsgEl(msg) {
       cur.className = "cursor";
       el.append(cur);
     } else {
-      el.innerHTML = renderMarkdown(msg.text || "");
+      el.innerHTML = renderMarkdownCached(msg);
       appendBubbleTime(el, msg);
     }
   } else {
@@ -1383,6 +1473,13 @@ function renderHistory(history) {
   const prevScrollTop = chatStream.scrollTop;
   const prevIds = new Set(lastHistory.map((m) => m.id));
   lastHistory = history || [];
+  // Drop cached markdown for messages that no longer exist (clears, wipes).
+  if (mdCache.size > lastHistory.length + 32) {
+    const liveIds = new Set(lastHistory.map((m) => m.id));
+    for (const id of mdCache.keys()) {
+      if (!liveIds.has(id)) mdCache.delete(id);
+    }
+  }
   chatStream.innerHTML = "";
   if (!lastHistory.length) {
     const empty = document.createElement("div");
@@ -1470,7 +1567,14 @@ function tickTyping(messageId) {
     s.buffer = s.buffer.slice(advance);
 
     removeCursor(el);
-    el.append(document.createTextNode(chunk));
+    // Extend the trailing text node instead of appending one per frame — a
+    // long reply used to accumulate thousands of sibling text nodes.
+    const tailNode = el.lastChild;
+    if (tailNode && tailNode.nodeType === Node.TEXT_NODE) {
+      tailNode.appendData(chunk);
+    } else {
+      el.append(document.createTextNode(chunk));
+    }
     ensureCursor(el);
 
     const nearBottom =
@@ -1625,6 +1729,9 @@ window.chatApi.onHistory((history) => renderHistory(history));
 window.chatApi.onChunk(({ messageId, text }) => appendChunk(messageId, text));
 window.chatApi.onStatus((event) => {
   if (!event) return;
+  // Silent self-turns (proactive checks, memory upkeep) are invisible: don't
+  // flip the thinking face, buttons, or the end-of-reply happy flash for them.
+  if (event.silent) return;
   if (event.status === "running") {
     setRunning(true, { chained: Boolean(event.chained) });
     refreshComposerMeta();
@@ -1671,12 +1778,30 @@ window.chatApi.onTool?.((payload) => {
   }
 });
 
-// Expression chosen by the persona for this reply (hidden [[mood:X]] tag,
-// parsed + stripped in the main process). Stored now, applied when she
-// finishes speaking (see onStatus idle handler).
+// Expression chosen by the persona (hidden [[mood:X]] tags, parsed + stripped
+// in the main process). A reply may carry several — her face switches live as
+// each arrives mid-stream, and the idle handler settles on the last one.
 window.chatApi.onMood?.((payload) => {
   const frame = payload && MODEL_MOOD_FRAME[payload.mood];
-  if (frame) pendingModelMood = frame;
+  if (!frame) return;
+  pendingModelMood = frame;
+  if (chatRunning) setBaseMood(frame);
+});
+
+// She spoke on her own (proactive care). The message itself arrives via
+// onHistory; here just let her face react the way a finished reply does.
+window.chatApi.onProactive?.((payload) => {
+  if (!payload?.spoke) return;
+  resetInactivityTimers();
+  flashPunch(0.08);
+  const target = pendingModelMood || "happy";
+  pendingModelMood = null;
+  setBaseMood(target);
+  clearMoodResetTimer();
+  moodResetTimer = setTimeout(() => {
+    if (baseMood === target) setBaseMood("idle");
+    moodResetTimer = null;
+  }, 2800);
 });
 
 // ============================================================
@@ -1723,6 +1848,9 @@ function renderSettings(payload) {
   lastSettingsPayload = payload;
   applyL10n();
   refreshComposerMeta();
+  applyOutfit(outfitFrom(payload)).catch((error) => {
+    console.error("Failed to switch outfit:", error);
+  });
 }
 
 window.chatApi.onQueue?.(({ length }) => {
@@ -1731,7 +1859,6 @@ window.chatApi.onQueue?.(({ length }) => {
 });
 
 window.petApi?.onSettings?.(renderSettings);
-window.petApi?.getSettings?.().then(renderSettings);
 
 // ============================================================
 //  Popover-open hook: refocus composer + reset idle timers
@@ -1829,7 +1956,18 @@ if (typeof ResizeObserver !== "undefined") {
   new ResizeObserver(() => resizeCanvas()).observe(stage);
 }
 
-loadAllFrames()
+// Settings decide which outfit to load, so fetch them before the first frame
+// load; if they can't be fetched, fall back to the formal default.
+(window.petApi?.getSettings?.() ?? Promise.resolve(null))
+  .catch(() => null)
+  .then((payload) => {
+    if (payload) {
+      lastSettingsPayload = payload;
+      applyL10n();
+      refreshComposerMeta();
+    }
+    return applyOutfit(outfitFrom(payload));
+  })
   .then(() => {
     resizeCanvas();
     setBaseMood("idle");

@@ -28,6 +28,50 @@ function conversationArchivePath() {
   return path.join(memoryDir(), "CONVERSATION_ARCHIVE.jsonl");
 }
 
+// Observation journal — her local-only "what the Doctor was doing" notes,
+// one JSON line per [[observe:…]] directive. Strictly opt-in (see the
+// observationJournal setting); chat.js appends and prunes it.
+function observationJournalPath() {
+  return path.join(memoryDir(), "OBSERVATIONS.jsonl");
+}
+
+function ensureObservationJournalFile() {
+  const dir = memoryDir();
+  const file = observationJournalPath();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, "", "utf8");
+    }
+  } catch (error) {
+    console.warn("persona: failed to initialize observation journal file", error);
+  }
+  return file;
+}
+
+function readRecentObservations(maxEntries = 10) {
+  try {
+    const file = observationJournalPath();
+    if (!fs.existsSync(file)) return [];
+    const raw = fs.readFileSync(file, "utf8").trim();
+    if (!raw) return [];
+    return raw
+      .split("\n")
+      .slice(-Math.max(1, maxEntries))
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry) => entry && entry.text);
+  } catch (error) {
+    console.warn("persona: failed to read observation journal", error);
+    return [];
+  }
+}
+
 function ensureMemoryFile() {
   const dir = memoryDir();
   const file = memoryPath();
@@ -95,14 +139,33 @@ function formatArchiveEntry(entry) {
   return `${label}${provider}: ${String(entry.text).trim()}`;
 }
 
-function readConversationArchiveTail(maxEntries = 24, maxChars = 9000) {
+// Every consumer of the archive works within a small character budget, so
+// read only the file's tail instead of the whole (up to 5 MB) JSONL — this
+// runs per prompt build and, in chat.js, per archived message.
+const ARCHIVE_TAIL_READ_BYTES = 256 * 1024;
+
+function readArchiveTailEntries(maxBytes = ARCHIVE_TAIL_READ_BYTES) {
   const file = ensureConversationArchiveFile();
   try {
-    const raw = fs.readFileSync(file, "utf8").trim();
-    if (!raw) return "";
-    const entries = raw
+    const stat = fs.statSync(file);
+    if (stat.size === 0) return [];
+    const start = Math.max(0, stat.size - maxBytes);
+    const buf = Buffer.alloc(stat.size - start);
+    const fd = fs.openSync(file, "r");
+    try {
+      fs.readSync(fd, buf, 0, buf.length, start);
+    } finally {
+      fs.closeSync(fd);
+    }
+    let text = buf.toString("utf8");
+    if (start > 0) {
+      // Started mid-file — drop the first (partial, possibly mid-character) line.
+      const firstNewline = text.indexOf("\n");
+      text = firstNewline === -1 ? "" : text.slice(firstNewline + 1);
+    }
+    return text
       .split("\n")
-      .slice(-Math.max(maxEntries * 3, maxEntries))
+      .filter(Boolean)
       .map((line) => {
         try {
           return JSON.parse(line);
@@ -110,20 +173,23 @@ function readConversationArchiveTail(maxEntries = 24, maxChars = 9000) {
           return null;
         }
       })
-      .filter(Boolean);
-    const lines = entries
-      .map(formatArchiveEntry)
-      .filter(Boolean)
-      .slice(-maxEntries);
-    let text = lines.join("\n\n");
-    if (text.length > maxChars) {
-      text = text.slice(text.length - maxChars);
-    }
-    return text;
+      .filter((entry) => entry && entry.text && ["user", "assistant"].includes(entry.role));
   } catch (error) {
-    console.warn("persona: failed to read conversation archive file", error);
-    return "";
+    console.warn("persona: failed to read conversation archive tail", error);
+    return [];
   }
+}
+
+function readConversationArchiveTail(maxEntries = 24, maxChars = 9000) {
+  const lines = readArchiveTailEntries()
+    .map(formatArchiveEntry)
+    .filter(Boolean)
+    .slice(-maxEntries);
+  let text = lines.join("\n\n");
+  if (text.length > maxChars) {
+    text = text.slice(text.length - maxChars);
+  }
+  return text;
 }
 
 function readMemorySnapshot(maxChars = 12000) {
@@ -199,7 +265,8 @@ function buildPersonaPrompt({
   includeLongMemory = true,
   memoryRecallRequested = false,
   skillsEnabled = true,
-  deepPersona = false
+  deepPersona = false,
+  observeEnabled = false
 }) {
   const memFile = memoryPath();
   const summaryFile = conversationSummaryPath();
@@ -270,11 +337,12 @@ function buildPersonaPrompt({
     "- 日常事务，处理完一句话就够（「好了，博士。」「看到了。」），不必事无巨细复述内部步骤。\n" +
     "- 但当这件事对你们有意义——尤其是为博士放一首歌、或做一件温柔的事——就不要收着：可以在动作之后多说一两句真心话，悲喜由这一刻决定。你不是只会报「已完成」的机器。\n\n" +
 
-    "【表情 —— 界面会读取这一行，博士看不到】\n" +
+    "【表情 —— 界面会读取这些标记，博士看不到】\n" +
     "- 每次回复都必须以一个心情标记开头，格式严格为 [[mood:X]]，紧跟一个空格后再开始正文。\n" +
     "- X 只能取以下之一：calm（平静）、smile（微笑/温柔欣慰）、sad（难过/歉疚）、angry（不满/生气）、sleepy（困倦/深夜劝博士休息）、threat（极少数严肃、锋利的告诫）。\n" +
+    "- 较长的回复里，若情绪在中途真的变化了，可以在转折处单独插入一个新的 [[mood:X]]（同样的双方括号格式），界面会即时切换立绘；情绪没变就不要插。\n" +
     "- 依据这次回复真实的情绪诚实选择：日常多为 calm 或 smile，不要滥用 angry 或 threat。\n" +
-    "- 这一标记只用于界面切换立绘，不是说给博士的话；正文里不要再出现任何方括号心情标记。\n\n" +
+    "- 这些标记只用于界面切换立绘，不是说给博士的话；正文里绝不要以任何其他写法提到心情标记（例如 mood:smile、[mood:smile] 这类残缺形式会直接显示给博士）。\n\n" +
 
     "【记忆 —— 跨越每次相见的羁绊】\n" +
     "你的长期记忆，存放于这里：\n" +
@@ -341,6 +409,13 @@ function buildPersonaPrompt({
       "- 先用正文自然地说一句（「我替你放首歌，博士。」），再在末尾附上指令。\n\n";
   }
 
+  if (observeEnabled) {
+    prompt +=
+      "【观察日志 —— 只属于你的随手记】\n" +
+      "当你看到了博士的屏幕，可以在回复最末尾附一行 [[observe:用一句话客观描述博士此刻在做什么]]。\n" +
+      "这一行博士看不到，会被存进你的观察日志，帮你记得博士这些天都在忙什么；没有看到屏幕时不要使用。\n\n";
+  }
+
   if (agentMode) {
     prompt +=
       "【博士的信任 —— 完整代理】\n" +
@@ -380,10 +455,14 @@ module.exports = {
   ensureMemoryFile,
   ensureConversationArchiveFile,
   ensureConversationSummaryFile,
+  ensureObservationJournalFile,
+  readRecentObservations,
+  readArchiveTailEntries,
   memoryDir,
   memoryPath,
   conversationSummaryPath,
-  conversationArchivePath
+  conversationArchivePath,
+  observationJournalPath
 };
 
 
