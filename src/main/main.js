@@ -763,13 +763,14 @@ const MENU_TEXT = {
     agentMode: "Agent mode（完整屏幕控制）",
     enableAgentTitle: "开启 agent mode？",
     enableAgent: "开启 agent mode",
-    proactiveCare: "主动关心（定时看一眼屏幕）",
-    observationJournal: "观察日志（记下博士在做什么）",
-    enableProactiveTitle: "开启主动关心？",
-    enableProactive: "开启主动关心",
-    proactiveWarnMessage: "让普瑞赛斯定时看一眼屏幕，并在值得时主动开口？",
-    proactiveWarnDetail:
-      "开启后，她会每隔约 20 分钟截取一次屏幕，交给当前 backend 判断是否值得说话；大多数时候她会保持沉默。\n\n" +
+    waifuMode: "老婆模式（她会自己照看你）",
+    enableWaifuTitle: "开启老婆模式？",
+    enableWaifu: "开启老婆模式",
+    waifuWarnMessage: "让普瑞赛斯时不时自己看一眼屏幕，安静地照看你？",
+    waifuWarnDetail:
+      "开启后，她每隔约 20 分钟悄悄看一眼屏幕，自己决定要不要开口：累了劝你休息、卡住了搭把手、" +
+      "看见你流连别的角色会吃醋（看的是她自己就不会）、看见不该看的东西会拉下脸。" +
+      "大多数时候她什么都不说——真正的照看本来就不出声。她还会留一份只存在本机的观察日志，记得你这些天的样子。\n\n" +
       "· 每次查看都是一次模型调用（消耗额度/计费）\n" +
       "· 仅在 Claude Code / Codex backend 下生效\n" +
       "· macOS 需要「屏幕录制」权限\n" +
@@ -824,13 +825,12 @@ const MENU_TEXT = {
     agentMode: "Agent mode (full screen control)",
     enableAgentTitle: "Enable agent mode?",
     enableAgent: "Enable agent mode",
-    proactiveCare: "Proactive care (peeks at your screen)",
-    observationJournal: "Observation journal (what you're up to)",
-    enableProactiveTitle: "Enable proactive care?",
-    enableProactive: "Enable proactive care",
-    proactiveWarnMessage: "Let Priestess periodically look at your screen and speak up when it matters?",
-    proactiveWarnDetail:
-      "When enabled she takes a screenshot every ~20 minutes and lets the current backend decide whether anything is worth saying; most checks stay silent.\n\n" +
+    waifuMode: "老婆模式 · Waifu mode (she looks after you)",
+    enableWaifuTitle: "Enable waifu mode?",
+    enableWaifu: "Enable waifu mode",
+    waifuWarnMessage: "Let Priestess quietly peek at your screen now and then and look after you herself?",
+    waifuWarnDetail:
+      "Every ~20 minutes she takes a quiet look and decides for herself whether to speak: a rest nudge when you've worked too long, a hand when you're stuck, jealousy if you're fawning over someone who isn't her (she recognizes herself), and a sharp word if she catches something NSFW. Most checks stay silent — real care doesn't announce itself. She also keeps a local-only observation journal of what you've been up to.\n\n" +
       "- Every check is one model call (quota/billing)\n" +
       "- Works only with the Claude Code / Codex backends\n" +
       "- macOS needs Screen Recording permission\n" +
@@ -893,22 +893,22 @@ function mt(key, ...args) {
   return typeof value === "function" ? value(...args) : value;
 }
 
-// Proactive care is opt-in behind a consent dialog, like agent mode: it means
-// periodic screenshots and a model call per check.
-async function toggleProactive(nextValue) {
+// 老婆模式 (waifu mode) is opt-in behind a consent dialog, like agent mode:
+// it means periodic screenshots and a model call per check.
+async function toggleWaifuMode(nextValue) {
   if (nextValue) {
     const result = await dialog.showMessageBox({
       type: "warning",
-      title: mt("enableProactiveTitle"),
-      message: mt("proactiveWarnMessage"),
-      detail: mt("proactiveWarnDetail"),
-      buttons: [mt("cancel"), mt("enableProactive")],
+      title: mt("enableWaifuTitle"),
+      message: mt("waifuWarnMessage"),
+      detail: mt("waifuWarnDetail"),
+      buttons: [mt("cancel"), mt("enableWaifu")],
       defaultId: 0,
       cancelId: 0
     });
     if (result.response !== 1) return;
   }
-  settings.set({ proactiveEnabled: Boolean(nextValue) });
+  settings.set({ waifuMode: Boolean(nextValue) });
 }
 
 async function toggleAgentMode(nextValue) {
@@ -1282,18 +1282,12 @@ function buildContextMenu() {
       }
     },
     {
-      label: mt("proactiveCare"),
+      label: mt("waifuMode"),
       type: "checkbox",
-      checked: all.proactiveEnabled === true,
+      checked: all.waifuMode === true,
       click: (item) => {
-        toggleProactive(item.checked);
+        toggleWaifuMode(item.checked);
       }
-    },
-    {
-      label: mt("observationJournal"),
-      type: "checkbox",
-      checked: all.observationJournal === true,
-      click: (item) => settings.set({ observationJournal: item.checked })
     },
     buildUsageBackendMenuItem(),
     ...buildModelMenuItems(),

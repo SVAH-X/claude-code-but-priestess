@@ -29,8 +29,8 @@ function conversationArchivePath() {
 }
 
 // Observation journal — her local-only "what the Doctor was doing" notes,
-// one JSON line per [[observe:…]] directive. Strictly opt-in (see the
-// observationJournal setting); chat.js appends and prunes it.
+// one JSON line per [[observe:…]] directive. Part of 老婆模式 (waifu mode),
+// strictly opt-in; chat.js appends and prunes it.
 function observationJournalPath() {
   return path.join(memoryDir(), "OBSERVATIONS.jsonl");
 }

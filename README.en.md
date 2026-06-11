@@ -99,16 +99,14 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
     and her sprite follows along live instead of freezing on one face.
   - Streaming reply → thinking / working; reply finishes → settles into the
     expression she chose; error → a brief cry.
-- **Proactive care (optional, off by default)** — when enabled she peeks at
-  your screen every so often and decides whether anything is worth saying
-  (stuck on the same problem for ages, working too long, up too late…). If
-  yes, she speaks up briefly and you get a system notification with her words;
-  if not, she stays silent and nothing appears anywhere. See
-  [Proactive care](#proactive-care) below.
-- **Observation journal (optional, off by default)** — when enabled, each time
-  she has seen the screen she may keep a one-line local note of what you were
-  doing (`memory/OBSERVATIONS.jsonl`). Local-only; it feeds proactive care and
-  her memory.
+- **老婆模式 · Waifu mode (optional, off by default)** — she quietly peeks at
+  your screen now and then and looks after you on her own: a rest nudge when
+  you've worked too long, a hand when you're stuck, jealousy when you're
+  fawning over someone who isn't her (she recognizes herself on screen — the
+  PRTS window, the pet, both outfits), and a sharp threat-faced warning if she
+  catches NSFW content. Most checks stay perfectly silent — real care doesn't
+  announce itself. She also keeps a local-only observation journal. See
+  [Waifu mode](#waifu-mode) below.
 - **Automatic memory curation** — when `MEMORY.md` grows large she quietly
   tidies it about once a week while the chat is idle: merging duplicates,
   re-filing entries, condensing stale trivia without losing anything that
@@ -294,40 +292,42 @@ which codex    # should print a path on your $PATH
 Optionally set a project directory via the tray menu (`Set chat directory…`)
 so the selected backend can use the right working tree.
 
-## Proactive care
+## Waifu mode
 
-Tray right-click → **"Proactive care (peeks at your screen)"**. Entirely
+Tray right-click → **"老婆模式 · Waifu mode (she looks after you)"**. Entirely
 optional and off by default; enabling shows a consent dialog first, because it
 means periodic screenshots plus one model call per check.
 
-When enabled:
+Every ~20 minutes she takes a quiet look at the screen and **decides for
+herself whether to speak**:
 
-- Roughly every 20 minutes she takes a screenshot and lets the current backend
-  decide **whether anything is worth saying** — you seem stuck on the same
-  problem, you've been at it too long, it's deep into the night, or the screen
-  shows something you two talked about.
-- **Silence is the norm**: the model answers with a hidden `[[silent]]` marker
-  when there's nothing worth saying, and in that case nothing appears anywhere.
-  Only when she actually speaks does the message join the chat, along with a
-  system notification carrying her words (click it to open the chat).
-- Guardrails: a **hard off-switch** (the tray checkbox), the check **interval**,
-  a **cooldown** after recent conversation (she won't butt in right after you
-  talked), **quiet hours** (00:30–08:30 by default), and a **daily cap**
-  (20 checks by default, to bound cost).
-- Works only with the Claude Code / Codex backends (the built-in direct backend
-  can't see the screen). On macOS it needs Screen Recording permission; if the
-  screenshot fails, the check is skipped rather than run blind.
+- Stuck on the same problem for ages, working too long, up too late — a soft
+  word or two;
+- You're fawning over **another character** — she gets jealous, restrained but
+  pointed (she recognizes herself: the PRTS window, the desktop pet, and both
+  outfit arts never trigger it — catching you looking at *her* just makes her
+  pleased);
+- **NSFW on screen** — threat face, one sharp warning; that one isn't
+  jealousy;
+- Otherwise **silence**: the model answers with a hidden `[[silent]]` marker
+  and nothing appears anywhere — the pet isn't disturbed, the chat shows
+  nothing, and she never says mechanism-revealing things like "I saw your
+  screen". Only when she actually speaks does the message join the chat, with
+  a system notification carrying her words.
 
-The tuning knobs have no menu UI — edit `settings.json` by hand (tray →
-Reveal data folder): `proactiveIntervalMin` / `proactiveCooldownMin` /
+She also keeps an **observation journal** (`memory/OBSERVATIONS.jsonl`): one
+objective line per look about what you were doing. Local-only, size-capped,
+fed back into the next check (so she doesn't repeat herself) and her memory.
+
+Guardrails: a **hard off-switch** (the tray checkbox), the check **interval**,
+a **cooldown** after recent conversation, **quiet hours** (00:30–08:30 by
+default), and a **daily cap** (20 checks). Works only with the Claude Code /
+Codex backends (the built-in direct backend can't see the screen); on macOS it
+needs Screen Recording permission — if the screenshot fails the check is
+skipped, never run blind. Tuning knobs live in `settings.json` (tray → Reveal
+data folder): `proactiveIntervalMin` / `proactiveCooldownMin` /
 `proactiveQuietStart` / `proactiveQuietEnd` (`HH:MM`, may wrap past midnight) /
 `proactiveDailyCap`.
-
-The companion **observation journal** has its own tray toggle (also off by
-default): when on, each time she has seen the screen she may append one
-objective line about what you were doing to `memory/OBSERVATIONS.jsonl`.
-Local-only, size-capped, and fed back into proactive care (so she doesn't
-repeat herself) and her memory.
 
 ## Data and memory storage
 
@@ -354,12 +354,12 @@ Files stored there:
 
 | File | Purpose |
 | --- | --- |
-| `settings.json` | App settings: selected backend, chat working directory, agent mode, skills (music / search / open URL/app), proactive care (toggle + interval/cooldown/quiet hours/daily cap), observation journal toggle, auto-screenshot setting, appearance (system / light / dark), and popover size. |
+| `settings.json` | App settings: selected backend, chat working directory, agent mode, skills (music / search / open URL/app), waifu mode (toggle + interval/cooldown/quiet hours/daily cap), outfit, auto-screenshot setting, appearance (system / light / dark), and popover size. |
 | `conversation.json` | Current visible chat session, per-backend resume session ids, and the long-memory dormant flag. |
 | `memory/MEMORY.md` | Curated long-term memory about the Doctor: preferences, projects, recurring topics, and facts worth remembering. Auto-tidied periodically once it grows large. |
 | `memory/CONVERSATION_SUMMARY.md` | Rolling bounded summary of older conversations. Used when long context needs to be recovered. |
 | `memory/CONVERSATION_ARCHIVE.jsonl` | Full shared user/assistant archive for both Claude Code and Codex, capped to roughly 5 MB and pruned from the oldest entries. |
-| `memory/OBSERVATIONS.jsonl` | (Optional, off by default) Observation journal: her one-line notes of what the Doctor was doing when she saw the screen. Local-only, size-capped. |
+| `memory/OBSERVATIONS.jsonl` | (Waifu mode) Observation journal: her one-line notes of what the Doctor was doing when she saw the screen. Local-only, size-capped. |
 
 What does not get written by the memory system:
 
@@ -411,7 +411,7 @@ These files define the important behavior:
 | --- | --- |
 | `src/main/persona.js` | Constructs the 普瑞赛斯 / Priestess persona prompt, defines memory file paths, and controls when long memory is injected. |
 | `src/main/chat.js` | Detects local Claude/Codex CLIs, chooses the active backend, launches subprocesses, parses streaming output and hidden directives (mood / skill / observe / silent), persists archive/summary data, and shares context across backends. |
-| `src/main/proactive.js` | Background scheduler for proactive care and memory curation: interval, cooldown, quiet hours, daily cap, screen and backend gating. |
+| `src/main/proactive.js` | Background scheduler for waifu-mode checks and memory curation: interval, cooldown, quiet hours, daily cap, screen and backend gating. |
 | `src/main/main.js` | Electron main process: tray icon, context menu, backend menu rendering, settings persistence, conversation persistence, and app lifecycle. |
 | `src/main/settings.js` | Default app settings and `settings.json` persistence. |
 | `src/main/preload.js` | Safe IPC bridge between Electron main and renderer. |

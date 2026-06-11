@@ -1,8 +1,8 @@
 // ============================================================
-//  Proactive care + memory upkeep — background loops that let her act on her
-//  own. The proactive design follows Sakura's guardrails (interval, cooldown,
-//  hard off-switch, screen gating) and adds quiet hours plus a daily cap,
-//  since every check is a paid model call.
+//  老婆模式 (waifu mode) checks + memory upkeep — background loops that let
+//  her act on her own. The check design follows Sakura's guardrails
+//  (interval, cooldown, hard off-switch, screen gating) and adds quiet hours
+//  plus a daily cap, since every check is a paid model call.
 //
 //  - Proactive check: when enabled and every gate passes, run a silent chat
 //    turn that screenshots the screen and lets the model decide whether to
@@ -78,7 +78,7 @@ function hasCliProvider() {
 }
 
 function shouldRunProactive(now) {
-  if (settings.get("proactiveEnabled") !== true) return false;
+  if (settings.get("waifuMode") !== true) return false;
   if (now - lastProactiveAttemptAt < intervalMs()) return false;
   if (inQuietHours()) return false;
   const day = localDayKey();

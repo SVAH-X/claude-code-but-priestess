@@ -40,22 +40,21 @@ const DEFAULTS = Object.freeze({
   // receive prerelease builds for testing before they are promoted.
   updateChannel: "stable",
   autoScreenshot: true,
-  // Proactive care — she periodically looks at the screen and decides whether
-  // anything is worth saying (off by default; the tray toggle shows a consent
-  // dialog because every check is a paid model call and needs screen access).
-  // Interval/cooldown are minutes; quiet hours are local "HH:MM" and may wrap
-  // past midnight; the daily cap counts checks. The tuning knobs have no menu
-  // UI — edit them here by hand (tray → 打开数据目录), like updateChannel.
-  proactiveEnabled: false,
+  // 老婆模式 (waifu mode) — she periodically looks at the screen on her own
+  // and quietly takes care of the Doctor: gentle check-ins, jealousy when he
+  // is fawning over someone who isn't her, sharp warnings on NSFW, and a
+  // local-only observation journal (memory/OBSERVATIONS.jsonl). Off by
+  // default; the tray toggle shows a consent dialog because every check is a
+  // paid model call and needs screen access. Interval/cooldown are minutes;
+  // quiet hours are local "HH:MM" and may wrap past midnight; the daily cap
+  // counts checks. The tuning knobs have no menu UI — edit them here by hand
+  // (tray → 打开数据目录), like updateChannel.
+  waifuMode: false,
   proactiveIntervalMin: 20,
   proactiveCooldownMin: 10,
   proactiveDailyCap: 20,
   proactiveQuietStart: "00:30",
   proactiveQuietEnd: "08:30",
-  // Observation journal — lets her keep a local-only JSONL of one-line "what
-  // the Doctor is doing" notes whenever she has seen the screen. Off by
-  // default; lives in memory/OBSERVATIONS.jsonl.
-  observationJournal: false,
   // Timestamp of the last automatic memory-curation pass (see proactive.js).
   memoryCuratedAt: 0,
   desktopPet: true,
@@ -74,6 +73,13 @@ function init() {
     if (fs.existsSync(filePath)) {
       const raw = fs.readFileSync(filePath, "utf8");
       const parsed = JSON.parse(raw);
+      // Migration: 主动关心 + 观察日志 merged into 老婆模式 (waifu mode).
+      if (parsed.waifuMode === undefined &&
+          (parsed.proactiveEnabled === true || parsed.observationJournal === true)) {
+        parsed.waifuMode = true;
+      }
+      delete parsed.proactiveEnabled;
+      delete parsed.observationJournal;
       cache = { ...DEFAULTS, ...parsed };
     }
   } catch (error) {
