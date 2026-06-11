@@ -156,6 +156,15 @@ body.is-window-moving * {
   border: 1px solid rgba(255, 209, 102, 0.4);
 }
 
+/* Tiny version tag beside the title — informational, deliberately quiet. */
+.version-badge {
+  -webkit-app-region: no-drag;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  opacity: 0.75;
+}
+
 .agent-badge[hidden] {
   display: none;
 }

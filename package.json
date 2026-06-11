@@ -42,6 +42,7 @@
       "src/**/*",
       "assets/**/*",
       "!**/.DS_Store",
+      "!assets/character/casual-src/**",
       "!assets/character/Nano Banana Workspace Image.png",
       "!assets/character/new*.png",
       "package.json"
