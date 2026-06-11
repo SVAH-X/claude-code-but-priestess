@@ -42,11 +42,17 @@ const POPOVER_MIN_HEIGHT = 460;
 const POPOVER_EDGE_MARGIN = 8;
 const DESKTOP_PET_IDLE_MS = Number(process.env.PRTS_DESKTOP_PET_IDLE_MS) || 60 * 1000;
 const HTML_PANEL_MIN_WIDTH = 200;
-const DESKTOP_PET_SIZES = Object.freeze({
-  small: { width: 120, height: 144 },
-  medium: { width: 150, height: 180 },
-  large: { width: 180, height: 216 }
-});
+// Base pet size at scale 1.0; the actual size is base × desktopPetScale,
+// continuously adjustable (scroll over the pet) within these bounds.
+const DESKTOP_PET_BASE = Object.freeze({ width: 150, height: 180 });
+const DESKTOP_PET_SCALE_MIN = 0.4;
+const DESKTOP_PET_SCALE_MAX = 3.0;
+const DESKTOP_PET_SCALE_PRESETS = Object.freeze([
+  { labelKey: "sizeSmall", scale: 0.8 },
+  { labelKey: "sizeMedium", scale: 1.0 },
+  { labelKey: "sizeLarge", scale: 1.2 },
+  { labelKey: "sizeXL", scale: 1.6 }
+]);
 
 let tray;
 let popover;
@@ -490,8 +496,18 @@ function defaultDesktopPetPosition(display = screen.getPrimaryDisplay()) {
   };
 }
 
+function desktopPetScale() {
+  const raw = Number(settings.get("desktopPetScale"));
+  if (!Number.isFinite(raw)) return 1.0;
+  return Math.min(DESKTOP_PET_SCALE_MAX, Math.max(DESKTOP_PET_SCALE_MIN, raw));
+}
+
 function desktopPetSize() {
-  return DESKTOP_PET_SIZES[settings.get("desktopPetSize")] || DESKTOP_PET_SIZES.medium;
+  const s = desktopPetScale();
+  return {
+    width: Math.round(DESKTOP_PET_BASE.width * s),
+    height: Math.round(DESKTOP_PET_BASE.height * s)
+  };
 }
 
 function clampDesktopPetPosition(point = {}) {
@@ -617,13 +633,29 @@ function moveDesktopPetTo(point = {}) {
   return position;
 }
 
-function setDesktopPetSize(sizeKey) {
-  const nextKey = DESKTOP_PET_SIZES[sizeKey] ? sizeKey : "medium";
-  settings.set({ desktopPetSize: nextKey });
+function setDesktopPetScale(scale) {
+  const next = Math.min(DESKTOP_PET_SCALE_MAX, Math.max(DESKTOP_PET_SCALE_MIN, Number(scale) || 1));
+  // Keep her feet planted: resize anchored at the bottom-center.
+  const old = desktopPetSize();
+  settings.set({ desktopPetScale: next });
   if (!desktopPet || desktopPet.isDestroyed()) return;
-  const position = clampDesktopPetPosition(desktopPet.getBounds());
-  desktopPet.setBounds({ ...position, ...desktopPetSize() }, false);
+  const bounds = desktopPet.getBounds();
+  const size = desktopPetSize();
+  const position = clampDesktopPetPosition({
+    x: bounds.x + Math.round((old.width - size.width) / 2),
+    y: bounds.y + (old.height - size.height)
+  });
+  desktopPet.setBounds({ ...position, ...size }, false);
   settings.set({ desktopPetPosition: position });
+}
+
+// Scroll over the pet: factor > 1 grows, < 1 shrinks. Persisted via
+// setDesktopPetScale's settings writes (already debounced by tininess).
+function scaleDesktopPetBy(factor) {
+  const f = Number(factor);
+  if (!Number.isFinite(f) || f <= 0) return desktopPetScale();
+  setDesktopPetScale(desktopPetScale() * f);
+  return desktopPetScale();
 }
 
 function openChatFromDesktopPet() {
@@ -797,6 +829,8 @@ const MENU_TEXT = {
     sizeSmall: "小",
     sizeMedium: "中",
     sizeLarge: "大",
+    sizeXL: "特大",
+    sizeScrollHint: "在桌宠上滚动滚轮可无级缩放",
     setChatDirectory: "设置聊天工作目录…",
     chooseProjectFolder: "选择聊天使用的项目文件夹",
     clearChatDirectory: "清除聊天工作目录",
@@ -857,6 +891,8 @@ const MENU_TEXT = {
     sizeSmall: "Small",
     sizeMedium: "Medium",
     sizeLarge: "Large",
+    sizeXL: "X-Large",
+    sizeScrollHint: "Scroll on the pet to scale freely",
     setChatDirectory: "Set chat directory…",
     chooseProjectFolder: "Choose project folder for chat",
     clearChatDirectory: "Clear chat directory",
@@ -1148,15 +1184,7 @@ function modelPresetLabel(preset) {
   return preset.label || preset.value || "";
 }
 
-function desktopPetSizeLabel(sizeKey) {
-  switch (sizeKey) {
-    case "small": return mt("sizeSmall");
-    case "large": return mt("sizeLarge");
-    case "medium":
-    default:
-      return mt("sizeMedium");
-  }
-}
+
 
 // A "Model" submenu for whichever backend is active. Returned as an array so it
 // can be spread into the menu (empty when no backend / presets are available).
@@ -1324,12 +1352,16 @@ function buildContextMenu() {
     {
       label: mt("desktopPetSize"),
       enabled: all.desktopPet !== false,
-      submenu: Object.keys(DESKTOP_PET_SIZES).map((sizeKey) => ({
-        label: desktopPetSizeLabel(sizeKey),
-        type: "radio",
-        checked: (all.desktopPetSize || "medium") === sizeKey,
-        click: () => setDesktopPetSize(sizeKey)
-      }))
+      submenu: [
+        ...DESKTOP_PET_SCALE_PRESETS.map((preset) => ({
+          label: mt(preset.labelKey),
+          type: "radio",
+          checked: Math.abs((Number(all.desktopPetScale) || 1) - preset.scale) < 0.05,
+          click: () => setDesktopPetScale(preset.scale)
+        })),
+        { type: "separator" },
+        { label: mt("sizeScrollHint"), enabled: false }
+      ]
     },
     {
       label: mt("setChatDirectory"),
@@ -1691,6 +1723,8 @@ ipcMain.handle("popover:activity", () => {
 ipcMain.handle("desktop-pet:open-chat", () => openChatFromDesktopPet());
 
 ipcMain.handle("desktop-pet:move", (_, point) => moveDesktopPetTo(point));
+
+ipcMain.handle("desktop-pet:scale", (_, factor) => scaleDesktopPetBy(factor));
 
 ipcMain.handle("popover:move", (_, point) => movePopoverTo(point));
 

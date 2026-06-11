@@ -287,6 +287,22 @@ canvas.addEventListener("pointercancel", () => {
   document.body.classList.remove("is-dragging");
 });
 
+// Scroll over the pet to scale her freely (the tray presets remain as quick
+// stops). Lightly throttled so trackpad momentum doesn't flood the IPC.
+let lastScaleAt = 0;
+window.addEventListener(
+  "wheel",
+  (event) => {
+    event.preventDefault();
+    const now = performance.now();
+    if (now - lastScaleAt < 30) return;
+    lastScaleAt = now;
+    const factor = event.deltaY < 0 ? 1.05 : 1 / 1.05;
+    window.petApi?.scaleDesktopPet?.(factor)?.catch?.(() => {});
+  },
+  { passive: false }
+);
+
 canvas.addEventListener("click", () => {
   if (moved) {
     moved = false;

@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("petApi", {
   notePopoverActivity: () => ipcRenderer.invoke("popover:activity"),
   openChatFromDesktopPet: () => ipcRenderer.invoke("desktop-pet:open-chat"),
   moveDesktopPet: (point) => ipcRenderer.invoke("desktop-pet:move", point),
+  scaleDesktopPet: (factor) => ipcRenderer.invoke("desktop-pet:scale", factor),
   pickChatCwd: () => ipcRenderer.invoke("settings:pick-cwd"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   onOpened: onChannel("popover:opened"),

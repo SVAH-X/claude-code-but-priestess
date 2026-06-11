@@ -58,7 +58,9 @@ const DEFAULTS = Object.freeze({
   // Timestamp of the last automatic memory-curation pass (see proactive.js).
   memoryCuratedAt: 0,
   desktopPet: true,
-  desktopPetSize: "medium",
+  // Continuous pet scale (1.0 = 150×180, the former "medium"). Scroll over
+  // the pet to fine-tune; the tray menu offers preset stops.
+  desktopPetScale: 1.0,
   desktopPetPosition: null,
   popoverSize: { width: 380, height: 560 }
 });
@@ -80,6 +82,12 @@ function init() {
       }
       delete parsed.proactiveEnabled;
       delete parsed.observationJournal;
+      // Migration: fixed small/medium/large pet sizes → continuous scale.
+      if (parsed.desktopPetScale === undefined && parsed.desktopPetSize) {
+        parsed.desktopPetScale =
+          parsed.desktopPetSize === "small" ? 0.8 : parsed.desktopPetSize === "large" ? 1.2 : 1.0;
+      }
+      delete parsed.desktopPetSize;
       cache = { ...DEFAULTS, ...parsed };
     }
   } catch (error) {

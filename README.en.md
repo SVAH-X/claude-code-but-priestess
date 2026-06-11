@@ -64,7 +64,8 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   **To turn the pet off, right-click the tray icon and uncheck "Desktop pet
   while idle"** — clicking the pet itself only reopens the chat, and she comes
   back about a minute after it is hidden again. The same menu can show her
-  immediately or set a small / medium / large size.
+  immediately or pick a size preset (small / medium / large / x-large) —
+  scrolling on the pet scales her freely.
 - Light / dark appearance that matches your system on every platform.
   Right-click the tray icon → **Appearance** to follow the system theme
   (default) or force Light / Dark. The text palette and the popover background
