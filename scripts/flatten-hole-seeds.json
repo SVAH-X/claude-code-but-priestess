@@ -1,0 +1,14 @@
+{
+  "note": "Image-space seed points for enclosed background gaps inside her hair (see flatten-character-assets.js). These target the FORMAL outfit (assets/character root): first four = the left/right hair gaps shared by the eight normal frames; last four = the same gaps where 威胁.png's pose shifts them. The CASUAL outfit (assets/character/casual, the mint dress) ships pre-flattened with no enclosed gaps and is not processed by the flatten script. CAUTION for any future art: enclosed near-white components include her face, dress panels, butterfly ornament, collar whites and eye glints — never bulk-clear near-white regions, always pick seeds after --inspect.",
+  "radius": 4,
+  "seeds": [
+    { "x": 470, "y": 659 },
+    { "x": 486, "y": 701 },
+    { "x": 768, "y": 697 },
+    { "x": 784, "y": 679 },
+    { "x": 455, "y": 642 },
+    { "x": 473, "y": 689 },
+    { "x": 787, "y": 684 },
+    { "x": 805, "y": 665 }
+  ]
+}
