@@ -197,6 +197,20 @@ button.ghost:disabled {
   cursor: not-allowed;
 }
 
+/* Window controls (hide / close-to-tray). Square so the glyphs sit centered;
+   a touch of extra gap separates them from the chat actions. */
+button.ghost.window-btn {
+  width: 24px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.1;
+  text-align: center;
+}
+
+#minimizeBtn {
+  margin-left: 6px;
+}
+
 /* ============================================================
    Character stage.
    ============================================================ */
