@@ -26,9 +26,22 @@
 //  Manual "Check for updates…" gives its feedback through dialogs, not
 //  notifications: macOS quietly drops/coalesces repeat notifications from
 //  ad-hoc-signed apps, which made the manual check look like it did nothing.
+//
+//  Once a download starts (either platform), a small progress window shows
+//  the whole pipeline — download / verify / install / restart — so updates
+//  never feel like a silent install.
 // ============================================================
 
-const { app, net, shell, dialog, Notification } = require("electron");
+const {
+  app,
+  net,
+  shell,
+  dialog,
+  Notification,
+  BrowserWindow,
+  ipcMain,
+  nativeTheme
+} = require("electron");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -125,6 +138,90 @@ async function failureDialog() {
     cancelId: 0
   });
   if (choice.response === 1) shell.openExternal(RELEASES_PAGE);
+}
+
+// ============================================================
+//  Update progress window — a small panel (icon · "正在更新到 vX…" ·
+//  progress bar · byte counter) kept visible through the whole pipeline:
+//  download → verify → install → restart. Updates used to run behind
+//  notifications only, which read as "silent install". Closing the window
+//  cancels nothing; the update simply finishes in the background.
+// ============================================================
+let progressWindow = null;
+let progressState = null; // { version, phase, transferred, total }
+let lastProgressPush = 0;
+
+ipcMain.handle("update:get-state", () => progressState);
+
+function showProgressWindow(version) {
+  progressState = { version, phase: "download", transferred: 0, total: 0 };
+  lastProgressPush = 0;
+  if (progressWindow && !progressWindow.isDestroyed()) {
+    progressWindow.show();
+    return;
+  }
+  progressWindow = new BrowserWindow({
+    width: 420,
+    height: 112,
+    useContentSize: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    title: "PRTS 更新",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#11151a" : "#e9edf2",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  progressWindow.setMenuBarVisibility?.(false);
+  // Same hardening as main.js gives its windows: local file only, anything
+  // else goes to the system browser / is dropped.
+  progressWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  progressWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== progressWindow?.webContents.getURL()) event.preventDefault();
+  });
+  progressWindow.loadFile(path.join(__dirname, "..", "renderer", "update-progress.html"));
+  progressWindow.once("ready-to-show", () => {
+    progressWindow?.show();
+  });
+  progressWindow.on("closed", () => {
+    progressWindow = null;
+  });
+}
+
+// Push a state patch to the window (throttled — the mac download loop ticks
+// per network chunk). Phase changes always go through so verify/install/
+// restart are never swallowed by the throttle.
+function pushProgress(patch) {
+  const phaseChanged = Boolean(patch.phase && patch.phase !== progressState?.phase);
+  progressState = { ...(progressState || {}), ...patch };
+  const now = Date.now();
+  if (!phaseChanged && now - lastProgressPush < 100) return;
+  lastProgressPush = now;
+  if (!progressWindow || progressWindow.isDestroyed()) return;
+  progressWindow.webContents.send("update:progress", progressState);
+  // Mirror onto the taskbar button (Windows; >1 renders as indeterminate).
+  const { phase, transferred, total } = progressState;
+  if (phase === "download" && total > 0) {
+    progressWindow.setProgressBar(Math.min(1, transferred / total));
+  } else if (phase === "restart") {
+    progressWindow.setProgressBar(1);
+  } else {
+    progressWindow.setProgressBar(2);
+  }
+}
+
+function closeProgressWindow() {
+  if (progressWindow && !progressWindow.isDestroyed()) progressWindow.close();
+  progressWindow = null;
+  progressState = null;
 }
 
 // Numeric semver-ish compare ("0.5.10" > "0.5.2"). Pre-release suffix ignored.
@@ -256,17 +353,36 @@ async function downloadAndInstallMac() {
   const tmpDir = path.join(os.tmpdir(), `prts-update-${Date.now()}`);
   try {
     fs.mkdirSync(tmpDir, { recursive: true });
-    notify("PRTS 正在更新", `正在下载 v${version}…`);
+    showProgressWindow(version);
 
     // 1) download — staged in temp, the installed app is untouched throughout.
+    //    Streamed (not buffered in one arrayBuffer) so the progress window can
+    //    show a live percentage / byte counter.
     const res = await net.fetch(releaseDownloadUrl(tag, zipName), {
       headers: UA,
       cache: "no-store"
     });
     if (!res.ok) throw new Error(`download HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
+    const total = Number(res.headers.get("content-length")) || 0;
+    let buf;
+    if (res.body) {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let transferred = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(Buffer.from(value));
+        transferred += value.byteLength;
+        pushProgress({ phase: "download", transferred, total });
+      }
+      buf = Buffer.concat(chunks);
+    } else {
+      buf = Buffer.from(await res.arrayBuffer());
+    }
 
     // 2) verify integrity before anything is installed.
+    pushProgress({ phase: "verify" });
     const got = crypto.createHash("sha512").update(buf).digest("base64");
     if (got !== sha512) throw new Error("sha512 mismatch — download corrupt");
 
@@ -274,6 +390,7 @@ async function downloadAndInstallMac() {
     fs.writeFileSync(zipPath, buf);
 
     // 3) extract with ditto (preserves the .app bundle's symlinks/attrs).
+    pushProgress({ phase: "install" });
     const stage = path.join(tmpDir, "extracted");
     fs.mkdirSync(stage, { recursive: true });
     await run("/usr/bin/ditto", ["-x", "-k", zipPath, stage]);
@@ -283,15 +400,23 @@ async function downloadAndInstallMac() {
     await run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", newApp]).catch(() => {});
 
     // 4) hand off to the detached swap script, then quit so it can replace us.
+    pushProgress({ phase: "restart" });
+    if (!progressWindow) {
+      // The Doctor closed the window mid-update — announce the relaunch so the
+      // app doesn't just vanish on him.
+      notify("PRTS 正在更新", `正在重启并安装 v${version}…`);
+    }
     const scriptPath = path.join(tmpDir, "prts-swap.sh");
     fs.writeFileSync(scriptPath, SWAP_SCRIPT, { mode: 0o755 });
     spawn("/bin/bash", [scriptPath, appPath, newApp, String(process.pid)], {
       detached: true,
       stdio: "ignore"
     }).unref();
-    setTimeout(() => app.quit(), 300);
+    // A beat longer than strictly needed so 「即将重启」 is readable.
+    setTimeout(() => app.quit(), 800);
   } catch (error) {
     installing = false;
+    closeProgressWindow();
     console.warn("updater: mac install failed", error);
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -358,9 +483,10 @@ async function checkViaApi(manual) {
 function startWindowsDownload() {
   if (!winUpdater || winDownloading) return;
   winDownloading = true;
-  notify("PRTS 正在更新", `正在下载 v${pending?.version || ""}…`);
+  showProgressWindow(pending?.version || "");
   winUpdater.downloadUpdate().catch((error) => {
     winDownloading = false;
+    closeProgressWindow();
     console.warn("updater: download failed", error);
     notify("下载更新失败", "可能是网络问题，点此打开下载页手动更新。", () =>
       shell.openExternal(RELEASES_PAGE)
@@ -418,12 +544,22 @@ function initWindows() {
       infoDialog(`当前 v${app.getVersion()} 已是最新版本。`);
     }
   });
+  winUpdater.on("download-progress", (progress) => {
+    pushProgress({
+      phase: "download",
+      transferred: progress?.transferred || 0,
+      total: progress?.total || 0
+    });
+  });
   winUpdater.on("update-downloaded", (info) => {
     winDownloading = false;
     pending = { version: info?.version || pending?.version || "", action: "install" };
     // The Doctor explicitly chose to download, so finish the job: install and
-    // relaunch right away.
-    notify("PRTS 更新已下载", `正在重启并安装 v${pending.version}…`);
+    // relaunch right away (the NSIS installer runs after quit).
+    pushProgress({ phase: "restart" });
+    if (!progressWindow) {
+      notify("PRTS 更新已下载", `正在重启并安装 v${pending.version}…`);
+    }
     setTimeout(() => {
       try {
         winUpdater.quitAndInstall(true, true);
@@ -433,6 +569,7 @@ function initWindows() {
     }, 800);
   });
   winUpdater.on("error", (error) => {
+    if (winDownloading) closeProgressWindow();
     winDownloading = false;
     console.warn("updater: electron-updater error", error);
     if (manualWinCheck) {

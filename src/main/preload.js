@@ -38,6 +38,11 @@ contextBridge.exposeInMainWorld("priestessApi", {
   closeSettings: () => ipcRenderer.invoke("priestess:close-settings")
 });
 
+contextBridge.exposeInMainWorld("updateApi", {
+  getState: () => ipcRenderer.invoke("update:get-state"),
+  onProgress: onChannel("update:progress")
+});
+
 contextBridge.exposeInMainWorld("chatApi", {
   send: (text) => ipcRenderer.invoke("chat:send", text),
   cancel: () => ipcRenderer.invoke("chat:cancel"),

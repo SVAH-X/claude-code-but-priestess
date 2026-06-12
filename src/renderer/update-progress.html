@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>PRTS 更新</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1d2733;
+        --fg-dim: #5a6a7a;
+        --bg: #e9edf2;
+        --bar-bg: #c6cfd9;
+        --accent: #2e7d5b;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #d7e3ec;
+          --fg-dim: #8aa0b2;
+          --bg: #11151a;
+          --bar-bg: #2c3944;
+          --accent: #3fa97c;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 16px 20px;
+        height: 100vh;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+        user-select: none;
+        -webkit-app-region: no-drag;
+      }
+      img.icon {
+        width: 56px;
+        height: 56px;
+        border-radius: 13px;
+        flex: none;
+      }
+      .info { flex: 1; min-width: 0; }
+      h1 {
+        font-size: 15px;
+        margin: 0 0 9px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .bar {
+        height: 6px;
+        border-radius: 3px;
+        background: var(--bar-bg);
+        overflow: hidden;
+      }
+      .bar-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 3px;
+        background: var(--accent);
+        transition: width 0.15s linear;
+      }
+      .bar.indeterminate .bar-fill {
+        width: 30%;
+        animation: slide 1.1s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% { margin-left: -30%; }
+        100% { margin-left: 100%; }
+      }
+      .status {
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--fg-dim);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    </style>
+  </head>
+  <body>
+    <img class="icon" src="../../assets/character/icon.png" alt="" />
+    <div class="info">
+      <h1 id="title">正在更新…</h1>
+      <div class="bar" id="bar"><div class="bar-fill" id="fill"></div></div>
+      <div class="status" id="status">正在准备…</div>
+    </div>
+    <script src="./update-progress.js"></script>
+  </body>
+</html>
