@@ -13,7 +13,6 @@ const composerInput = document.getElementById("composerInput");
 const sendBtn = document.getElementById("sendBtn");
 const cancelBtn = document.getElementById("cancelBtn");
 const clearBtn = document.getElementById("clearBtn");
-const minimizeBtn = document.getElementById("minimizeBtn");
 const closeBtn = document.getElementById("closeBtn");
 const cwdLine = document.getElementById("cwdLine");
 
@@ -66,7 +65,6 @@ const RENDERER_TEXT = {
     btn_clear_title: "清除对话",
     btn_stop: "停止回复",
     btn_stop_title: "停止回复",
-    btn_min_title: "收起窗口（她仍在托盘）",
     btn_close_title: "关闭窗口（不会退出，她仍在托盘）",
     preview_expand: "▼ 预览",
     preview_collapse: "▸ 预览",
@@ -96,7 +94,6 @@ const RENDERER_TEXT = {
     btn_clear_title: "Clear conversation",
     btn_stop: "Stop",
     btn_stop_title: "Stop replying",
-    btn_min_title: "Hide window (she stays in the tray)",
     btn_close_title: "Close window (doesn't quit — she stays in the tray)",
     preview_expand: "▼ Preview",
     preview_collapse: "▸ Preview",
@@ -128,7 +125,6 @@ function applyL10n() {
   clearBtn.title = t("btn_clear_title");
   cancelBtn.textContent = t("btn_stop");
   cancelBtn.title = t("btn_stop_title");
-  minimizeBtn.title = t("btn_min_title");
   closeBtn.title = t("btn_close_title");
   openInBrowserBtn.textContent = t("preview_open");
   openInBrowserBtn.title = t("preview_open_title");
@@ -1724,27 +1720,22 @@ composer.addEventListener("submit", async (event) => {
 
 cancelBtn.addEventListener("click", () => window.chatApi.cancel());
 
-// Both window controls hide the popover (collapsing to the desktop pet when
-// it's enabled) — the tray-companion convention where × never quits her. The
-// two buttons exist for muscle memory, not different behavior; a running
-// reply keeps streaming in the background either way.
-function hideChatWindow() {
+// The × hides the popover (collapsing to the desktop pet when it's enabled)
+// — the tray-companion convention where closing never quits her; a running
+// reply keeps streaming in the background.
+closeBtn.addEventListener("click", () => {
   window.petApi
     .hidePopover()
     .catch((error) => console.error("Failed to hide popover:", error));
-}
-minimizeBtn.addEventListener("click", hideChatWindow);
-closeBtn.addEventListener("click", hideChatWindow);
+});
 
 // Platform placement: macOS window controls belong on the LEFT of the title
-// bar in traffic-light order (close leftmost); Windows/Linux keep them on the
-// right (the static markup). The drag handler ignores button clicks, so the
-// moved buttons stay safe inside the drag region.
+// bar; Windows/Linux keep the × on the right (the static markup). The drag
+// handler ignores button clicks, so the moved button stays safe inside the
+// drag region.
 if (window.petApi?.isMac === true) {
-  const leftControls = document.createElement("div");
-  leftControls.className = "bar-window-controls-left";
-  leftControls.append(closeBtn, minimizeBtn);
-  dragHandle.prepend(leftControls);
+  closeBtn.classList.add("mac-left");
+  dragHandle.prepend(closeBtn);
 }
 
 clearBtn.addEventListener("click", () => {

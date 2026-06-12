@@ -197,8 +197,8 @@ button.ghost:disabled {
   cursor: not-allowed;
 }
 
-/* Window controls (hide / close-to-tray). Square so the glyphs sit centered;
-   a touch of extra gap separates them from the chat actions. */
+/* Close-to-tray window control. Square so the glyph sits centered; on the
+   right side a touch of extra gap separates it from the chat actions. */
 button.ghost.window-btn {
   width: 24px;
   padding: 3px 0;
@@ -207,27 +207,21 @@ button.ghost.window-btn {
   text-align: center;
 }
 
-#minimizeBtn {
+#closeBtn {
   margin-left: 6px;
 }
 
-/* On macOS the renderer moves × and − into this leading container (close
-   leftmost, like the traffic lights); Windows/Linux keep the markup order on
-   the right. The title grows so it hugs the controls instead of centering. */
+/* On macOS the renderer moves the × to the head of the bar, where window
+   controls live; Windows/Linux keep the markup position on the right. The
+   title grows so it hugs its neighbors instead of centering. */
 .bar-title {
   flex: 1;
   min-width: 0;
 }
 
-.bar-window-controls-left {
-  display: flex;
-  gap: 4px;
-  margin-right: 10px;
-  -webkit-app-region: no-drag;
-}
-
-.bar-window-controls-left #minimizeBtn {
+#closeBtn.mac-left {
   margin-left: 0;
+  margin-right: 10px;
 }
 
 /* ============================================================
