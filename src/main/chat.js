@@ -88,6 +88,15 @@ const DIRECTIVE_RE = /\[\[\s*(?:mood\s*[:：]\s*([^\]]*?)|skill\s*:\s*([a-z_]+)(
 // strip those without risking real prose, but once the reply is complete a
 // mood-shaped head is safe to consume (the final re-render cleans the UI).
 const LENIENT_MOOD_HEAD_RE = /^\s*[\[（(]{0,2}\s*mood\s*[:：]\s*([a-zA-Z]+)\s*[\]）)]{0,2}[,，.。:：\s]*/i;
+// Mid-reply she sometimes drops a bracket ("[[mood:sad] 再后来…"). The strict
+// matcher above needs "]]", so such a tag used to stall the partial-hold for
+// 240 chars and then leak verbatim with no face change. Treat "]" as closing
+// when the next char proves no second "]" is coming — mood ONLY, deliberately:
+// a mangled skill tag must never auto-execute. The stream variant requires a
+// following char (the tag at the buffer tail may still become "]]"); the
+// finalize variant also accepts end-of-text.
+const LENIENT_MOOD_STREAM_RE = /\[\[\s*mood\s*[:：]\s*([a-zA-Z]+)\s*\](?=[^\]])[ \t]?/gi;
+const LENIENT_MOOD_FINAL_RE = /\[\[\s*mood\s*[:：]\s*([a-zA-Z]+)\s*\](?!\])[ \t]?/gi;
 const DIRECTIVE_PREFIXES = ["[[mood:", "[[skill:", "[[observe:", "[[silent]]"];
 // Generous because [[observe:…]] carries a free-form sentence.
 const DIRECTIVE_PARTIAL_MAX = 240;
@@ -753,7 +762,12 @@ function couldStartDirective(tail) {
 // flashes on screen. Returns the text safe to display now.
 function consumeDirectives(text) {
   directiveTailBuffer += text;
-  const out = directiveTailBuffer.replace(DIRECTIVE_RE, handleDirective);
+  const out = directiveTailBuffer
+    .replace(DIRECTIVE_RE, handleDirective)
+    .replace(LENIENT_MOOD_STREAM_RE, (_m, mood) => {
+      emitMood(mood);
+      return "";
+    });
   const lastOpen = out.lastIndexOf("[[");
   if (lastOpen !== -1 && !out.slice(lastOpen).includes("]]")) {
     const tail = out.slice(lastOpen);
@@ -785,6 +799,10 @@ function stripDirectiveTags(text) {
   }
   return out
     .replace(DIRECTIVE_RE, handleDirective)
+    .replace(LENIENT_MOOD_FINAL_RE, (_m, mood) => {
+      emitMood(mood);
+      return "";
+    })
     .replace(/\[?\[\s*(?:mood|skill|observe|silent)\b[^\]]*$/i, "")
     .trim();
 }
