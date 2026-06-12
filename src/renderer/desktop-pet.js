@@ -18,7 +18,8 @@ const FRAME_FILES = {
   almostClosed: "快闭眼.png",
   closed: "闭眼.png",
   happy: "笑.png",
-  sleep: "睡觉.png"
+  sleep: "睡觉.png",
+  angry: "生气.png"
 };
 const BLINK_SEQUENCE = [
   ["halfClosed", 70],
@@ -193,12 +194,22 @@ async function applyOutfit(payload) {
 }
 
 function draw(now = performance.now()) {
-  const frame = frames[expression] || frames.idle;
+  // Being carried around: she protests with the angry face until released.
+  const carried = dragging && moved;
+  const frame = (carried ? frames.angry : frames[expression]) || frames.idle;
   if (!frame) return;
   const dt = Math.min(0.066, (now - lastTick) / 1000);
   lastTick = now;
   bobPhase += dt * 0.1 * Math.PI * 2;
-  if (now >= nextActionAt && now >= actionUntil) {
+  if (carried) {
+    // No scripted sway/bounce while she's held; reset so release lands on idle.
+    if (action !== "idle") {
+      action = "idle";
+      expression = "idle";
+    }
+    // Sulk grace period: no cheerful action right after being put down.
+    nextActionAt = Math.max(nextActionAt, now + 2500);
+  } else if (now >= nextActionAt && now >= actionUntil) {
     action = Math.random() < 0.55 ? "sway" : "bounce";
     actionUntil = now + 900 + Math.random() * 700;
     nextActionAt = actionUntil + 4500 + Math.random() * 6500;

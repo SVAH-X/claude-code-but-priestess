@@ -596,17 +596,6 @@ function fadeWindow(window, from, to, durationMs, onDone) {
   }, 16);
 }
 
-function desktopPetPositionFromPopover() {
-  if (!popover || popover.isDestroyed()) return initialDesktopPetPosition();
-  const bounds = popover.getBounds();
-  const size = desktopPetSize();
-  const stageHeight = Math.min(460, Math.max(180, Math.round(bounds.height * 0.34)));
-  return clampDesktopPetPosition({
-    x: bounds.x + Math.round((bounds.width - size.width) / 2),
-    y: bounds.y + 32 + stageHeight - size.height
-  });
-}
-
 function showDesktopPet() {
   if (!settings.get("desktopPet")) return;
   if (popover?.isVisible()) {
@@ -728,10 +717,11 @@ function collapsePopoverToDesktopPet() {
     createDesktopPet().showInactive();
     return;
   }
-  const position = desktopPetPositionFromPopover();
+  // She returns to where she stood before the chat opened (her saved spot) —
+  // closing the window must never relocate her to wherever the popover sat.
+  const position = initialDesktopPetPosition();
   const pet = createDesktopPet();
-  pet.setPosition(position.x, position.y, false);
-  settings.set({ desktopPetPosition: position });
+  pet.setBounds({ ...position, ...desktopPetSize() }, false);
   fadeWindow(popover, popover.getOpacity(), 0, 220, () => {
     popover.hide();
     popover.setOpacity(1);
