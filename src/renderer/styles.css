@@ -211,6 +211,25 @@ button.ghost.window-btn {
   margin-left: 6px;
 }
 
+/* On macOS the renderer moves × and − into this leading container (close
+   leftmost, like the traffic lights); Windows/Linux keep the markup order on
+   the right. The title grows so it hugs the controls instead of centering. */
+.bar-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.bar-window-controls-left {
+  display: flex;
+  gap: 4px;
+  margin-right: 10px;
+  -webkit-app-region: no-drag;
+}
+
+.bar-window-controls-left #minimizeBtn {
+  margin-left: 0;
+}
+
 /* ============================================================
    Character stage.
    ============================================================ */

@@ -1736,6 +1736,17 @@ function hideChatWindow() {
 minimizeBtn.addEventListener("click", hideChatWindow);
 closeBtn.addEventListener("click", hideChatWindow);
 
+// Platform placement: macOS window controls belong on the LEFT of the title
+// bar in traffic-light order (close leftmost); Windows/Linux keep them on the
+// right (the static markup). The drag handler ignores button clicks, so the
+// moved buttons stay safe inside the drag region.
+if (window.petApi?.isMac === true) {
+  const leftControls = document.createElement("div");
+  leftControls.className = "bar-window-controls-left";
+  leftControls.append(closeBtn, minimizeBtn);
+  dragHandle.prepend(leftControls);
+}
+
 clearBtn.addEventListener("click", () => {
   if (!confirm(t("clear_confirm"))) return;
   window.chatApi.clear();
