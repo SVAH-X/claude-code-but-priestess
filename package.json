@@ -23,7 +23,7 @@
     "codex"
   ],
   "author": "",
-  "license": "UNLICENSED",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "devDependencies": {
     "electron": "^42.3.3",
     "electron-builder": "^26.8.1"
