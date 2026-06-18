@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PRTS · 制作者名单</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1d2733;
+        --fg-dim: #5a6a7a;
+        --bg: #e9edf2;
+        --card: #ffffffb8;
+        --line: #c6cfd9;
+        --accent: #2e7d5b;
+        --accent-fg: #ffffff;
+        --chip: #ffffffcc;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #d7e3ec;
+          --fg-dim: #8aa0b2;
+          --bg: #11151a;
+          --card: #1a212b99;
+          --line: #2c3944;
+          --accent: #3fa97c;
+          --accent-fg: #0c1310;
+          --chip: #232c37cc;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 18px 20px 14px;
+        font: 13px/1.55 -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+        user-select: none;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      h1 { font-size: 15px; margin: 0 0 3px; }
+      p.intro { margin: 0 0 12px; color: var(--fg-dim); font-size: 12px; }
+      #list {
+        flex: 1;
+        overflow-y: auto;
+        margin: 0 -4px;
+        padding: 0 4px;
+      }
+      .person {
+        position: relative;
+        padding: 10px 12px 11px 14px;
+        margin-bottom: 9px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--card);
+      }
+      .person::before {
+        content: "";
+        position: absolute;
+        left: 0; top: 10px; bottom: 10px;
+        width: 3px;
+        border-radius: 3px;
+        background: var(--accent);
+        opacity: 0.7;
+      }
+      .person.artist::before { opacity: 1; }
+      .name { font-size: 13.5px; font-weight: 600; }
+      .role { color: var(--fg-dim); font-size: 12px; margin-top: 2px; }
+      .links { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px; }
+      .chip {
+        font-size: 11.5px;
+        padding: 3px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--chip);
+        color: var(--fg);
+        cursor: pointer;
+        user-select: none;
+      }
+      .chip:hover { border-color: var(--accent); color: var(--accent); }
+      .chip.static { cursor: default; color: var(--fg-dim); }
+      .chip.static:hover { border-color: var(--line); color: var(--fg-dim); }
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+      .footer .meta { font-size: 11px; color: var(--fg-dim); user-select: text; }
+      button.close {
+        padding: 7px 16px;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        background: var(--accent);
+        color: var(--accent-fg);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="title">制作者名单</h1>
+    <p class="intro" id="intro"></p>
+    <div id="list"></div>
+    <div class="footer">
+      <span class="meta" id="meta"></span>
+      <button type="button" class="close" id="closeBtn">关闭</button>
+    </div>
+    <script src="./credits.js"></script>
+  </body>
+</html>

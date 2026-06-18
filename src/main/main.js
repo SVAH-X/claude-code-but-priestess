@@ -72,6 +72,42 @@ let desktopPetPositionSaveTimer = null;
 let windowFadeTimer = null;
 let priestessSettingsWindow = null;
 let personaNotesWindow = null;
+let creditsWindow = null;
+
+// Contributors, ordered by first contribution. Roles are one concise line each
+// (a credits screen, not a changelog). The artist is listed last with her own
+// links; her 普猫猫 art ships with permission (see LICENSE).
+const CREDITS = [
+  {
+    name: "SVAH-X",
+    role: { zh: "作者 · 维护者 · 普瑞赛斯人格与剧情考据", en: "Author · maintainer · Priestess persona & lore" },
+    links: [{ label: "GitHub @SVAH-X", url: "https://github.com/SVAH-X" }]
+  },
+  {
+    name: "Leoluis0705",
+    role: { zh: "Windows 支持 · 桌宠模式", en: "Windows support · desktop pet mode" },
+    links: [{ label: "GitHub @Leoluis0705", url: "https://github.com/Leoluis0705" }]
+  },
+  {
+    name: "aklnaaw",
+    role: { zh: "界面多语言（中/英）· Linux / AUR 下游维护", en: "UI localization (zh/en) · Linux / AUR downstream" },
+    links: [{ label: "GitHub @aklnaaw", url: "https://github.com/aklnaaw" }]
+  },
+  {
+    name: "Karl-441",
+    role: { zh: "Windows 高分屏修复 · HTML 预览面板 · 更新器改进", en: "Windows hi-DPI fixes · HTML preview panel · updater improvements" },
+    links: [{ label: "GitHub @Karl-441", url: "https://github.com/Karl-441" }]
+  },
+  {
+    name: "-浅蓝笑",
+    role: { zh: "「普猫猫」彩蛋美术（经授权收录）", en: "“普猫猫” Easter-egg art (included with permission)" },
+    links: [
+      { label: "B站 @-浅蓝笑", url: "https://space.bilibili.com/3493287025445075" },
+      { label: "抖音 26916156149", url: null },
+      { label: "原作品视频 BV1ZKVY6sESy", url: "https://www.bilibili.com/video/BV1ZKVY6sESy" }
+    ]
+  }
+];
 // Ephemeral cat Easter egg state — not persisted, changes on each transition.
 // 1/17 ≈ 5.9% per transition; 17 references 相変臨界 (main_17), the chapter
 // where Priestess is the centre of the story.
@@ -125,6 +161,43 @@ function openPersonaNotesWindow() {
   });
   personaNotesWindow.on("closed", () => {
     personaNotesWindow = null;
+  });
+}
+
+// In-app contributors / credits list. Static content driven by the CREDITS
+// table above; links are opened through the main process (shell.openExternal)
+// because the window's webContents are hardened against navigation.
+function openCreditsWindow() {
+  if (creditsWindow && !creditsWindow.isDestroyed()) {
+    creditsWindow.show();
+    creditsWindow.focus();
+    return;
+  }
+  creditsWindow = new BrowserWindow({
+    width: 460,
+    height: 560,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    title: "PRTS · 制作者名单",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#11151a" : "#e9edf2",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  creditsWindow.setMenuBarVisibility?.(false);
+  hardenWebContents(creditsWindow.webContents);
+  creditsWindow.loadFile(path.join(__dirname, "..", "renderer", "credits.html"));
+  creditsWindow.once("ready-to-show", () => {
+    creditsWindow?.show();
+    creditsWindow?.focus();
+  });
+  creditsWindow.on("closed", () => {
+    creditsWindow = null;
   });
 }
 
@@ -890,6 +963,7 @@ const MENU_TEXT = {
     clearChatDirectory: "清除聊天工作目录",
     restartPriestess: "重启普瑞赛斯",
     revealDataFolder: "打开数据目录",
+    credits: "制作者名单…",
     checkUpdates: "检查更新…",
     downloadInstallUpdate: (version) => `下载并安装 v${version}…`,
     restartUpdate: (version) => `重启并更新（v${version}）`,
@@ -953,6 +1027,7 @@ const MENU_TEXT = {
     clearChatDirectory: "Clear chat directory",
     restartPriestess: "Restart Priestess",
     revealDataFolder: "Reveal data folder",
+    credits: "Contributors…",
     checkUpdates: "Check for updates…",
     downloadInstallUpdate: (version) => `Download and install v${version}…`,
     restartUpdate: (version) => `Restart to update (v${version})`,
@@ -1450,6 +1525,10 @@ function buildContextMenu() {
       label: mt("revealDataFolder"),
       click: () => shell.openPath(app.getPath("userData"))
     },
+    {
+      label: mt("credits"),
+      click: () => openCreditsWindow()
+    },
     ...buildUpdateMenuItems(),
     { type: "separator" },
     {
@@ -1880,6 +1959,18 @@ ipcMain.handle("persona-notes:set", (_, notes) => {
 });
 ipcMain.handle("persona-notes:close", () => {
   personaNotesWindow?.close();
+});
+
+ipcMain.handle("credits:get", () => ({
+  lang: menuLanguage(),
+  appVersion: app.getVersion(),
+  contributors: CREDITS
+}));
+ipcMain.handle("credits:open-link", (_, url) => {
+  if (typeof url === "string" && /^https:\/\//.test(url)) shell.openExternal(url);
+});
+ipcMain.handle("credits:close", () => {
+  creditsWindow?.close();
 });
 
 ipcMain.handle("popover:preview-open", (_, payload) => {
