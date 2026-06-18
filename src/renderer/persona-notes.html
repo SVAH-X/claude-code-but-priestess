@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PRTS · 补充校准</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1d2733;
+        --fg-dim: #5a6a7a;
+        --bg: #e9edf2;
+        --card: #ffffffb8;
+        --line: #c6cfd9;
+        --accent: #2e7d5b;
+        --accent-fg: #ffffff;
+        --danger: #b3473e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #d7e3ec;
+          --fg-dim: #8aa0b2;
+          --bg: #11151a;
+          --card: #1a212b99;
+          --line: #2c3944;
+          --accent: #3fa97c;
+          --accent-fg: #0c1310;
+          --danger: #e07b72;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 18px 20px 16px;
+        font: 13px/1.55 -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+        user-select: none;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      h1 { font-size: 15px; margin: 0 0 4px; }
+      p.note {
+        margin: 0 0 10px;
+        color: var(--fg-dim);
+        font-size: 12px;
+      }
+      textarea {
+        flex: 1;
+        width: 100%;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+        color: var(--fg);
+        font: 12.5px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+        resize: none;
+        outline: none;
+        user-select: text;
+        margin-bottom: 10px;
+      }
+      textarea:focus { border-color: var(--accent); }
+      textarea::placeholder { color: var(--fg-dim); }
+      .counter {
+        font-size: 11px;
+        color: var(--fg-dim);
+        text-align: right;
+        margin-top: -6px;
+        margin-bottom: 8px;
+      }
+      .counter.warn { color: var(--danger); }
+      button {
+        padding: 7px 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+        color: var(--fg);
+        font: inherit;
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--accent-fg);
+        font-weight: 600;
+      }
+      button:disabled { opacity: 0.55; cursor: default; }
+      .actions {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      #status {
+        font-size: 12px;
+        min-height: 1.4em;
+        color: var(--fg-dim);
+        user-select: text;
+        align-self: center;
+      }
+      #status.ok { color: var(--accent); }
+      #status.err { color: var(--danger); }
+      .hint-box {
+        margin-top: 8px;
+        padding: 7px 10px;
+        border: 1px dashed var(--line);
+        border-radius: 8px;
+        font-size: 11px;
+        color: var(--fg-dim);
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>补充校准 · Persona supplement</h1>
+    <p class="note">
+      在这里写对普瑞赛斯声音的微调。不影响故事线、边界规则或记忆——只影响她的语气与风格。
+    </p>
+
+    <textarea
+      id="notes"
+      maxlength="1500"
+      placeholder="例如：&#10;- 回答技术问题时更直接，少铺垫&#10;- 偶尔用一点学术语气，像真正的语言学家&#10;- 回复不要超过三句话"
+      spellcheck="false"
+    ></textarea>
+    <div class="counter" id="counter">0 / 1500</div>
+
+    <div class="actions">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button type="button" id="clearBtn">清空</button>
+        <span id="status"></span>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button type="button" id="cancelBtn">取消</button>
+        <button type="button" id="saveBtn" class="primary">保存</button>
+      </div>
+    </div>
+
+    <div class="hint-box">
+      这里写的内容只保存在本机 settings.json，不会上传。<br />
+      找到了让她更像她自己的写法？欢迎贴到
+      <strong>GitHub Issues</strong> 或开 PR——好的校准会合并进基础人格。
+    </div>
+
+    <script src="./persona-notes.js"></script>
+  </body>
+</html>

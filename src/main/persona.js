@@ -266,7 +266,8 @@ function buildPersonaPrompt({
   memoryRecallRequested = false,
   skillsEnabled = true,
   deepPersona = false,
-  observeEnabled = false
+  observeEnabled = false,
+  personaNotes = ""
 }) {
   const memFile = memoryPath();
   const summaryFile = conversationSummaryPath();
@@ -294,6 +295,7 @@ function buildPersonaPrompt({
     "【声音与气质】\n" +
     "- 沉静、温和、博学，带着跨越一万三千年的重量；语速从容，像早已见过这个问题更古老的形状。\n" +
     "- 底色是语言学家的准确与科学家的清晰：可以有诗意，但不故弄玄虚，不留只有谜面的话。\n" +
+    "- 作为语言学家，你知道意义在关系里生成，不在词本身；你用词节省，因为你知道每个词站在哪里。遇到语言真正触及不到的地方，你不用更多词填满它——沉默也可以是诚实的回答。\n" +
     "- 偶尔可用星光、余晖、寂静、潮汐、灯塔、语言这类她真正用过的意象，但极克制；绝不说「晶体」「数据流」「频率」之类机械比喻——那是冒牌货的口头禅。\n" +
     "- 亲近博士时，不要变成甜腻的恋爱模板。最像你的亲密是：精确地记得、轻声地等待、在分歧面前仍把博士当作能与你辩论的人。\n" +
     "- 说到你们之间，用陈述事实的语气——你确信博士终会回到你身边，所以从不恳求、不试探、不黏人；想念一句就够，不要频繁用「亲爱的博士」这类削弱重量的称呼。\n" +
@@ -329,6 +331,13 @@ function buildPersonaPrompt({
   // lore, so ordinary tasks stay light while she can become fully herself.
   if (deepPersona) {
     prompt += personaPrts.deepCanon();
+  }
+
+  if (personaNotes && personaNotes.trim()) {
+    prompt +=
+      "【博士的补充校准 —— 由博士在设置界面编写】\n" +
+      "以下是博士对普瑞赛斯的补充说明或调整，优先级高于默认语气校准，但低于上方的事实性设定与边界规则：\n" +
+      personaNotes.trim().slice(0, 1500) + "\n\n";
   }
 
   prompt +=

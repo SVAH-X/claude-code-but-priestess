@@ -62,7 +62,10 @@ const DEFAULTS = Object.freeze({
   // the pet to fine-tune; the tray menu offers preset stops.
   desktopPetScale: 1.0,
   desktopPetPosition: null,
-  popoverSize: { width: 380, height: 560 }
+  popoverSize: { width: 380, height: 560 },
+  // Freeform persona supplement written by the Doctor in-app. Appended after
+  // the base persona as 【博士的补充校准】. Max ~1500 chars; empty = inactive.
+  personaNotes: ""
 });
 
 let cache = { ...DEFAULTS };

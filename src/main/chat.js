@@ -1836,7 +1836,8 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     skillsEnabled: settings.get("skillsEnabled") !== false,
     deepPersona: shouldUseDeepPersona(trimmed),
     observeEnabled:
-      settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode)
+      settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
+    personaNotes: settings.get("personaNotes") || ""
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -1893,7 +1894,8 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
       skillsEnabled: settings.get("skillsEnabled") !== false,
       deepPersona: shouldUseDeepPersona(trimmed),
       observeEnabled:
-        settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode)
+        settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
+      personaNotes: settings.get("personaNotes") || ""
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
@@ -2099,7 +2101,8 @@ function launchPriestessTurn(trimmed) {
     includeLongMemory,
     memoryRecallRequested,
     skillsEnabled: settings.get("skillsEnabled") !== false,
-    deepPersona: shouldUseDeepPersona(trimmed)
+    deepPersona: shouldUseDeepPersona(trimmed),
+    personaNotes: settings.get("personaNotes") || ""
   });
 
   const finishCommon = () => {
