@@ -97,7 +97,15 @@ let winUpdater = null;
 // What the Doctor can act on. action: "install" (ready — Windows downloaded,
 // or macOS download+install), "download" (Windows: found, waiting for the
 // Doctor to start the download) or "page" (just open the downloads page).
-let pending = null; // { version, tag?, action, zipName?, sha512? }
+let pending = null; // { version, tag?, action, body?, zipName?, sha512? }
+
+// Trim long release bodies for dialog display (markdown is readable as-is).
+function formatReleaseBody(body) {
+  if (!body) return "";
+  const maxLen = 600;
+  if (body.length <= maxLen) return body;
+  return body.slice(0, maxLen) + "\n…\n（完整更新日志见下载页）";
+}
 let checking = false;
 let installing = false;
 // True while a tray-menu "Check for updates…" is in flight on Windows, so the
@@ -267,7 +275,8 @@ async function fetchLatestReleaseInfo() {
     return {
       tag: String(release.tag_name),
       version: String(release.tag_name).replace(/^v/i, ""),
-      prerelease: Boolean(release.prerelease)
+      prerelease: Boolean(release.prerelease),
+      body: String(release.body || "")
     };
   } catch (error) {
     console.warn("updater: releases API failed, falling back to latest page", error);
@@ -335,14 +344,17 @@ async function downloadAndInstallMac() {
     return;
   }
 
-  const { version, tag, zipName, sha512 } = pending;
+  const { version, tag, zipName, sha512, body } = pending;
+  const releaseNotes = formatReleaseBody(body);
+  const detail =
+    "点「下载并安装」后，普瑞赛斯会下载、校验并自动重启完成更新。\n" +
+    "你的对话、记忆与设置都不受影响（它们存放在别处，不在 app 内）。";
+  const fullDetail = releaseNotes ? `${detail}\n\n更新内容：\n${releaseNotes}` : detail;
   const choice = await dialog.showMessageBox({
     type: "info",
     title: "PRTS 更新",
     message: `发现新版本 v${version}`,
-    detail:
-      "点「下载并安装」后，普瑞赛斯会下载、校验并自动重启完成更新。\n" +
-      "你的对话、记忆与设置都不受影响（它们存放在别处，不在 app 内）。",
+    detail: fullDetail,
     buttons: ["稍后", "下载并安装"],
     defaultId: 1,
     cancelId: 0
@@ -440,22 +452,27 @@ async function checkViaApi(manual) {
     if (!version) throw new Error("no version info");
 
     if (isNewer(version, app.getVersion())) {
+      const releaseBody = release?.body || "";
       const canInstall =
         process.platform === "darwin" && app.isPackaged && info && info.zipName && info.sha512;
       pending = canInstall
-        ? { version, tag, action: "install", zipName: info.zipName, sha512: info.sha512 }
-        : { version, tag, action: "page" };
+        ? { version, tag, action: "install", body: releaseBody, zipName: info.zipName, sha512: info.sha512 }
+        : { version, tag, action: "page", body: releaseBody };
       if (manual) {
         // The Doctor explicitly asked — answer with the install dialog (or the
         // download page offer) directly instead of a droppable notification.
         if (canInstall) {
           await downloadAndInstallMac();
         } else {
+          const releaseNotes = formatReleaseBody(releaseBody);
+          const detail = releaseNotes
+            ? `这个安装方式不支持自动更新，请前往下载页手动更新。\n\n更新内容：\n${releaseNotes}`
+            : "这个安装方式不支持自动更新，请前往下载页手动更新。";
           const choice = await dialog.showMessageBox({
             type: "info",
             title: "PRTS 更新",
             message: `发现新版本 v${version}`,
-            detail: "这个安装方式不支持自动更新，请前往下载页手动更新。",
+            detail,
             buttons: ["稍后", "打开下载页"],
             defaultId: 1,
             cancelId: 0
@@ -494,14 +511,17 @@ function startWindowsDownload() {
   });
 }
 
-async function offerWindowsDownload(version) {
+async function offerWindowsDownload(version, body) {
+  const releaseNotes = formatReleaseBody(body);
+  const detail =
+    "点「下载并安装」开始下载，完成后会自动重启安装。\n" +
+    "也可以稍后从托盘菜单选择「下载并安装」。";
+  const fullDetail = releaseNotes ? `${detail}\n\n更新内容：\n${releaseNotes}` : detail;
   const choice = await dialog.showMessageBox({
     type: "info",
     title: "PRTS 更新",
     message: `发现新版本 v${version}`,
-    detail:
-      "点「下载并安装」开始下载，完成后会自动重启安装。\n" +
-      "也可以稍后从托盘菜单选择「下载并安装」。",
+    detail: fullDetail,
     buttons: ["稍后", "下载并安装"],
     defaultId: 1,
     cancelId: 0
@@ -524,17 +544,24 @@ function initWindows() {
   winUpdater.autoInstallOnAppQuit = true;
   // Stable channel by default; prereleases only for the opt-in developer flag.
   winUpdater.allowPrerelease = onPrereleaseChannel();
-  winUpdater.on("update-available", (info) => {
+  winUpdater.on("update-available", async (info) => {
     const version = info?.version || "";
-    pending = { version, action: "download" };
+    let body = "";
+    try {
+      const release = await fetchLatestReleaseInfo();
+      body = release?.body || "";
+    } catch {
+      /* keep body empty */
+    }
+    pending = { version, action: "download", body };
     if (manualWinCheck) {
       manualWinCheck = false;
-      offerWindowsDownload(version);
+      offerWindowsDownload(version, body);
     } else {
       notify(
         "PRTS 有新版本",
-        `v${version} 可用 — 点此下载并自动安装，或稍后从托盘菜单选择。`,
-        () => startWindowsDownload()
+        `v${version} 可用 — 点此查看更新内容。`,
+        () => offerWindowsDownload(version, body)
       );
     }
   });
@@ -553,7 +580,7 @@ function initWindows() {
   });
   winUpdater.on("update-downloaded", (info) => {
     winDownloading = false;
-    pending = { version: info?.version || pending?.version || "", action: "install" };
+    pending = { version: info?.version || pending?.version || "", action: "install", body: pending?.body || "" };
     // The Doctor explicitly chose to download, so finish the job: install and
     // relaunch right away (the NSIS installer runs after quit).
     pushProgress({ phase: "restart" });
@@ -617,7 +644,7 @@ function checkNow() {
 function installNow() {
   if (!pending) return;
   if (useElectronUpdater() && winUpdater) {
-    if (pending.action === "download") startWindowsDownload();
+    if (pending.action === "download") offerWindowsDownload(pending.version, pending.body);
     else winUpdater.quitAndInstall(true, true);
   } else if (process.platform === "darwin" && pending.action === "install") {
     downloadAndInstallMac();

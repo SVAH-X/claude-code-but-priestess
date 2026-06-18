@@ -5,3 +5,4 @@ dist/
 .claude/
 # Local archives (e.g. zipping the repo to move it to another machine).
 *.7z
+claude.md
