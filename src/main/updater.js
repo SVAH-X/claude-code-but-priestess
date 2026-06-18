@@ -102,9 +102,16 @@ let pending = null; // { version, tag?, action, body?, zipName?, sha512? }
 // Trim long release bodies for dialog display (markdown is readable as-is).
 function formatReleaseBody(body) {
   if (!body) return "";
+  let text = body
+    .replace(/^#{1,3}\s+/gm, "")      // ## 标题 → 标题
+    .replace(/\*\*(.+?)\*\*/g, "$1")  // 粗体 → 粗体
+    .replace(/\*(.+?)\*/g, "$1")      // 斜体 → 斜体
+    .replace(/^[-*]\s+/gm, "· ") // - 列表 → · 列表
+    .replace(/\n{3,}/g, "\n\n")       // 多余空行压缩
+    .trim();
   const maxLen = 600;
-  if (body.length <= maxLen) return body;
-  return body.slice(0, maxLen) + "\n…\n（完整更新日志见下载页）";
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen) + "\n…\n（完整更新日志见下载页）";
 }
 let checking = false;
 let installing = false;
