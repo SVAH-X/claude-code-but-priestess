@@ -23,7 +23,9 @@ contextBridge.exposeInMainWorld("petApi", {
   pickChatCwd: () => ipcRenderer.invoke("settings:pick-cwd"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   onOpened: onChannel("popover:opened"),
-  onSettings: onChannel("settings:state")
+  onSettings: onChannel("settings:state"),
+  getCatMode: () => ipcRenderer.invoke("desktop-pet:cat-mode-get"),
+  onCatMode: onChannel("desktop-pet:cat-mode")
 });
 
 contextBridge.exposeInMainWorld("previewApi", {

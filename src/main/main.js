@@ -72,6 +72,20 @@ let desktopPetPositionSaveTimer = null;
 let windowFadeTimer = null;
 let priestessSettingsWindow = null;
 let personaNotesWindow = null;
+// Ephemeral cat Easter egg state — not persisted, changes on each transition.
+// 1/17 ≈ 5.9% per transition; 17 references 相変臨界 (main_17), the chapter
+// where Priestess is the centre of the story.
+let currentCatMode = { cat: false, mood: "normal" };
+
+function maybeSendCatMode(petWindow) {
+  currentCatMode =
+    Math.random() < 0.0314
+      ? { cat: true, mood: Math.random() < 0.7 ? "normal" : "crying" }
+      : { cat: false, mood: "normal" };
+  if (petWindow && !petWindow.isDestroyed()) {
+    petWindow.webContents.send("desktop-pet:cat-mode", currentCatMode);
+  }
+}
 
 // ============================================================
 //  Built-in Priestess backend settings — a small local-only window. The
@@ -639,7 +653,9 @@ function showDesktopPet() {
     collapsePopoverToDesktopPet();
     return;
   }
-  createDesktopPet().showInactive();
+  const pet = createDesktopPet();
+  maybeSendCatMode(pet);
+  pet.showInactive();
 }
 
 function scheduleDesktopPet() {
@@ -714,6 +730,13 @@ function openChatFromDesktopPet() {
     console.warn("main: failed to anchor popover to desktop pet", error);
   }
   showPopover();
+  const chatCat =
+    Math.random() < 0.0314
+      ? { cat: true, mood: Math.random() < 0.7 ? "normal" : "crying" }
+      : { cat: false, mood: "normal" };
+  if (popover && !popover.isDestroyed()) {
+    popover.webContents.send("desktop-pet:cat-mode", chatCat);
+  }
   return { ok: true };
 }
 
@@ -751,7 +774,9 @@ function collapsePopoverToDesktopPet() {
     return;
   }
   if (!popover || popover.isDestroyed() || !popover.isVisible()) {
-    createDesktopPet().showInactive();
+    const pet = createDesktopPet();
+    maybeSendCatMode(pet);
+    pet.showInactive();
     return;
   }
   // She returns to where she stood before the chat opened (her saved spot) —
@@ -762,6 +787,7 @@ function collapsePopoverToDesktopPet() {
   fadeWindow(popover, popover.getOpacity(), 0, 220, () => {
     popover.hide();
     popover.setOpacity(1);
+    maybeSendCatMode(pet);
     pet.showInactive();
   });
 }
@@ -1845,6 +1871,8 @@ ipcMain.handle("priestess:test-connection", (_, cfg) =>
 ipcMain.handle("priestess:close-settings", () => {
   priestessSettingsWindow?.close();
 });
+
+ipcMain.handle("desktop-pet:cat-mode-get", () => currentCatMode);
 
 ipcMain.handle("persona-notes:get", () => settings.get("personaNotes") || "");
 ipcMain.handle("persona-notes:set", (_, notes) => {

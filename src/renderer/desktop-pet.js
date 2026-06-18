@@ -3,6 +3,7 @@ const ctx = canvas.getContext("2d");
 // Outfit folders mirror the popover renderer: "formal" = assets/character
 // root (default), "casual" = assets/character/casual.
 const CHARACTER_DIR = new URL("../../assets/character/", window.location.href);
+const CAT_DIR = new URL("../../assets/character/普猫猫/", window.location.href);
 
 function assetDirFor(outfit) {
   return outfit === "casual" ? new URL("casual/", CHARACTER_DIR) : CHARACTER_DIR;
@@ -21,6 +22,10 @@ const FRAME_FILES = {
   sleep: "睡觉.png",
   angry: "生气.png"
 };
+const CAT_FRAME_FILES = {
+  normal: "普猫猫.png",
+  crying: "普猫猫哭.png"
+};
 const BLINK_SEQUENCE = [
   ["halfClosed", 70],
   ["almostClosed", 60],
@@ -29,6 +34,9 @@ const BLINK_SEQUENCE = [
 ];
 
 let frames = {};
+let catFrames = {};
+let catMode = false;
+let catMood = "normal";
 let expression = "idle";
 let bobPhase = Math.random() * Math.PI * 2;
 let lastTick = performance.now();
@@ -180,6 +188,18 @@ async function loadFrames(outfit) {
   return Object.fromEntries(entries);
 }
 
+async function loadCatFrames() {
+  const entries = await Promise.all(
+    Object.entries(CAT_FRAME_FILES).map(async ([name, file]) => [name, await loadFrame(file, CAT_DIR)])
+  );
+  catFrames = Object.fromEntries(entries);
+}
+
+function applyCatMode(payload) {
+  catMode = !!payload?.cat;
+  catMood = payload?.mood || "normal";
+}
+
 let loadedOutfit = null;
 let outfitLoadToken = 0;
 
@@ -196,7 +216,9 @@ async function applyOutfit(payload) {
 function draw(now = performance.now()) {
   // Being carried around: she protests with the angry face until released.
   const carried = dragging && moved;
-  const frame = (carried ? frames.angry : frames[expression]) || frames.idle;
+  const frame = catMode
+    ? catFrames[catMood] || catFrames.normal
+    : (carried ? frames.angry : frames[expression]) || frames.idle;
   if (!frame) return;
   const dt = Math.min(0.066, (now - lastTick) / 1000);
   lastTick = now;
@@ -328,11 +350,16 @@ window.petApi?.onSettings?.((payload) => {
   applyOutfit(payload).catch((error) => console.error("Failed to switch outfit:", error));
 });
 
-(window.petApi?.getSettings?.() ?? Promise.resolve(null))
-  .catch(() => null)
-  .then((payload) => applyOutfit(payload))
-  .then(() => {
-    scheduleBlink();
-    requestAnimationFrame(draw);
-  })
-  .catch((error) => console.error("Failed to load frames:", error));
+window.petApi?.onCatMode?.(applyCatMode);
+
+Promise.all([
+  (window.petApi?.getSettings?.() ?? Promise.resolve(null)).catch(() => null),
+  (window.petApi?.getCatMode?.() ?? Promise.resolve(null)).catch(() => null),
+  loadCatFrames().catch(console.error)
+]).then(([settingsPayload, catPayload]) => {
+  applyCatMode(catPayload);
+  return applyOutfit(settingsPayload);
+}).then(() => {
+  scheduleBlink();
+  requestAnimationFrame(draw);
+}).catch((error) => console.error("Failed to load frames:", error));

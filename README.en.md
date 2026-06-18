@@ -445,8 +445,38 @@ formal art, re-bake with
 enclosed near-white regions — never bulk-remove white; see the note in
 `scripts/flatten-hole-seeds.json`).
 
+## Credits
+
+Priestess's "**普猫猫**" (Cat Priestess) Easter-egg art is an original
+illustration by **-浅蓝笑**, included in this app with the artist's permission.
+It's a low-probability Easter egg — every time the chat window and the desktop
+pet swap, she has a chance of turning into this cat (two states: 普猫猫 and the
+teary 普猫猫哭).
+
+<p align="center">
+  <img src="assets/character/普猫猫/普猫猫.png" alt="普猫猫 by -浅蓝笑" width="170">
+  &nbsp;&nbsp;&nbsp;
+  <img src="assets/character/普猫猫/普猫猫哭.png" alt="普猫猫哭 by -浅蓝笑" width="170">
+</p>
+
+Out of respect for the original artist, the app ships only these two original
+images (normal and teary) and **never** feeds them to any AI model to generate
+other expressions or poses; any future cat states would only use new artwork
+drawn by the illustrator.
+
+- Artist: **[Bilibili @-浅蓝笑](https://space.bilibili.com/3493287025445075)**
+- Douyin: `26916156149` (search inside Douyin; profile shown below)
+- Original video: [bilibili · BV1ZKVY6sESy](https://www.bilibili.com/video/BV1ZKVY6sESy)
+
+<p align="center">
+  <img src="docs/credits/douyin-qianlanxiao.jpg" alt="Artist Douyin profile · -浅蓝笑 (Douyin 26916156149)" width="300">
+</p>
+
+> If you like the cat, go give the artist a follow.
+
 ## Notes
 
-This repository does not bundle third-party copyrighted artwork. Use the
-character art only in line with the rights holder's terms and the artist's
-permission.
+Apart from the "普猫猫" illustration credited above and included with the
+artist's permission, this repository does not bundle other third-party
+copyrighted artwork. Use the character art only in line with the rights
+holder's terms and the artist's permission.

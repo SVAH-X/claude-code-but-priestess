@@ -138,6 +138,7 @@ function applyL10n() {
 // coat, assets/character root — default) and "casual" (休闲, the white
 // butterfly dress, assets/character/casual). The tray menu switches them.
 const CHARACTER_DIR = new URL("../../assets/character/", window.location.href);
+const CAT_DIR = new URL("../../assets/character/普猫猫/", window.location.href);
 
 function assetDirFor(outfit) {
   return outfit === "casual" ? new URL("casual/", CHARACTER_DIR) : CHARACTER_DIR;
@@ -191,6 +192,15 @@ const MOOD_FRAME = {
   threat: "threat",
   sleep: "sleep"
 };
+
+const CAT_FRAME_FILES = {
+  normal: "普猫猫.png",
+  crying: "普猫猫哭.png"
+};
+
+let catMode = false;
+let catMood = "normal";
+let catFrames = {};
 
 const state = {
   mood: "idle",
@@ -423,6 +433,22 @@ async function loadAllFrames(outfit) {
   return loaded;
 }
 
+async function loadAllCatFrames() {
+  const entries = await Promise.all(
+    Object.entries(CAT_FRAME_FILES).map(async ([name, file]) => {
+      const { canvas } = await loadFrame(file, CAT_DIR);
+      return [name, canvas];
+    })
+  );
+  catFrames = Object.fromEntries(entries);
+}
+
+function applyCatMode(payload) {
+  catMode = !!payload?.cat;
+  catMood = payload?.mood || "normal";
+  drawCharacter();
+}
+
 // Swap her wardrobe. Loads are token-guarded so a rapid double-switch can't
 // install stale frames; the swap itself is a single atomic assignment, safe
 // mid-blink and mid-drag.
@@ -486,7 +512,9 @@ function renderExpression(name) {
 // Draw the current frame bottom-anchored, with the live animation scale/offset
 // baked into the draw. Clears the whole canvas first, so nothing can linger.
 function drawCharacter() {
-  const frame = frames[state.expression];
+  const frame = catMode
+    ? (catFrames[catMood] || catFrames.normal)
+    : frames[state.expression];
   if (!frame) return;
   const rect = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, rect.width, rect.height);
@@ -1883,6 +1911,7 @@ window.chatApi.onQueue?.(({ length }) => {
 });
 
 window.petApi?.onSettings?.(renderSettings);
+window.petApi?.onCatMode?.(applyCatMode);
 
 // ============================================================
 //  Popover-open hook: refocus composer + reset idle timers
@@ -1982,25 +2011,24 @@ if (typeof ResizeObserver !== "undefined") {
 
 // Settings decide which outfit to load, so fetch them before the first frame
 // load; if they can't be fetched, fall back to the formal default.
-(window.petApi?.getSettings?.() ?? Promise.resolve(null))
-  .catch(() => null)
-  .then((payload) => {
-    if (payload) {
-      lastSettingsPayload = payload;
-      applyL10n();
-      refreshComposerMeta();
-    }
-    return applyOutfit(outfitFrom(payload));
-  })
-  .then(() => {
-    resizeCanvas();
-    setBaseMood("idle");
-    resetInactivityTimers();
-    requestAnimationFrame(tick);
-  })
-  .catch((error) => {
-    console.error("Failed to load frames:", error);
-    showBubble(t("sprite_load_failed"), 6000);
-  });
+Promise.all([
+  (window.petApi?.getSettings?.() ?? Promise.resolve(null)).catch(() => null),
+  loadAllCatFrames().catch(console.error)
+]).then(([payload]) => {
+  if (payload) {
+    lastSettingsPayload = payload;
+    applyL10n();
+    refreshComposerMeta();
+  }
+  return applyOutfit(outfitFrom(payload));
+}).then(() => {
+  resizeCanvas();
+  setBaseMood("idle");
+  resetInactivityTimers();
+  requestAnimationFrame(tick);
+}).catch((error) => {
+  console.error("Failed to load frames:", error);
+  showBubble(t("sprite_load_failed"), 6000);
+});
 
 window.chatApi.getHistory().then(renderHistory);

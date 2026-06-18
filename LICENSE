@@ -16,6 +16,53 @@ fan-use fair-use principles and may not be redistributed for commercial purposes
 
 ---
 
+COMMUNITY ARTWORK NOTICE — 普猫猫 (Cat Priestess)
+
+The "普猫猫" Easter-egg illustrations bundled in this repository
+(assets/character/普猫猫/普猫猫.png and assets/character/普猫猫/普猫猫哭.png) are
+original artwork by the illustrator -浅蓝笑
+(Bilibili: https://space.bilibili.com/3493287025445075), included here with the
+illustrator's permission.
+
+Out of respect for the original artist, these two images are the ONLY 普猫猫
+assets this project will ever ship. They are used exactly as delivered and are
+never fed to any generative or AI model to synthesize additional expressions,
+poses, or variants. Any future cat states would require new artwork drawn by the
+illustrator.
+
+The illustrator's permission covers inclusion in this noncommercial project
+only. It transfers no rights in the underlying character, which remains
+Hypergryph's intellectual property (see above).
+
+---
+
+DISTRIBUTION, ATTRIBUTION & COMMERCIAL USE
+
+Noncommercial use is permitted under the PolyForm Noncommercial License below.
+In addition:
+
+1. Any redistribution or derivative work — including noncommercial ones — must
+   carry attribution to the project's contributors and a link to the project
+   page (https://github.com/SVAH-X/claude-code-but-priestess).
+
+2. Commercial use is not granted by this license. Because the depicted character
+   is Hypergryph's property, the licensor does not endorse any commercial use
+   that includes Priestess's likeness. Specifically:
+
+   a. Commercial use that includes Priestess's image — which includes the
+      illustrator's 普猫猫 artwork — requires the consent of ALL project
+      contributors AND the illustrator -浅蓝笑. In practice this cannot be
+      granted: the character is Hypergryph's IP, and the licensor will not
+      authorize infringement.
+
+   b. Commercial use of only the AI-agent framework (the code) — with
+      Priestess's image and the 普猫猫 artwork removed and replaced by other,
+      properly licensed character art — is unrelated to the illustrator, but
+      still requires contacting and obtaining the consent of all code
+      contributors.
+
+---
+
 POLYFORM NONCOMMERCIAL LICENSE 1.0.0
 
 Acceptance
