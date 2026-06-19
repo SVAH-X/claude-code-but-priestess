@@ -96,7 +96,10 @@ const CREDITS = [
   {
     name: "Karl_Higmut",
     role: { zh: "HTML 预览面板 · 更新器改进", en: "HTML preview panel · updater improvements" },
-    links: [{ label: "GitHub @Karl-441", url: "https://github.com/Karl-441" }]
+    links: [
+      { label: "GitHub @Karl-441", url: "https://github.com/Karl-441" },
+      { label: "牢普，可爱，喜欢！", url: null }
+    ],
   },
   {
     name: "-浅蓝笑",
