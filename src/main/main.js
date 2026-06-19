@@ -90,8 +90,11 @@ const CREDITS = [
   },
   {
     name: "aklnaaw",
-    role: { zh: "界面多语言（中/英）· Linux / AUR 下游维护", en: "UI localization (zh/en) · Linux / AUR downstream" },
-    links: [{ label: "GitHub @aklnaaw", url: "https://github.com/aklnaaw" }]
+    role: { zh: "Linux 适配 · 相关包维护", en: "Linux support · package maintenance" },
+    links: [
+      { label: "GitHub @aklnaaw", url: "https://github.com/aklnaaw" },
+      { label: "B站 @阿卡莲娜-official", url: "https://space.bilibili.com/1179951835" }
+    ]
   },
   {
     name: "Karl_Higmut",
