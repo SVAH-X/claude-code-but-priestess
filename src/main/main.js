@@ -69,6 +69,13 @@ let moveEndFallbackTimer = null;
 let desktopPet;
 let desktopPetTimer = null;
 let desktopPetPositionSaveTimer = null;
+// Transient scale during active scroll-resizing. While set, it overrides the
+// persisted setting so resizing never has to round-trip through a synchronous
+// settings disk write; the final value is persisted once, debounced, after the
+// scroll settles.
+let liveDesktopPetScale = null;
+let desktopPetScalePersistTimer = null;
+let pendingDesktopPetScalePosition = null;
 let windowFadeTimer = null;
 let priestessSettingsWindow = null;
 let personaNotesWindow = null;
@@ -630,6 +637,7 @@ function defaultDesktopPetPosition(display = screen.getPrimaryDisplay()) {
 }
 
 function desktopPetScale() {
+  if (liveDesktopPetScale != null) return liveDesktopPetScale;
   const raw = Number(settings.get("desktopPetScale"));
   if (!Number.isFinite(raw)) return 1.0;
   return Math.min(DESKTOP_PET_SCALE_MAX, Math.max(DESKTOP_PET_SCALE_MIN, raw));
@@ -761,20 +769,33 @@ function setDesktopPetScale(scale) {
   const next = Math.min(DESKTOP_PET_SCALE_MAX, Math.max(DESKTOP_PET_SCALE_MIN, Number(scale) || 1));
   // Keep her feet planted: resize anchored at the bottom-center.
   const old = desktopPetSize();
-  settings.set({ desktopPetScale: next });
-  if (!desktopPet || desktopPet.isDestroyed()) return;
-  const bounds = desktopPet.getBounds();
-  const size = desktopPetSize();
-  const position = clampDesktopPetPosition({
-    x: bounds.x + Math.round((old.width - size.width) / 2),
-    y: bounds.y + (old.height - size.height)
-  });
-  desktopPet.setBounds({ ...position, ...size }, false);
-  settings.set({ desktopPetPosition: position });
+  // Apply immediately via the transient scale; desktopPetSize() reads it so the
+  // window resizes this frame without touching disk.
+  liveDesktopPetScale = next;
+  if (desktopPet && !desktopPet.isDestroyed()) {
+    const bounds = desktopPet.getBounds();
+    const size = desktopPetSize();
+    const position = clampDesktopPetPosition({
+      x: bounds.x + Math.round((old.width - size.width) / 2),
+      y: bounds.y + (old.height - size.height)
+    });
+    desktopPet.setBounds({ ...position, ...size }, false);
+    pendingDesktopPetScalePosition = position;
+  }
+  // Persist once, ~250ms after the last change — a single combined disk write
+  // instead of two per scroll tick, which is what made resizing feel choppy.
+  clearTimeout(desktopPetScalePersistTimer);
+  desktopPetScalePersistTimer = setTimeout(() => {
+    desktopPetScalePersistTimer = null;
+    const patch = { desktopPetScale: liveDesktopPetScale };
+    if (pendingDesktopPetScalePosition) patch.desktopPetPosition = pendingDesktopPetScalePosition;
+    pendingDesktopPetScalePosition = null;
+    settings.set(patch);
+  }, 250);
 }
 
-// Scroll over the pet: factor > 1 grows, < 1 shrinks. Persisted via
-// setDesktopPetScale's settings writes (already debounced by tininess).
+// Scroll over the pet: factor > 1 grows, < 1 shrinks. Resizes live; the scale
+// is persisted on a debounce by setDesktopPetScale.
 function scaleDesktopPetBy(factor) {
   const f = Number(factor);
   if (!Number.isFinite(f) || f <= 0) return desktopPetScale();

@@ -321,17 +321,41 @@ canvas.addEventListener("pointercancel", () => {
 });
 
 // Scroll over the pet to scale her freely (the tray presets remain as quick
-// stops). Lightly throttled so trackpad momentum doesn't flood the IPC.
-let lastScaleAt = 0;
+// stops). For silky resizing we DON'T throttle or step by a fixed factor:
+// instead we accumulate the wheel delta and flush it once per animation frame
+// as a single proportional (exponential) zoom. Coalescing per frame caps the
+// IPC/resize rate at the display refresh while still reacting to scroll speed,
+// and the main process persists the result only after scrolling settles.
+const WHEEL_SENSITIVITY = 0.0011; // ~10% per mouse notch; trackpad stays smooth
+let pendingWheelDelta = 0;
+let wheelFlushScheduled = false;
+
+function normalizedWheelDelta(event) {
+  // deltaMode: 0 = pixels (trackpad / most mice), 1 = lines, 2 = pages.
+  if (event.deltaMode === 1) return event.deltaY * 16;
+  if (event.deltaMode === 2) return event.deltaY * 400;
+  return event.deltaY;
+}
+
+function flushWheelScale() {
+  wheelFlushScheduled = false;
+  const delta = pendingWheelDelta;
+  pendingWheelDelta = 0;
+  if (!delta) return;
+  // Up (negative delta) grows, down shrinks; exponential keeps it multiplicative
+  // and symmetric, so a given scroll feels the same at any current size.
+  const factor = Math.exp(-delta * WHEEL_SENSITIVITY);
+  window.petApi?.scaleDesktopPet?.(factor)?.catch?.(() => {});
+}
+
 window.addEventListener(
   "wheel",
   (event) => {
     event.preventDefault();
-    const now = performance.now();
-    if (now - lastScaleAt < 30) return;
-    lastScaleAt = now;
-    const factor = event.deltaY < 0 ? 1.05 : 1 / 1.05;
-    window.petApi?.scaleDesktopPet?.(factor)?.catch?.(() => {});
+    pendingWheelDelta += normalizedWheelDelta(event);
+    if (wheelFlushScheduled) return;
+    wheelFlushScheduled = true;
+    requestAnimationFrame(flushWheelScale);
   },
   { passive: false }
 );
