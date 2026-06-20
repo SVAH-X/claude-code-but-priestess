@@ -81,7 +81,10 @@ const CREDITS = [
   {
     name: "SVAH-X",
     role: { zh: "作者 · 维护者 · 普瑞赛斯人格与剧情考据", en: "Author · maintainer · Priestess persona & lore" },
-    links: [{ label: "GitHub @SVAH-X", url: "https://github.com/SVAH-X" }]
+    links: [
+      { label: "GitHub @SVAH-X", url: "https://github.com/SVAH-X" },
+      { label: "B站 @SVAH-X", url: "https://space.bilibili.com/279608882" }
+    ]
   },
   {
     name: "Leoluis0705",
