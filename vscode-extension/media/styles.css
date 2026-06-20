@@ -1,0 +1,895 @@
+:root {
+  /* Let macOS pick the matching native widget appearance so scrollbars,
+     form controls, etc. flip with system theme. */
+  color-scheme: light dark;
+  /* Surface alphas kept low so the macOS popover vibrancy ("liquid glass")
+     reads through. The actual frosted-glass is provided by the window
+     material; CSS only adds subtle tinting and definition. */
+  --bg: transparent;
+  --bar-bg: rgba(0, 0, 0, 0.10);
+  --stage-bg: rgba(0, 0, 0, 0.04);
+  --chat-bg: rgba(0, 0, 0, 0.02);
+  /* Composer wrapper kept at the same tone as the chat stream so the typing
+     area visually continues the conversation surface instead of dropping
+     into a dark trough. The input field itself uses a lighter overlay so
+     it still reads as an editable target against the wrapper. */
+  --composer-bg: rgba(0, 0, 0, 0.02);
+  --panel: rgba(255, 255, 255, 0.16);
+  --panel-2: rgba(255, 255, 255, 0.24);
+  --border: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.22);
+  /* Her color — cyan / terminal teal. */
+  --her: #7bdff2;
+  --her-soft: rgba(123, 223, 242, 0.20);
+  --her-edge: rgba(123, 223, 242, 0.42);
+  --user-bg: rgba(255, 255, 255, 0.10);
+  --user-edge: rgba(255, 255, 255, 0.18);
+  /* Light-mode defaults: dark green on a light surface (macOS light vibrancy,
+     or the light opaque fill on Windows/Linux — see popoverBackgroundColor in
+     main.js). prefers-color-scheme is driven by nativeTheme.themeSource, so
+     this palette tracks the system theme or the user's Appearance choice on
+     every platform. */
+  --text: #1a5d2e;
+  --text-on-her: #103d1d;
+  --muted: #2f6a44;
+  --warn: #ffd166;
+  --danger: #ff8b7a;
+  --stage-min-h: 180px;
+  --stage-target-h: 34vh;
+  --stage-max-h: 460px;
+  /* Dual halo (light glow + dark drop) keeps the character outline visible
+     whether the desktop bleeding through the vibrancy is light or dark. */
+  --text-halo: 0 0 2px rgba(255, 255, 255, 0.55), 0 1px 1px rgba(0, 0, 0, 0.28);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Dark appearance — the popover background becomes dark (macOS vibrancy, or
+   the dark opaque fill on Windows/Linux), so the green text above turns
+   invisible. Switch to PRTS' dark-theme palette: a pale mint that stays
+   readable on the dark surface and still echoes Priestess's teal accent. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #d8f6e4;
+    --text-on-her: #eafff5;
+    --muted: #8fc7a4;
+    --text-halo: 0 0 2px rgba(0, 0, 0, 0.60), 0 1px 1px rgba(0, 0, 0, 0.40);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+  border-radius: 12px;
+  /* Make text legible over any desktop content showing through the glass.
+     The dual-halo variable carries both a light glow and a dark drop so
+     letters stay outlined against a busy / unpredictable backdrop. */
+  text-shadow: var(--text-halo);
+}
+
+/* While actively resizing, block text selection so a drag that slips onto the
+   chat surface doesn't highlight text. The per-handle cursor stays in effect
+   via pointer capture. */
+body.is-window-resizing,
+body.is-window-resizing * {
+  user-select: none !important;
+}
+
+button {
+  font: inherit;
+}
+
+/* ============================================================
+   Top bar — drag region + clear/stop actions + agent badge.
+   ============================================================ */
+.bar {
+  height: 32px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px 0 14px;
+  /* Manual window drag (see renderer.js) rather than -webkit-app-region: drag,
+     so she can smile while the window is carried. */
+  -webkit-app-region: no-drag;
+  cursor: grab;
+  border-bottom: 1px solid var(--border);
+  background: var(--bar-bg);
+}
+
+body.is-window-moving,
+body.is-window-moving * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.bar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.bar-title .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--her);
+  box-shadow: 0 0 8px rgba(123, 223, 242, 0.6);
+}
+
+.agent-badge,
+.provider-badge {
+  -webkit-app-region: no-drag;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.provider-badge {
+  color: var(--her);
+  background: rgba(123, 223, 242, 0.14);
+  border: 1px solid rgba(123, 223, 242, 0.34);
+}
+
+.agent-badge {
+  color: var(--warn);
+  background: rgba(255, 209, 102, 0.16);
+  border: 1px solid rgba(255, 209, 102, 0.4);
+}
+
+/* Tiny version tag beside the title — informational, deliberately quiet. */
+.version-badge {
+  -webkit-app-region: no-drag;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+.agent-badge[hidden] {
+  display: none;
+}
+
+.bar-actions {
+  display: flex;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+}
+
+button.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+button.ghost:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+button.ghost:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Close-to-tray window control. Square so the glyph sits centered; on the
+   right side a touch of extra gap separates it from the chat actions. */
+button.ghost.window-btn {
+  width: 24px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.1;
+  text-align: center;
+}
+
+#closeBtn {
+  margin-left: 6px;
+}
+
+/* On macOS the renderer moves the × to the head of the bar, where window
+   controls live; Windows/Linux keep the markup position on the right. The
+   title grows so it hugs its neighbors instead of centering. */
+.bar-title {
+  flex: 1;
+  min-width: 0;
+}
+
+#closeBtn.mac-left {
+  margin-left: 0;
+  margin-right: 10px;
+}
+
+/* ============================================================
+   Character stage.
+   ============================================================ */
+.stage {
+  position: relative;
+  height: clamp(var(--stage-min-h), var(--stage-target-h), var(--stage-max-h));
+  min-height: var(--stage-min-h);
+  flex: 0 0 clamp(var(--stage-min-h), var(--stage-target-h), var(--stage-max-h));
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  background: var(--stage-bg);
+  /* Own compositing layer so the overflow clip repaints cleanly while the
+     canvas inside is transform-animated every frame — without this, macOS
+     WebKit leaves an un-cleared sliver of the previous paint (e.g. a ghost of
+     her feet) at the clip boundary. */
+  transform: translateZ(0);
+  isolation: isolate;
+}
+
+.stage.is-dragging,
+.stage.is-carrying {
+  cursor: grabbing;
+}
+
+.stage.is-dragging #petCanvas,
+.stage.is-carrying #petCanvas {
+  /* No CSS transitions while dragging — the JS rAF loop owns the transform
+     and any easing here would fight it. */
+  transition: none;
+}
+
+#petCanvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+  will-change: transform, filter;
+  transform-origin: center bottom;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  filter: drop-shadow(0 8px 10px rgba(0, 0, 0, 0.45));
+  transition: filter 240ms ease;
+}
+
+.stage[data-mood="happy"] #petCanvas {
+  filter: drop-shadow(0 8px 10px rgba(0, 0, 0, 0.45))
+          drop-shadow(0 0 10px rgba(255, 220, 140, 0.25));
+}
+
+.stage[data-mood="cry"] #petCanvas {
+  filter: drop-shadow(0 8px 10px rgba(0, 0, 0, 0.45))
+          drop-shadow(0 0 10px rgba(120, 180, 255, 0.3));
+}
+
+.stage[data-mood="angry"] #petCanvas,
+.stage[data-mood="threat"] #petCanvas {
+  filter: drop-shadow(0 8px 10px rgba(0, 0, 0, 0.45))
+          drop-shadow(0 0 10px rgba(255, 110, 100, 0.35));
+}
+
+.stage[data-mood="coding"] #petCanvas {
+  filter: drop-shadow(0 8px 10px rgba(0, 0, 0, 0.45))
+          drop-shadow(0 0 10px rgba(255, 90, 90, 0.45))
+          drop-shadow(0 0 16px rgba(255, 209, 102, 0.18));
+}
+
+.stage[data-mood="sleep"] #petCanvas {
+  filter: drop-shadow(0 8px 10px rgba(0, 0, 0, 0.5))
+          brightness(0.78) saturate(0.7);
+}
+
+.bubble {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  max-width: 60%;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #1a2030;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 220ms ease, transform 220ms ease;
+  pointer-events: none;
+  white-space: pre-wrap;
+  -webkit-app-region: no-drag;
+}
+
+.bubble.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ============================================================
+   Main area — wraps chat-stream + optional HTML preview panel.
+   ============================================================ */
+.main-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+/* ============================================================
+   Chat stream — pro-terminal feel.
+   ============================================================ */
+.chat-stream {
+  flex: 1;
+  min-width: 120px;
+  min-height: 112px;
+  overflow-y: auto;
+  padding: 12px 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  user-select: text;
+  background: var(--chat-bg);
+}
+
+.chat-stream::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-stream::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+}
+
+.msg {
+  border-radius: 10px;
+  padding: 8px 11px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  max-width: 88%;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Per-bubble frosted glass so text stays readable when the desktop
+     behind the popover is busy. */
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+
+.msg.user {
+  background: var(--user-bg);
+  border: 1px solid var(--user-edge);
+  color: var(--text);
+  align-self: flex-end;
+}
+
+.msg.user.queued {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.msg-time {
+  display: block;
+  margin-top: 4px;
+  font-size: 9.5px;
+  line-height: 1;
+  opacity: 0.56;
+  text-shadow: none;
+}
+
+.msg.user .msg-time {
+  text-align: left;
+  color: var(--muted);
+}
+
+.msg.assistant .msg-time {
+  text-align: right;
+  color: var(--text-on-her);
+}
+
+.msg.assistant.thinking {
+  min-height: 2rem;
+  display: flex;
+  align-items: center;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  height: 1em;
+  color: var(--text-on-her);
+  opacity: 0.85;
+}
+
+.thinking-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: thinking-bounce 1.1s ease-in-out infinite;
+}
+
+.thinking-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.thinking-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes thinking-bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  40% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+.msg.assistant {
+  background: var(--her-soft);
+  border: 1px solid var(--her-edge);
+  color: var(--text-on-her);
+  align-self: flex-start;
+  box-shadow: 0 0 0 1px rgba(123, 223, 242, 0.06) inset,
+              0 1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+
+.msg.system {
+  align-self: center;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: italic;
+  border: none;
+  padding: 2px 8px;
+  max-width: 100%;
+  text-align: center;
+}
+
+.msg.assistant .cursor {
+  display: inline-block;
+  width: 5px;
+  height: 12px;
+  background: var(--text-on-her);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 1s steps(2) infinite;
+}
+
+@keyframes blink {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* Inline tool-use receipts — render as a single-line pill, not a chat
+   bubble. Max-width + ellipsis keeps a long command from wrapping into a
+   multi-line orange brick that swallows the chat surface. */
+.msg.tool {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: -2px 0 -2px 2px;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  max-width: 88%;
+}
+
+.tool-pill {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  /* Activity receipt, not a warning. The old amber-on-amber was unreadable
+     (especially over the light theme). Use the readable, theme-aware muted
+     text on a faint teal chip (her accent) instead. */
+  color: var(--muted);
+  background: rgba(123, 223, 242, 0.12);
+  border: 1px solid rgba(123, 223, 242, 0.32);
+  padding: 1px 8px;
+  border-radius: 999px;
+  vertical-align: bottom;
+}
+
+/* Expandable variant — a real button that toggles the command/output panel. */
+button.tool-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+button.tool-pill:hover {
+  background: rgba(123, 223, 242, 0.22);
+}
+
+.tool-pill .tool-pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-pill .tool-caret {
+  flex: none;
+  font-size: 8px;
+  line-height: 1;
+  opacity: 0.75;
+}
+
+/* The actual logs — command line + output, in a contained scroll box so a
+   chatty command can't flood the popover. */
+.tool-detail {
+  margin: 3px 0 1px 2px;
+  max-width: 100%;
+  max-height: 196px;
+  overflow: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* A dark "terminal" log box with a fixed light text colour. The background
+     is theme-independent (kept dark in both light and dark mode), so the text
+     must not follow --muted — in light mode that was dark-green on a grey box
+     and unreadable. */
+  color: #dcf3e6;
+  background: rgba(8, 12, 16, 0.62);
+  border: 1px solid rgba(123, 223, 242, 0.24);
+  border-radius: 6px;
+  padding: 6px 9px;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.tool-detail.error {
+  color: #ffc0c0;
+  border-color: rgba(255, 120, 120, 0.45);
+  background: rgba(60, 0, 0, 0.42);
+}
+
+/* Markdown elements inside assistant bubbles. */
+.msg.assistant h1,
+.msg.assistant h2,
+.msg.assistant h3 {
+  margin: 4px 0 2px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.msg.assistant h1 { font-size: 14px; }
+.msg.assistant h2 { font-size: 13px; }
+.msg.assistant h3 { font-size: 12.5px; }
+
+.msg.assistant strong {
+  font-weight: 600;
+}
+
+.msg.assistant em {
+  font-style: italic;
+}
+
+.msg.assistant code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0 4px;
+  border-radius: 4px;
+  color: var(--text-on-her);
+}
+
+.msg.assistant pre {
+  margin: 4px 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.30);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  overflow-x: auto;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.msg.assistant pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 11.5px;
+  white-space: pre;
+  line-height: 1.4;
+}
+
+.msg.assistant a {
+  color: var(--her);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.msg.assistant ul,
+.msg.assistant ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.msg.assistant li {
+  margin: 1px 0;
+}
+
+.msg.assistant blockquote {
+  margin: 4px 0;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--muted);
+}
+
+.empty-state {
+  text-align: center;
+  color: var(--muted);
+  font-size: 11.5px;
+  padding: 16px 12px;
+  font-style: italic;
+}
+
+/* ============================================================
+   Composer.
+   ============================================================ */
+.composer {
+  flex-shrink: 0;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--composer-bg);
+}
+
+#composer {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+#composerInput {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  resize: none;
+  min-height: 34px;
+  max-height: 120px;
+  user-select: text;
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+
+#composerInput::placeholder {
+  color: var(--muted);
+}
+
+#composerInput:focus {
+  outline: none;
+  border-color: var(--her);
+  background: var(--panel-2);
+}
+
+button.primary {
+  background: rgba(123, 223, 242, 0.22);
+  border: 1px solid var(--her);
+  color: var(--her);
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 160ms ease;
+}
+
+button.primary:hover:not(:disabled) {
+  background: rgba(123, 223, 242, 0.34);
+}
+
+button.primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.cwd-line {
+  margin: 6px 2px 0;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+
+/* Manual edge/corner resize handles. */
+.resize-edge {
+  position: fixed;
+  z-index: 30;
+  -webkit-app-region: no-drag;
+}
+
+/* Start the side strips below the 32px header (#dragHandle) so touching the
+   PRTS label / Clear-Stop buttons near a corner can't start a window resize —
+   especially on touchscreens, where a touch easily drifts past the drag
+   threshold. */
+.resize-edge.e {
+  top: 36px;
+  bottom: 10px;
+  right: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.resize-edge.w {
+  top: 36px;
+  bottom: 10px;
+  left: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.resize-edge.s {
+  left: 10px;
+  right: 18px;
+  bottom: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.resize-edge.sw {
+  left: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+
+.resize-grip {
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  opacity: 0.65;
+  background:
+    linear-gradient(135deg, transparent 58%, var(--border-strong) 58%, var(--border-strong) 64%, transparent 64%),
+    linear-gradient(135deg, transparent 72%, var(--border-strong) 72%, var(--border-strong) 78%, transparent 78%);
+}
+
+/* ============================================================
+   HTML Preview side panel — slides open on the right.
+   ============================================================ */
+.preview-divider {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: var(--border);
+  z-index: 2;
+  transition: background 120ms ease;
+}
+
+.preview-divider:hover,
+.preview-divider.dragging {
+  background: var(--border-strong);
+}
+
+.preview-divider[hidden] {
+  display: none;
+}
+
+.html-preview {
+  flex: 0;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--chat-bg);
+}
+
+.html-preview.open {
+  min-width: 200px;
+}
+
+.html-preview[hidden] {
+  display: none;
+}
+
+.preview-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bar-bg);
+  gap: 8px;
+}
+
+.preview-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.preview-btn {
+  font-size: 10px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.preview-close {
+  font-size: 13px;
+  padding: 2px 5px;
+  line-height: 1;
+}
+
+#previewFrame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+
+/* ---- preview button inside assistant message bubbles ---- */
+.msg-preview-btn {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--her);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.msg-preview-btn:hover {
+  background: var(--her-soft);
+}
+
+.msg-preview-btn.active {
+  background: var(--her-soft);
+  border-color: var(--her-edge);
+}

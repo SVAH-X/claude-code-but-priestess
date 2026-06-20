@@ -30,6 +30,18 @@ const DEFAULTS = Object.freeze({
   // Both sets share the same nine expression frames.
   outfit: "formal",
   agentMode: false,
+  // Vibe coding: companion | advisor | agent. "companion" = chat only,
+  // "advisor" = read-only tools (Read,Grep,Glob,LS), "agent" = full agent.
+  // Migrated from the old `agentMode` boolean on first read.
+  vibeCodingMode: "companion",
+  // Vibe coding: proactive diagnostic checks (she notices lint errors).
+  vibeCodingDiagnostics: true,
+  // Minutes between diagnostic proactive checks (min 1).
+  diagnosticCheckCooldownMin: 5,
+  // Vibe coding: proactive activity narration (save, git, build).
+  vibeCodingActivityNarration: true,
+  // Minutes between activity-based proactive checks (min 1).
+  activityCheckCooldownMin: 3,
   // Lets Priestess trigger curated local actions (play music, web search, open
   // a URL/app) via hidden [[skill:…]] directives. Closed whitelist + sanitized
   // args, so it's safe without agent mode. PRTS-internal only.
@@ -91,7 +103,14 @@ function init() {
           parsed.desktopPetSize === "small" ? 0.8 : parsed.desktopPetSize === "large" ? 1.2 : 1.0;
       }
       delete parsed.desktopPetSize;
+      // Migration: old boolean agentMode → string vibeCodingMode
+      if (parsed.agentMode === true && parsed.vibeCodingMode === undefined) {
+        parsed.vibeCodingMode = "agent";
+      }
+      delete parsed.agentMode;
       cache = { ...DEFAULTS, ...parsed };
+      // Don't persist the stale agentMode default — it's now a derived field.
+      delete cache.agentMode;
     }
   } catch (error) {
     console.warn("settings: failed to load, using defaults", error);
@@ -107,12 +126,43 @@ function get(key) {
   return cache[key];
 }
 
+const VALIDATORS = {
+  vibeCodingMode: (v) => ["companion", "advisor", "agent"].includes(v),
+  chatProvider: (v) => ["claude", "codex", "priestess"].includes(v),
+  theme: (v) => ["system", "light", "dark"].includes(v),
+  menuLanguage: (v) => ["system", "zh", "en"].includes(v),
+  outfit: (v) => ["formal", "casual"].includes(v),
+  updateChannel: (v) => ["stable", "prerelease"].includes(v),
+  desktopPetSize: () => false // deprecated, reject
+};
+
 function set(patch) {
-  cache = { ...cache, ...patch };
+  const sanitized = {};
+  for (const [key, value] of Object.entries(patch)) {
+    // Reject unknown keys
+    if (!(key in DEFAULTS)) {
+      console.warn("settings: rejected unknown key", key);
+      continue;
+    }
+    // Reject deprecated keys
+    if (key === "agentMode") {
+      console.warn("settings: agentMode is deprecated, use vibeCodingMode instead");
+      continue;
+    }
+    // Validate enum keys
+    const validator = VALIDATORS[key];
+    if (validator && !validator(value)) {
+      console.warn("settings: rejected invalid value for", key, value);
+      continue;
+    }
+    sanitized[key] = value;
+  }
+  if (Object.keys(sanitized).length === 0) return;
+  cache = { ...cache, ...sanitized };
   persist();
   for (const sub of subscribers) {
     try {
-      sub(cache, patch);
+      sub(cache, sanitized);
     } catch (error) {
       console.warn("settings subscriber threw", error);
     }

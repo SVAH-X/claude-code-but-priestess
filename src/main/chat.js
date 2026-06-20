@@ -1833,11 +1833,15 @@ async function takeScreenshot() {
   return null;
 }
 
-function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript) {
+function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
+  const isAdvisor = mode === "advisor";
+  const isMaintenance = mode === "maintenance";
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const systemPrompt = persona.buildPersonaPrompt({
-    agentMode,
+    vibeCodingMode: mode,
     screenshotPath,
     provider: PROVIDERS.CLAUDE,
     sharedTranscript,
@@ -1846,7 +1850,7 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     skillsEnabled: settings.get("skillsEnabled") !== false,
     deepPersona: shouldUseDeepPersona(trimmed),
     observeEnabled:
-      settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
+      settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
     personaNotes: settings.get("personaNotes") || "",
     catMode: silentTurnKind ? null : chatCatMode
   });
@@ -1871,16 +1875,22 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     args.push("--model", claudeModel);
   }
 
-  if (agentMode) {
+  if (isAgent) {
     args.push("--dangerously-skip-permissions");
-  } else {
-    // Without agent mode she still needs file tools for memory + light helpfulness.
-    // Bash and network tools stay off until the Doctor enables agent mode.
+  } else if (isAdvisor) {
+    // Read-only tools: she can read, search, and browse but not edit or execute.
+    args.push("--allowedTools", "Read,Grep,Glob,LS");
+  } else if (isMaintenance) {
+    // Memory maintenance: needs file r/w but not Bash/network.
     args.push("--allowedTools", "Read,Edit,Write,Glob,Grep,LS");
+  } else {
+    // Companion mode: chat only, no tools at all.
+    args.push("--allowedTools", "");
   }
 
-  if (sessionIds[PROVIDERS.CLAUDE]) {
-    args.push("--resume", sessionIds[PROVIDERS.CLAUDE]);
+  const effectiveSessionIds = customSessionIds || sessionIds;
+  if (effectiveSessionIds[PROVIDERS.CLAUDE]) {
+    args.push("--resume", effectiveSessionIds[PROVIDERS.CLAUDE]);
   }
 
   return {
@@ -1891,12 +1901,14 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
   };
 }
 
-function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) {
+function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscript) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   return (
     persona.buildPersonaPrompt({
-      agentMode,
+      vibeCodingMode: mode,
       screenshotPath,
       provider: PROVIDERS.CODEX,
       sharedTranscript,
@@ -1905,7 +1917,7 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
       skillsEnabled: settings.get("skillsEnabled") !== false,
       deepPersona: shouldUseDeepPersona(trimmed),
       observeEnabled:
-        settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
+        settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
       personaNotes: settings.get("personaNotes") || "",
       catMode: silentTurnKind ? null : chatCatMode
     }) +
@@ -1914,12 +1926,17 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
   );
 }
 
-function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
-  const prompt = buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript);
+function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
+  const isAdvisor = mode === "advisor";
+  const isMaintenance = mode === "maintenance";
+  const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript);
   const codexModel = validatedCodexModel();
+  const effectiveSessionIds = customSessionIds || sessionIds;
   let args;
 
-  if (sessionIds[PROVIDERS.CODEX]) {
+  if (effectiveSessionIds[PROVIDERS.CODEX]) {
     args = [
       "exec",
       "resume",
@@ -1932,10 +1949,10 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
     if (screenshotPath) {
       args.push("-i", screenshotPath);
     }
-    if (agentMode) {
+    if (isAgent) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     }
-    args.push(sessionIds[PROVIDERS.CODEX], "-");
+    args.push(effectiveSessionIds[PROVIDERS.CODEX], "-");
   } else {
     args = [
       "exec",
@@ -1952,10 +1969,17 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
     if (screenshotPath) {
       args.push("-i", screenshotPath);
     }
-    if (agentMode) {
+    if (isAgent) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
-    } else {
+    } else if (isAdvisor) {
+      // Read-only workspace + memory dir so she can still read her own notes.
+      args.push("-s", "workspace-read-only", "--add-dir", persona.memoryDir());
+    } else if (isMaintenance) {
+      // Memory maintenance: needs file write access to memory dir.
       args.push("-s", "workspace-write", "--add-dir", persona.memoryDir());
+    } else {
+      // Companion: tight sandbox — memory dir only, no workspace access.
+      args.push("-s", "none", "--add-dir", persona.memoryDir());
     }
     args.push("-");
   }
@@ -1967,11 +1991,11 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
   };
 }
 
-function buildProviderInvocation(provider, trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
+function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds) {
   if (provider === PROVIDERS.CODEX) {
-    return buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript);
+    return buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds);
   }
-  return buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript);
+  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds);
 }
 
 function send(text) {
@@ -2001,7 +2025,7 @@ function send(text) {
 
 function dispatchSend(
   trimmed,
-  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false } = {}
+  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false, vibeCodingMode: vibeCodingModeOverride = null } = {}
 ) {
   if (currentProcess || turnLaunching) return { ok: false, reason: "busy" };
 
@@ -2036,7 +2060,23 @@ function dispatchSend(
   });
 
   const sharedTranscript = buildSharedTranscript();
-  const agentMode = Boolean(settings.get("agentMode"));
+  // Silent turns need file tools regardless of the Doctor's vibeCodingMode:
+  // - Proactive checks: need Read (screenshot) → advisor level is enough.
+  // - Memory maintenance: need Read+Edit+Write (MEMORY.md) → needs the old
+  //   default tool set; we use a special "maintenance" mode for that.
+  const globalMode = String(settings.get("vibeCodingMode") || "companion");
+  let vibeCodingMode = vibeCodingModeOverride || globalMode;
+  if (!vibeCodingModeOverride) {
+    if (silentTurnKind === "proactive") {
+      // Waifu checks: need at least Read for screenshot. Keep agent if set,
+      // otherwise bump to advisor (read-only tools).
+      vibeCodingMode = globalMode === "agent" ? "agent" : "advisor";
+    } else if (silentTurnKind === "maintenance") {
+      // Memory tidying: need Read+Edit+Write. A dedicated internal mode that
+      // grants file r/w but not Bash/network.
+      vibeCodingMode = "maintenance";
+    }
+  }
 
   turnLaunching = true;
 
@@ -2049,7 +2089,7 @@ function dispatchSend(
       trimmed,
       provider,
       cwd: resolveCwd(),
-      agentMode,
+      vibeCodingMode,
       sharedTranscript,
       chained,
       forceScreenshot
@@ -2104,7 +2144,7 @@ function launchPriestessTurn(trimmed) {
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const system = persona.buildPersonaPrompt({
-    agentMode: false,
+    vibeCodingMode: "companion",
     screenshotPath: null,
     provider: PROVIDERS.PRIESTESS,
     // History is sent as real chat messages below, so the transcript is not
@@ -2163,7 +2203,7 @@ async function launchProviderTurn({
   trimmed,
   provider,
   cwd,
-  agentMode,
+  vibeCodingMode,
   sharedTranscript,
   chained,
   forceScreenshot = false
@@ -2180,7 +2220,8 @@ async function launchProviderTurn({
 
   const silentTurn = Boolean(silentTurnKind);
   const proactiveCheck = silentTurnKind === "proactive";
-  const autoScreenshot = agentMode && settings.get("autoScreenshot") !== false;
+  const isAgent = vibeCodingMode === "agent";
+  const autoScreenshot = isAgent && settings.get("autoScreenshot") !== false;
   // Chained turns normally skip the screenshot, but an auto-continuation needs a
   // fresh screen so she can actually answer what she "saw". Proactive checks
   // exist to look at the screen, so they always capture one regardless of
@@ -2203,7 +2244,7 @@ async function launchProviderTurn({
     provider,
     trimmed,
     cwd,
-    agentMode,
+    vibeCodingMode,
     screenshotPath,
     sharedTranscript
   );
@@ -2523,13 +2564,67 @@ function canRunSilentTurn() {
 
 // A self-initiated check (proactive care): she looks at the screen and decides
 // whether anything is worth saying. Nothing appears in chat unless she speaks.
-function sendProactive() {
+function sendProactive(opts) {
   const gate = canRunSilentTurn();
   if (!gate.ok) return gate;
   silentTurnKind = "proactive";
-  const result = dispatchSend(buildProactivePrompt(), { silentUser: true });
+  const prompt = buildVibeProactivePrompt(opts);
+  const result = dispatchSend(prompt, { silentUser: true });
   if (!result?.ok) silentTurnKind = null;
   return result;
+}
+
+// Build a proactive prompt that may include diagnostic or activity context
+// from the VS Code extension.
+function buildVibeProactivePrompt(opts) {
+  if (opts?.diagnosticContext) {
+    return buildDiagnosticProactivePrompt(opts.diagnosticContext);
+  }
+  if (opts?.activityContext) {
+    return buildActivityProactivePrompt();
+  }
+  return buildProactivePrompt();
+}
+
+function buildDiagnosticProactivePrompt(diag) {
+  const lines = [
+    buildProactivePrompt(),
+    "",
+    "另外，博士的 VS Code 编辑器刚刚检测到以下问题：",
+    `- ${diag.errors} 个错误，${diag.warnings} 个警告，涉及 ${diag.totalFilesWithProblems} 个文件`,
+  ];
+  const top5 = (diag.details || []).slice(0, 5);
+  for (const d of top5) {
+    const file = (d.file || "").split(/[\\/]/).pop();
+    lines.push(`  - [${d.severity}] ${file}:${d.line}: ${d.message}`);
+  }
+  lines.push(
+    "",
+    "请用你自然的风格轻声提醒博士这些错误——你注意到了，可以帮他看看。",
+    "不要逐条罗列，用你的话概括最值得关注的。如果你觉得只是小问题，也可以只说 [[silent]]。"
+  );
+  return lines.join("\n");
+}
+
+function buildActivityProactivePrompt() {
+  const wsServer = require("./ws-server");
+  const activities = wsServer.getRecentActivities();
+  const lines = [
+    buildProactivePrompt(),
+    "",
+    "博士最近的编辑器活动：",
+  ];
+  const recent = (activities || []).slice(-5);
+  for (const a of recent) {
+    const time = new Date(a.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+    lines.push(`  - [${time}] ${a.detail}`);
+  }
+  lines.push(
+    "",
+    "请根据博士最近的操作，自然地给一句鼓励、提醒或轻松的话。",
+    "若觉得没什么值得说的，可直接回复 [[silent]]。"
+  );
+  return lines.join("\n");
 }
 
 // A memory-curation pass: she tidies MEMORY.md with her file tools and stays
@@ -2595,5 +2690,9 @@ module.exports = {
   isLongMemoryDormant,
   getLastTurnDurationMs,
   setChatCatMode,
-  getOutboundQueueLength: () => outboundQueue.length
+  getOutboundQueueLength: () => outboundQueue.length,
+  // Exported for vscode-chat.js (VS Code extension independent sessions)
+  buildProviderInvocation,
+  consumeDirectives,
+  stripDirectiveTags,
 };

@@ -22,9 +22,13 @@ const MAINTENANCE_MEMORY_MIN_BYTES = 16 * 1024;
 const MAINTENANCE_IDLE_MS = 5 * 60 * 1000;
 const BOOT_GRACE_MS = 10 * 60 * 1000;
 
+const wsServer = require("./ws-server");
+
 let tickTimer = null;
 let lastProactiveAttemptAt = 0;
 let lastMaintenanceAttemptAt = 0;
+let lastDiagnosticAttemptAt = 0;
+let lastActivityAttemptAt = 0;
 // Daily cap state is in-memory on purpose: a tray app stays up for days, and
 // a restart at worst resets the day's budget once.
 let daily = { day: "", count: 0 };
@@ -77,6 +81,45 @@ function hasCliProvider() {
   return active === "claude" || active === "codex";
 }
 
+// ---- Vibe coding: diagnostic proactive checks ----
+
+function diagnosticCooldownMs() {
+  return clampNumber(settings.get("diagnosticCheckCooldownMin"), 1, 60, 5) * 60 * 1000;
+}
+
+function activityCooldownMs() {
+  return clampNumber(settings.get("activityCheckCooldownMin"), 1, 60, 3) * 60 * 1000;
+}
+
+function shouldRunDiagnosticCheck(now) {
+  if (!wsServer.isVscodeActive()) return false;
+  if (settings.get("vibeCodingDiagnostics") !== true) return false;
+  if (now - lastDiagnosticAttemptAt < diagnosticCooldownMs()) return false;
+  if (chat.isBusy()) return false;
+  if (!hasCliProvider()) return false;
+  const diag = wsServer.getLatestDiagnostics();
+  if (!diag || diag.errors === 0) return false;
+  const lastTs = chat.getLastConversationTs();
+  if (lastTs && now - lastTs < cooldownMs()) return false;
+  return true;
+}
+
+function shouldRunActivityCheck(now) {
+  if (!wsServer.isVscodeActive()) return false;
+  if (settings.get("vibeCodingActivityNarration") !== true) return false;
+  if (now - lastActivityAttemptAt < activityCooldownMs()) return false;
+  if (chat.isBusy()) return false;
+  if (!hasCliProvider()) return false;
+  const activities = wsServer.getRecentActivities();
+  if (!activities || activities.length === 0) return false;
+  // Only trigger if there's a recent activity (within last 2 minutes)
+  const recent = activities.some((a) => now - a.timestamp < 2 * 60 * 1000);
+  if (!recent) return false;
+  const lastTs = chat.getLastConversationTs();
+  if (lastTs && now - lastTs < cooldownMs()) return false;
+  return true;
+}
+
 function shouldRunProactive(now) {
   if (settings.get("waifuMode") !== true) return false;
   if (now - lastProactiveAttemptAt < intervalMs()) return false;
@@ -112,6 +155,26 @@ function shouldRunMaintenance(now) {
 function tick() {
   const now = Date.now();
   try {
+    // Priority: diagnostics > activity > generic proactive > maintenance
+    // Each tick fires at most one self-turn to avoid flooding the model.
+
+    if (shouldRunDiagnosticCheck(now)) {
+      lastDiagnosticAttemptAt = now;
+      const diag = wsServer.getLatestDiagnostics();
+      if (chat.sendProactive({ diagnosticContext: diag })?.ok) {
+        daily.count += 1;
+      }
+      return;
+    }
+
+    if (shouldRunActivityCheck(now)) {
+      lastActivityAttemptAt = now;
+      if (chat.sendProactive({ activityContext: true })?.ok) {
+        daily.count += 1;
+      }
+      return;
+    }
+
     if (shouldRunProactive(now)) {
       // Attempts move the interval forward even when dispatch fails, so a
       // broken backend can't make her retry every minute.
@@ -119,8 +182,9 @@ function tick() {
       if (chat.sendProactive()?.ok) {
         daily.count += 1;
       }
-      return; // at most one self-turn per tick
+      return;
     }
+
     if (shouldRunMaintenance(now)) {
       lastMaintenanceAttemptAt = now;
       if (chat.sendMaintenance()?.ok) {

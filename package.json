@@ -12,7 +12,11 @@
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
     "lint": "node scripts/check-assets.js",
-    "release": "bash scripts/release.sh"
+    "release": "bash scripts/release.sh",
+    "vscode:sync": "node scripts/sync-vscode-assets.js",
+    "vscode:install": "cd vscode-extension && npm install",
+    "vscode:compile": "npm run vscode:sync && cd vscode-extension && npm run compile",
+    "vscode:package": "npm run vscode:compile && cd vscode-extension && npm run package"
   },
   "keywords": [
     "menubar",
@@ -73,6 +77,7 @@
     }
   },
   "dependencies": {
-    "electron-updater": "^6.8.3"
+    "electron-updater": "^6.8.3",
+    "ws": "^8.18.0"
   }
 }
