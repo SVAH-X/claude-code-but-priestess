@@ -112,6 +112,16 @@ let sawSilentDirective = false;
 // no tool pills, no streaming. A proactive reply only surfaces if she chose
 // to speak (no [[silent]] and real text). null | "proactive" | "maintenance".
 let silentTurnKind = null;
+// Mirrors the chat window's current 普猫猫 visual state (set by main.js when the
+// pet→chat transition rolls it). Kept here so the persona prompt can match what
+// the Doctor sees. Ephemeral; never persisted.
+let chatCatMode = { cat: false, mood: "normal" };
+
+function setChatCatMode(mode) {
+  chatCatMode = mode && mode.cat
+    ? { cat: true, mood: mode.mood === "crying" ? "crying" : "normal" }
+    : { cat: false, mood: "normal" };
+}
 
 function normalizeProvider(provider) {
   if (provider === PROVIDERS.CODEX) return PROVIDERS.CODEX;
@@ -1837,7 +1847,8 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     deepPersona: shouldUseDeepPersona(trimmed),
     observeEnabled:
       settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
-    personaNotes: settings.get("personaNotes") || ""
+    personaNotes: settings.get("personaNotes") || "",
+    catMode: silentTurnKind ? null : chatCatMode
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -1895,7 +1906,8 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
       deepPersona: shouldUseDeepPersona(trimmed),
       observeEnabled:
         settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
-      personaNotes: settings.get("personaNotes") || ""
+      personaNotes: settings.get("personaNotes") || "",
+      catMode: silentTurnKind ? null : chatCatMode
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
@@ -2102,7 +2114,8 @@ function launchPriestessTurn(trimmed) {
     memoryRecallRequested,
     skillsEnabled: settings.get("skillsEnabled") !== false,
     deepPersona: shouldUseDeepPersona(trimmed),
-    personaNotes: settings.get("personaNotes") || ""
+    personaNotes: settings.get("personaNotes") || "",
+    catMode: silentTurnKind ? null : chatCatMode
   });
 
   const finishCommon = () => {
@@ -2581,5 +2594,6 @@ module.exports = {
   getSessionIds,
   isLongMemoryDormant,
   getLastTurnDurationMs,
+  setChatCatMode,
   getOutboundQueueLength: () => outboundQueue.length
 };

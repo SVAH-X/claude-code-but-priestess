@@ -118,8 +118,8 @@ const CREDITS = [
   }
 ];
 // Ephemeral cat Easter egg state — not persisted, changes on each transition.
-// 1/17 ≈ 5.9% per transition; 17 references 相変臨界 (main_17), the chapter
-// where Priestess is the centre of the story.
+// 3.14% per transition (π); a rare, easy-to-miss surprise. When it fires, the
+// chat window also tells the persona prompt so she's aware she's a cat.
 let currentCatMode = { cat: false, mood: "normal" };
 
 function maybeSendCatMode(petWindow) {
@@ -819,6 +819,9 @@ function openChatFromDesktopPet() {
   if (popover && !popover.isDestroyed()) {
     popover.webContents.send("desktop-pet:cat-mode", chatCat);
   }
+  // Keep her self-awareness in sync with what the Doctor sees: the persona
+  // prompt acknowledges the cat form only while it's actually on screen.
+  chat.setChatCatMode(chatCat);
   return { ok: true };
 }
 

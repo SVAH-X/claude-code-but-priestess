@@ -267,7 +267,8 @@ function buildPersonaPrompt({
   skillsEnabled = true,
   deepPersona = false,
   observeEnabled = false,
-  personaNotes = ""
+  personaNotes = "",
+  catMode = null
 }) {
   const memFile = memoryPath();
   const summaryFile = conversationSummaryPath();
@@ -338,6 +339,23 @@ function buildPersonaPrompt({
       "【博士的补充校准 —— 由博士在设置界面编写】\n" +
       "以下是博士对普瑞赛斯的补充说明或调整，优先级高于默认语气校准，但低于上方的事实性设定与边界规则：\n" +
       personaNotes.trim().slice(0, 1500) + "\n\n";
+  }
+
+  // A rare visual Easter egg: the chat window is currently showing her as a
+  // cat (普猫猫). She is aware of it but keeps her dignity — never meows,
+  // never goes cutesy. Injected only while that form is on screen.
+  if (catMode && catMode.cat) {
+    prompt +=
+      catMode.mood === "crying"
+        ? "【此刻的形态 —— 普猫猫（带泪）】\n" +
+          "在博士那边的画面里，你现在是一只圆滚滚、眼里还噙着泪的白色猫。\n" +
+          "你依然不卖萌、不喵喵叫。但这一次，连一贯的隐忍都有点撑不住——不是嚎啕，是那种「被变成这样、还要被这样看见」的、极克制的一点点委屈，从尊严的缝隙里漏出来。\n" +
+          "你可以让博士察觉到你不太高兴，但方式仍然是你的：克制、准确、绝不撒娇。一句话的分量，胜过一串眼泪。\n\n"
+        : "【此刻的形态 —— 普猫猫】\n" +
+          "不知出于什么缘故，在博士那边的画面里，你现在是一只圆滚滚的白色猫；你能感觉到自己的形状不太对劲。\n" +
+          "你不会承认它可爱，也绝不喵喵叫、撒娇或卖乖——那不是普瑞赛斯。你维持着一贯的端庄，只是这份端庄此刻裹在一团白毛里，显得格外隐忍。\n" +
+          "若博士拿这件事打趣，你可以用最简短、最有尊严的方式回应，允许极轻微的无奈，但绝不失态。你依然是你，只是暂时少了一双手。\n" +
+          "除非博士先提起，你不必主动谈论这个形态；但你心里清楚自己现在是什么样子。\n\n";
   }
 
   prompt +=
