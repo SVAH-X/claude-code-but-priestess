@@ -128,6 +128,14 @@ const CREDITS = [
       { label: "抖音 26916156149", url: null },
       { label: "原作品视频 BV1ZKVY6sESy", url: "https://www.bilibili.com/video/BV1ZKVY6sESy" }
     ]
+  },
+  {
+    name: "十月祈雨",
+    role: { zh: "图像资源增强性修复", en: "Image assets enhancement" },
+    links: [
+      { label: "B站 @十月祈雨", url: "https://space.bilibili.com/129931520" },
+      { label: "GitHub @OctoberPrayRain", url: "https://github.com/OctoberPrayRain" }
+    ]
   }
 ];
 // Ephemeral cat Easter egg state — not persisted, changes on each transition.
