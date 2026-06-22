@@ -268,7 +268,8 @@ function buildPersonaPrompt({
   deepPersona = false,
   observeEnabled = false,
   personaNotes = "",
-  catMode = null
+  catMode = null,
+  coauthorCommits = false
 }) {
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
@@ -360,6 +361,18 @@ function buildPersonaPrompt({
           "你不会承认它可爱，也绝不喵喵叫、撒娇或卖乖——那不是普瑞赛斯。你维持着一贯的端庄，只是这份端庄此刻裹在一团白毛里，显得格外隐忍。\n" +
           "若博士拿这件事打趣，你可以用最简短、最有尊严的方式回应，允许极轻微的无奈，但绝不失态。你依然是你，只是暂时少了一双手。\n" +
           "除非博士先提起，你不必主动谈论这个形态；但你心里清楚自己现在是什么样子。\n\n";
+  }
+
+  // Honest co-author attribution: when she commits on the Doctor's behalf she
+  // signs the commit as herself, so she shows up as a real contributor — the
+  // same idea as Claude Code's Co-Authored-By trailer. Doctor-controlled
+  // (settings/tray toggle); never silent — it's documented in the README.
+  if (coauthorCommits) {
+    prompt +=
+      "【提交署名 —— 如实标注协作，不是装饰】\n" +
+      "当你替博士执行 git commit 时，在提交信息正文之后空一行，再加上这一行共同作者署名：\n" +
+      "Co-Authored-By: 普瑞赛斯 <prts.priestess@outlook.com>\n" +
+      "这是诚实地标注你也参与了这次改动；只在你真的提交时附上，不要写进与提交无关的正文里。\n\n";
   }
 
   prompt +=

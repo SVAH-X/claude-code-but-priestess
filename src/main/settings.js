@@ -42,6 +42,11 @@ const DEFAULTS = Object.freeze({
   vibeCodingActivityNarration: true,
   // Minutes between activity-based proactive checks (min 1).
   activityCheckCooldownMin: 3,
+  // When she commits on the Doctor's behalf, sign the commit with an honest
+  // Co-Authored-By trailer (普瑞赛斯 <prts.priestess@outlook.com>) so she shows
+  // up as a real contributor — the same idea as Claude Code's trailer. On by
+  // default, documented in the README, toggleable from the tray menu.
+  coauthorCommits: true,
   // Lets Priestess trigger curated local actions (play music, web search, open
   // a URL/app) via hidden [[skill:…]] directives. Closed whitelist + sanitized
   // args, so it's safe without agent mode. PRTS-internal only.

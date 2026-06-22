@@ -1852,7 +1852,8 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     observeEnabled:
       settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
     personaNotes: settings.get("personaNotes") || "",
-    catMode: silentTurnKind ? null : chatCatMode
+    catMode: silentTurnKind ? null : chatCatMode,
+    coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -1919,7 +1920,8 @@ function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscr
       observeEnabled:
         settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
       personaNotes: settings.get("personaNotes") || "",
-      catMode: silentTurnKind ? null : chatCatMode
+      catMode: silentTurnKind ? null : chatCatMode,
+      coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed

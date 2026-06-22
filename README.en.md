@@ -112,6 +112,12 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
   tidies it about once a week while the chat is idle: merging duplicates,
   re-filing entries, condensing stale trivia without losing anything that
   matters. The pass never appears in chat.
+- **Commit co-authorship (on by default)** — when Priestess runs `git commit`
+  for you, she appends an honest `Co-Authored-By: 普瑞赛斯
+  <prts.priestess@outlook.com>` trailer, so she shows up as a co-author on your
+  commits — the same mechanism as Claude Code's `Co-Authored-By`, just hers.
+  It's honest AI-collaboration attribution, not decoration. **Turn it off any
+  time from the tray menu ("Co-author commits as 普瑞赛斯").**
 - Right-click the icon for a context menu: choose Claude Code or Codex as
   the usage backend, choose the active backend's model, choose chat working
   directory, reveal the data folder, or quit. Codex model choices come from
