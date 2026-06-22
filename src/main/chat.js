@@ -154,6 +154,42 @@ function attachmentDirArgs() {
   return args;
 }
 
+// Vision cost + latency scale with pixels, so cap oversized images before they
+// go to a backend (a huge screenshot/photo is mostly wasted detail). The Doctor
+// still sees the full original in their own bubble; only the backend copy
+// shrinks. Returns paths with large images swapped for downscaled temp copies.
+const ATTACHMENT_MAX_DIM = 1280;
+
+function resolveAttachmentsForBackend(paths) {
+  if (!paths.some(isImagePath)) return paths;
+  let dir = null;
+  let img = null;
+  return paths.map((p) => {
+    if (!isImagePath(p)) return p;
+    try {
+      const { nativeImage } = require("electron");
+      img = nativeImage.createFromPath(p);
+      if (img.isEmpty()) return p;
+      const { width, height } = img.getSize();
+      if (Math.max(width, height) <= ATTACHMENT_MAX_DIM) return p;
+      const resized =
+        width >= height
+          ? img.resize({ width: ATTACHMENT_MAX_DIM, quality: "good" })
+          : img.resize({ height: ATTACHMENT_MAX_DIM, quality: "good" });
+      if (!dir) {
+        dir = path.join(os.tmpdir(), "prts-attach");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const out = path.join(dir, path.basename(p).replace(/\.[^.]+$/, "") + ".png");
+      fs.writeFileSync(out, resized.toPNG());
+      return out;
+    } catch {
+      return p;
+    }
+  });
+}
+
 // ---- Built-in (HTTP) backend attachments: no file tools, so inline them ----
 const PRIESTESS_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const PRIESTESS_TEXTFILE_MAX_CHARS = 20000;
@@ -2132,7 +2168,11 @@ function dispatchSend(
   }
 
   // Attachments belong only to this real turn; silent self-turns never carry any.
-  pendingAttachments = silentTurnKind ? [] : (Array.isArray(attachments) ? attachments : []);
+  // Backend copies get downscaled (faster/cheaper vision); the bubble keeps the
+  // full original, which was attached to the history entry above.
+  pendingAttachments = silentTurnKind
+    ? []
+    : resolveAttachmentsForBackend(Array.isArray(attachments) ? attachments : []);
 
   // A genuine new user turn — reset the Codex auto-continue guard.
   if (!chained) {
