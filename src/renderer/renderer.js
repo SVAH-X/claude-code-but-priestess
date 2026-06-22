@@ -1258,8 +1258,12 @@ function appendBubbleTime(el, msg) {
   el.append(meta);
 }
 
+// data: URIs by path, so re-renders during streaming don't re-read the file.
+const attachmentImageCache = new Map();
+
 // Render the files/images the Doctor attached, inside their own message bubble:
-// a thumbnail for images, a filename chip for everything else.
+// a thumbnail for images (data: URI — webSecurity blocks cross-dir file://),
+// a filename chip for everything else.
 function renderAttachmentList(paths) {
   const wrap = document.createElement("div");
   wrap.className = "msg-attachments";
@@ -1271,16 +1275,30 @@ function renderAttachmentList(paths) {
       fig.title = "点击预览：" + name;
       const img = document.createElement("img");
       img.alt = name;
-      img.loading = "lazy";
-      img.src = window.chatApi?.fileUrl?.(p) || "";
+      fig.appendChild(img);
       img.addEventListener("error", () => {
+        // Un-previewable (e.g. HEIC) — show the name; a click opens it in the OS.
         fig.classList.add("broken");
         fig.textContent = name;
       });
+      const cached = attachmentImageCache.get(p);
+      if (cached) {
+        img.src = cached;
+      } else {
+        Promise.resolve(window.chatApi?.attachmentDataUri?.(p)).then((uri) => {
+          if (uri) {
+            attachmentImageCache.set(p, uri);
+            img.src = uri;
+          } else {
+            fig.classList.add("broken");
+            fig.textContent = name;
+          }
+        });
+      }
       fig.addEventListener("click", () => {
-        if (!fig.classList.contains("broken")) openLightbox(img.src);
+        if (fig.classList.contains("broken")) window.chatApi?.openAttachment?.(p);
+        else openLightbox(attachmentImageCache.get(p) || img.src);
       });
-      fig.appendChild(img);
       wrap.appendChild(fig);
     } else {
       const chip = document.createElement("div");

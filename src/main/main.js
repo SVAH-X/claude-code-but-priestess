@@ -1979,6 +1979,23 @@ ipcMain.handle("chat:send", (_, payload) => {
 ipcMain.handle("chat:open-attachment", (_, p) => {
   if (typeof p === "string" && p) shell.openPath(p);
 });
+// Local image → data: URI for in-bubble thumbnails / Quick Look. Done in main
+// because the popover runs with webSecurity on, which blocks cross-dir file://.
+ipcMain.handle("chat:attachment-data-uri", (_, p) => {
+  try {
+    if (typeof p !== "string" || !p) return "";
+    if (fs.statSync(p).size > 16 * 1024 * 1024) return "";
+    const ext = path.extname(p).toLowerCase();
+    const mime =
+      ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" :
+      ext === ".webp" ? "image/webp" :
+      ext === ".gif" ? "image/gif" :
+      ext === ".bmp" ? "image/bmp" : "image/png";
+    return `data:${mime};base64,${fs.readFileSync(p).toString("base64")}`;
+  } catch {
+    return "";
+  }
+});
 ipcMain.handle("chat:pick-files", async () => {
   const result = await dialog.showOpenDialog({
     title: "选择要发给普瑞赛斯的文件 / 图片",
