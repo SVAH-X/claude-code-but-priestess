@@ -164,7 +164,7 @@ function resolveAttachmentsForBackend(paths) {
   if (!paths.some(isImagePath)) return paths;
   let dir = null;
   let img = null;
-  return paths.map((p) => {
+  return paths.map((p, index) => {
     if (!isImagePath(p)) return p;
     try {
       const { nativeImage } = require("electron");
@@ -181,7 +181,8 @@ function resolveAttachmentsForBackend(paths) {
         fs.rmSync(dir, { recursive: true, force: true });
         fs.mkdirSync(dir, { recursive: true });
       }
-      const out = path.join(dir, path.basename(p).replace(/\.[^.]+$/, "") + ".png");
+      const base = path.basename(p).replace(/\.[^.]+$/, "");
+      const out = path.join(dir, `${String(index).padStart(2, "0")}-${base}.png`);
       fs.writeFileSync(out, resized.toPNG());
       return out;
     } catch {
@@ -2487,7 +2488,8 @@ async function launchProviderTurn({
       setImmediate(() => dispatchSend(trimmed, {
         userAlreadyShown: true,
         chained: true,
-        silentUser: Boolean(retrySilentKind)
+        silentUser: Boolean(retrySilentKind),
+        attachments: pendingAttachments
       }));
       return;
     }
@@ -2515,7 +2517,8 @@ async function launchProviderTurn({
       setImmediate(() => dispatchSend(trimmed, {
         userAlreadyShown: true,
         chained: true,
-        silentUser: Boolean(retrySilentKind)
+        silentUser: Boolean(retrySilentKind),
+        attachments: pendingAttachments
       }));
       return;
     }
