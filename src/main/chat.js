@@ -144,6 +144,76 @@ function codexAttachmentArgs() {
   return args;
 }
 
+// ---- Built-in (HTTP) backend attachments: no file tools, so inline them ----
+const PRIESTESS_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const PRIESTESS_TEXTFILE_MAX_CHARS = 20000;
+
+function imageToDataUri(p) {
+  try {
+    if (fs.statSync(p).size > PRIESTESS_IMAGE_MAX_BYTES) {
+      console.warn("priestess: image too large to inline, skipping", p);
+      return null;
+    }
+    const ext = path.extname(p).toLowerCase();
+    const mime =
+      ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" :
+      ext === ".webp" ? "image/webp" :
+      ext === ".gif" ? "image/gif" :
+      ext === ".bmp" ? "image/bmp" : "image/png";
+    return `data:${mime};base64,${fs.readFileSync(p).toString("base64")}`;
+  } catch (error) {
+    console.warn("priestess: failed to inline image", p, error);
+    return null;
+  }
+}
+
+function readTextFileForInline(p) {
+  try {
+    if (fs.statSync(p).size > 1024 * 1024) return null;
+    const buf = fs.readFileSync(p);
+    if (buf.includes(0)) return null; // looks binary — can't inline as text
+    let text = buf.toString("utf8");
+    if (text.length > PRIESTESS_TEXTFILE_MAX_CHARS) {
+      text = text.slice(0, PRIESTESS_TEXTFILE_MAX_CHARS) + "\n…（文件过长，已截断）";
+    }
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+// Fold this turn's attachments into the final user message: images as base64
+// image_url (OpenAI vision), text files inlined as text. Whether the configured
+// model can actually see images is up to that model.
+function applyAttachmentsToPriestessMessages(messages) {
+  if (!pendingAttachments.length) return;
+  let lastUser = null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") {
+      lastUser = messages[i];
+      break;
+    }
+  }
+  if (!lastUser) return;
+  const baseText = typeof lastUser.content === "string" ? lastUser.content : "";
+  const imageParts = [];
+  let inlined = "";
+  for (const p of pendingAttachments) {
+    if (isImagePath(p)) {
+      const uri = imageToDataUri(p);
+      if (uri) imageParts.push({ type: "image_url", image_url: { url: uri } });
+    } else {
+      const content = readTextFileForInline(p);
+      if (content != null) inlined += `\n\n【附件 ${path.basename(p)}】\n${content}`;
+    }
+  }
+  if (imageParts.length) {
+    lastUser.content = [{ type: "text", text: baseText + inlined }, ...imageParts];
+  } else if (inlined) {
+    lastUser.content = baseText + inlined;
+  }
+}
+
 function normalizeProvider(provider) {
   if (provider === PROVIDERS.CODEX) return PROVIDERS.CODEX;
   if (provider === PROVIDERS.PRIESTESS) return PROVIDERS.PRIESTESS;
@@ -2131,7 +2201,12 @@ function buildPriestessMessages() {
     kept.push(messages[i]);
     total += length;
   }
-  return kept.reverse();
+  const result = kept.reverse();
+  // Inline this turn's files/images into the final user message (built-in
+  // backend has no file tools). Done after budgeting so the char-length math
+  // above keeps working on plain-string content.
+  applyAttachmentsToPriestessMessages(result);
+  return result;
 }
 
 // Built-in backend turn: stream straight from the configured OpenAI-compatible
@@ -2139,6 +2214,7 @@ function buildPriestessMessages() {
 // appendAssistant path the CLIs use.
 function launchPriestessTurn(trimmed) {
   turnLaunching = false;
+  const turnHadImages = pendingAttachments.some(isImagePath);
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const system = persona.buildPersonaPrompt({
@@ -2185,6 +2261,9 @@ function launchPriestessTurn(trimmed) {
       if (!cancelled) {
         pushSystem(
           `内置普瑞赛斯后端出错：${String(error?.message || error).slice(0, 300)}\n` +
+            (turnHadImages
+              ? "（这一轮发了图片——如果你配的模型不支持看图，请换一个支持视觉的模型，或改用 Claude / Codex 后端。）\n"
+              : "") +
             "请在托盘菜单「内置普瑞赛斯设置…」中确认服务器地址、API Key 与模型名。"
         );
       }
