@@ -889,14 +889,19 @@ function showPopover() {
   popover.show();
   popover.focus();
   popover.webContents.send("popover:opened");
-  scheduleDesktopPet();
+  // Don't schedule the pet timer while VS Code has her attention — the Doctor
+  // will return to VS Code, and an idle-timer pet pop-in would be a distraction.
+  if (!wsServer.isVscodeActive()) scheduleDesktopPet();
   if (fadeIn) fadeWindow(popover, 0, 1, 180);
 }
 
 function collapsePopoverToDesktopPet() {
   clearTimeout(desktopPetTimer);
   desktopPetTimer = null;
-  if (!settings.get("desktopPet")) {
+  // When VS Code holds her attention, just hide the popover — don't show the
+  // desktop pet. The Doctor will come back to VS Code; the pet would only
+  // distract. Tray click still opens the popover normally.
+  if (!settings.get("desktopPet") || wsServer.isVscodeActive()) {
     hideDesktopPet();
     clearWindowFade();
     if (popover && !popover.isDestroyed()) {
@@ -1878,13 +1883,24 @@ app.whenReady().then(() => {
     onVscodeConnected() {
       clearTimeout(desktopPetTimer);
       desktopPetTimer = null;
-      hideDesktopPet();
-      if (popover && !popover.isDestroyed() && popover.isVisible()) {
-        collapsePopoverToDesktopPet();
+      // Hide the popover cleanly (no fade, no pet-collapse animation).
+      if (popover && !popover.isDestroyed()) {
+        clearWindowFade();
+        popover.hide();
+        popover.setOpacity(1);
+      }
+      // Hide the desktop pet — VS Code is her window now.
+      if (desktopPet && !desktopPet.isDestroyed()) {
+        desktopPet.hide();
       }
     },
     onVscodeDisconnected() {
-      scheduleDesktopPet();
+      // Bring the desktop pet back immediately, no idle delay.
+      if (settings.get("desktopPet")) {
+        clearTimeout(desktopPetTimer);
+        desktopPetTimer = null;
+        showDesktopPet();
+      }
     }
   });
 
