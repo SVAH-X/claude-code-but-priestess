@@ -78,6 +78,8 @@ contextBridge.exposeInMainWorld("chatApi", {
       return "";
     }
   },
+  // Open a non-image attachment with the OS default app (Quick Look / Preview).
+  openAttachment: (p) => ipcRenderer.invoke("chat:open-attachment", p),
   cancel: () => ipcRenderer.invoke("chat:cancel"),
   clear: () => ipcRenderer.invoke("chat:clear"),
   getHistory: () => ipcRenderer.invoke("chat:get-history"),

@@ -1268,7 +1268,7 @@ function renderAttachmentList(paths) {
     if (/\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(p)) {
       const fig = document.createElement("div");
       fig.className = "msg-attachment image";
-      fig.title = name;
+      fig.title = "点击预览：" + name;
       const img = document.createElement("img");
       img.alt = name;
       img.loading = "lazy";
@@ -1277,18 +1277,48 @@ function renderAttachmentList(paths) {
         fig.classList.add("broken");
         fig.textContent = name;
       });
+      fig.addEventListener("click", () => {
+        if (!fig.classList.contains("broken")) openLightbox(img.src);
+      });
       fig.appendChild(img);
       wrap.appendChild(fig);
     } else {
       const chip = document.createElement("div");
       chip.className = "msg-attachment file";
       chip.textContent = name;
-      chip.title = p;
+      chip.title = "点击打开：" + p;
+      chip.addEventListener("click", () => window.chatApi?.openAttachment?.(p));
       wrap.appendChild(chip);
     }
   }
   return wrap;
 }
+
+// Attachment Quick Look — click an image attachment to enlarge it over the
+// chat; Esc, the × button, or a backdrop click dismisses it.
+const attachmentLightbox = document.getElementById("attachmentLightbox");
+const lightboxImg = document.getElementById("lightboxImg");
+const lightboxClose = document.getElementById("lightboxClose");
+
+function openLightbox(src) {
+  if (!src || !attachmentLightbox) return;
+  lightboxImg.src = src;
+  attachmentLightbox.hidden = false;
+}
+function closeLightbox() {
+  if (!attachmentLightbox) return;
+  attachmentLightbox.hidden = true;
+  lightboxImg.src = "";
+}
+lightboxClose?.addEventListener("click", closeLightbox);
+attachmentLightbox?.addEventListener("click", (event) => {
+  if (event.target === attachmentLightbox) closeLightbox();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && attachmentLightbox && !attachmentLightbox.hidden) {
+    closeLightbox();
+  }
+});
 
 function buildMsgEl(msg) {
   const el = document.createElement("div");
