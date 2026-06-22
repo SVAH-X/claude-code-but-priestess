@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
+const { pathToFileURL } = require("node:url");
 
 function onChannel(channel) {
   return (callback) => {
@@ -65,6 +66,14 @@ contextBridge.exposeInMainWorld("chatApi", {
   getPathForFile: (file) => {
     try {
       return webUtils.getPathForFile(file);
+    } catch {
+      return "";
+    }
+  },
+  // file:// URL for showing a local attachment thumbnail in the user's bubble.
+  fileUrl: (p) => {
+    try {
+      return pathToFileURL(p).href;
     } catch {
       return "";
     }

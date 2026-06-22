@@ -1258,6 +1258,38 @@ function appendBubbleTime(el, msg) {
   el.append(meta);
 }
 
+// Render the files/images the Doctor attached, inside their own message bubble:
+// a thumbnail for images, a filename chip for everything else.
+function renderAttachmentList(paths) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg-attachments";
+  for (const p of paths) {
+    const name = String(p).split(/[\\/]/).pop() || String(p);
+    if (/\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(p)) {
+      const fig = document.createElement("div");
+      fig.className = "msg-attachment image";
+      fig.title = name;
+      const img = document.createElement("img");
+      img.alt = name;
+      img.loading = "lazy";
+      img.src = window.chatApi?.fileUrl?.(p) || "";
+      img.addEventListener("error", () => {
+        fig.classList.add("broken");
+        fig.textContent = name;
+      });
+      fig.appendChild(img);
+      wrap.appendChild(fig);
+    } else {
+      const chip = document.createElement("div");
+      chip.className = "msg-attachment file";
+      chip.textContent = name;
+      chip.title = p;
+      wrap.appendChild(chip);
+    }
+  }
+  return wrap;
+}
+
 function buildMsgEl(msg) {
   const el = document.createElement("div");
   el.dataset.id = msg.id;
@@ -1338,6 +1370,9 @@ function buildMsgEl(msg) {
     }
   } else {
     el.textContent = msg.text || "";
+    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+      el.appendChild(renderAttachmentList(msg.attachments));
+    }
     appendBubbleTime(el, msg);
   }
   return el;

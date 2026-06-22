@@ -1089,7 +1089,7 @@ function pushTool(name, summary, { toolUseId = null, command = null } = {}) {
   return entry;
 }
 
-function pushUser(text, provider = activeProvider(), { ephemeral = false, queued = false } = {}) {
+function pushUser(text, provider = activeProvider(), { ephemeral = false, queued = false, attachments = [] } = {}) {
   const entry = {
     id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "user",
@@ -1099,6 +1099,8 @@ function pushUser(text, provider = activeProvider(), { ephemeral = false, queued
     ephemeral: Boolean(ephemeral),
     queued: Boolean(queued)
   };
+  // Show what the Doctor attached in their own bubble (renderer renders these).
+  if (Array.isArray(attachments) && attachments.length) entry.attachments = attachments.slice();
   history.push(entry);
   if (!entry.ephemeral && !entry.queued) {
     archiveConversationEntry(entry);
@@ -2096,7 +2098,7 @@ function send(text, attachments) {
 
   if (currentProcess || turnLaunching) {
     outboundQueue.push({ text: trimmed, attachments: files });
-    pushUser(trimmed, provider, { queued: true });
+    pushUser(trimmed, provider, { queued: true, attachments: files });
     emitQueueState();
     return { ok: true, queued: true, queueLength: outboundQueue.length };
   }
@@ -2131,7 +2133,7 @@ function dispatchSend(
   } else if (userAlreadyShown) {
     activateQueuedUser(trimmed);
   } else {
-    pushUser(trimmed, provider);
+    pushUser(trimmed, provider, { attachments });
   }
   beginAssistant();
   turnStartedAt = Date.now();

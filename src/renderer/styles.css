@@ -814,6 +814,46 @@ body.file-dragging::after {
   pointer-events: none;
 }
 
+/* Attachments shown inside a sent user bubble. */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.msg-attachment.image {
+  display: inline-block;
+  max-width: 160px;
+  max-height: 160px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+}
+.msg-attachment.image img {
+  display: block;
+  max-width: 160px;
+  max-height: 160px;
+  object-fit: contain;
+}
+.msg-attachment.image.broken {
+  max-width: none;
+  max-height: none;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.msg-attachment.file {
+  max-width: 200px;
+  padding: 4px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Manual edge/corner resize handles. */
 .resize-edge {
   position: fixed;
