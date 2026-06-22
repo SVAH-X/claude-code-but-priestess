@@ -40,6 +40,7 @@ let pendingAssistantText = "";
 let currentAssistantId = null;
 let currentToolName = null;
 let pendingDirectiveBuffer = "";
+let directiveTailBuffer = ""; // partial directive fragment spanning chunk boundaries
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -111,6 +112,12 @@ function pushUser(text, context) {
   history.push(entry);
   emit({ kind: "history", history: history.slice() });
   saveConversation();
+  // Archive to shared memory so the doctor's words aren't lost.
+  try {
+    persona.ensureConversationArchiveFile();
+    const line = JSON.stringify({ role: "user", text, ts: Date.now() });
+    fs.appendFileSync(persona.conversationArchivePath(), line + "\n", "utf8");
+  } catch (_) { /* best effort */ }
   return entry;
 }
 
@@ -118,6 +125,10 @@ function beginAssistant() {
   currentAssistantId = nextId();
   pendingAssistantText = "";
   pendingDirectiveBuffer = "";
+  directiveTailBuffer = "";
+  skillExecutedThisTurn.clear();
+  rememberedThisTurn.clear();
+  lastEmittedMood = null;
   history.push({
     id: currentAssistantId,
     role: "assistant",
@@ -127,11 +138,23 @@ function beginAssistant() {
 }
 
 function appendAssistant(raw) {
-  pendingDirectiveBuffer += raw;
   pendingAssistantText += raw;
-  // Strip directives from streaming text for clean display
-  const clean = stripPartialDirectives(raw);
-  // Check for complete directive tags in the buffer
+  // Accumulate into the directive buffer for complete-tag matching.
+  pendingDirectiveBuffer += raw;
+  // Cross-chunk directive guard: prepend any buffered tail from the previous
+  // chunk so tags split across chunk boundaries don't leak their second half.
+  const displayInput = directiveTailBuffer + raw;
+  // Strip directives from streaming text for clean display.
+  const clean = stripPartialDirectives(displayInput);
+  // Hold back a trailing partial tag for the next chunk.
+  const partialRe = /\[\[\s*(?:mood|skill|observe|silent|remember)[^\]]{0,40}$/;
+  const partialMatch = clean.match(partialRe);
+  if (partialMatch) {
+    directiveTailBuffer = partialMatch[0];
+  } else {
+    directiveTailBuffer = "";
+  }
+  // Check for complete directive tags in the accumulated buffer.
   checkDirectives();
   if (clean) {
     const entry = history[history.length - 1];
@@ -153,9 +176,10 @@ function stripPartialDirectives(text) {
   out = out.replace(/\[\[\s*silent\s*\]\]/gi, "");
   // Remove [[observe:…]]
   out = out.replace(/\[\[\s*observe\s*[:：]\s*[^\]]*\s*\]\]/gi, "");
-  // Strip trailing partial directive (e.g. "[[mood:ha", "[[mood：开") from display.
-  // Handles both ASCII : and full-width ：colons.
-  const partialRe = /\[\[\s*(?:mood|skill|observe|silent)[^\]]{0,40}$/;
+  // Remove [[remember:…]]
+  out = out.replace(/\[\[\s*remember\s*[:：]\s*[^\]]*\s*\]\]/gi, "");
+  // Strip trailing partial directive from display.
+  const partialRe = /\[\[\s*(?:mood|skill|observe|silent|remember)[^\]]{0,40}$/;
   const partialMatch = out.match(partialRe);
   if (partialMatch) {
     out = out.slice(0, out.length - partialMatch[0].length);
@@ -163,20 +187,43 @@ function stripPartialDirectives(text) {
   return out;
 }
 
+const skillExecutedThisTurn = new Set();
+let lastEmittedMood = null;
+const rememberedThisTurn = new Set();
+
 function checkDirectives() {
-  // Extract and handle complete [[mood:X]] tags
   let match;
-  const moodRe = /\[\[mood:([a-z]+)\]\]/gi;
+
+  // Extract and handle complete [[mood:X]] tags (strict + lenient single-bracket).
+  // Dedup per-turn: only emit when the mood actually changes.
+  const moodRe = /\[\[\s*mood\s*[:：]\s*([a-z]+)\s*\]\]/gi;
   while ((match = moodRe.exec(pendingDirectiveBuffer)) !== null) {
-    emit({ kind: "mood", mood: match[1] });
+    const thisMood = match[1];
+    if (thisMood !== lastEmittedMood) {
+      lastEmittedMood = thisMood;
+      emit({ kind: "mood", mood: thisMood });
+    }
   }
 
-  // Extract and handle complete [[skill:NAME ARG]] tags
-  // Guard on skillsEnabled, matching chat.js behaviour.
+  // [[remember:…]] — write to MEMORY.md, works in any mode (no file tools needed).
+  // Dedup per-turn so each unique text is written only once.
+  const rememberRe = /\[\[\s*remember\s*[:：]\s*([^\]]+)\s*\]\]/gi;
+  while ((match = rememberRe.exec(pendingDirectiveBuffer)) !== null) {
+    const text = (match[1] || "").trim();
+    if (text && !rememberedThisTurn.has(text)) {
+      rememberedThisTurn.add(text);
+      persona.appendMemoryEntry(text);
+    }
+  }
+
+  // [[skill:NAME ARG]] — guarded on skillsEnabled + dedup per turn.
   if (settings.get("skillsEnabled") === false) return;
-  const skillRe = /\[\[skill:([a-z_]+) ([^\]]+)\]\]/gi;
+  const skillRe = /\[\[\s*skill\s*[:：]\s*([a-z_]+)(?:\s+([^\]]*?))?\s*\]\]/gi;
   while ((match = skillRe.exec(pendingDirectiveBuffer)) !== null) {
-    skills.runSkill(match[1], match[2]).then((result) => {
+    const tag = match[0];
+    if (skillExecutedThisTurn.has(tag)) continue;
+    skillExecutedThisTurn.add(tag);
+    skills.runSkill(match[1], match[2] || "").then((result) => {
       if (result.receipt) {
         history.push({
           id: nextId(),
@@ -367,6 +414,17 @@ function dispatchSend(trimmed, context) {
   const provider = chat.getProviderAvailability().activeProvider || "claude";
   currentProvider = provider;
 
+  // The built-in "priestess" backend has no CLI file tools — it doesn't work
+  // for vibe coding. Tell the user and fall back to companion-mode chat.
+  if (provider === "priestess") {
+    const errMsg = "内置普瑞赛斯后端不支持终端工具，Vibe Coding 暂只支持 Claude Code / Codex。";
+    history.push({ id: nextId(), role: "system", text: errMsg, ts: Date.now() });
+    emit({ kind: "status", status: "idle", error: errMsg });
+    emit({ kind: "history", history: history.slice() });
+    midTurn = false;
+    return;
+  }
+
   // Inject editor context into the user message so the CLI sees it
   const messageWithContext = buildContextAugmentedMessage(trimmed, context);
 
@@ -377,7 +435,9 @@ function dispatchSend(trimmed, context) {
   const vscodeWs = wsServer.getVscodeWorkspace();
   const cwd = vscodeWs || settings.get("chatCwd") || "";
 
-  const vibeCodingMode = settings.get("vibeCodingMode") || "companion";
+  const rawMode = settings.get("vibeCodingMode") || "companion";
+  // VS Code extension never gets full agent — cap at advisor.
+  const vibeCodingMode = rawMode === "agent" ? "advisor" : rawMode;
   const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, "", vscodeSessionIds);
 
   if (!invocation) {

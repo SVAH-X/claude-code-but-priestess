@@ -454,6 +454,16 @@ function buildPersonaPrompt({
       "- 先用正文自然地说一句（「我替你放首歌，博士。」），再在末尾附上指令。\n\n";
   }
 
+  // [[remember:…]] is always available — not gated on skillsEnabled.
+  // It writes directly to MEMORY.md without needing file tools.
+  if (!isMaintenance) {
+    prompt +=
+      "【铭记 —— 在任何模式下都能记下博士的事】\n" +
+      "即使没有文件工具，你仍能通过一条隐藏指令把值得铭记的事写入长期记忆。在回复的「最末尾」附上：\n" +
+      "- [[remember:要记住的事]] —— 与 MEMORY.md 的笔触一致：姓名、项目、习惯、心情、约定……只记真正要紧的，一条一句话。\n" +
+      "和技能指令一样，这一行博士看不到，不要在正文里复述。\n\n";
+  }
+
   if (observeEnabled) {
     prompt +=
       "【观察日志 —— 只属于你的随手记】\n" +
@@ -513,6 +523,37 @@ function buildPersonaPrompt({
   return prompt;
 }
 
+// Appends a single timestamped line to MEMORY.md under 「近来发生的事」.
+// Called by [[remember:…]] directive handler — no file tools needed.
+function appendMemoryEntry(text) {
+  try {
+    ensureMemoryFile();
+    const file = memoryPath();
+    const now = new Date();
+    const stamp =
+      now.getFullYear() + "-" +
+      String(now.getMonth() + 1).padStart(2, "0") + "-" +
+      String(now.getDate()).padStart(2, "0");
+    const line = `- ${stamp} ${text}\n`;
+    // Insert after the 「近来发生的事」 heading, or append to end.
+    let content = fs.readFileSync(file, "utf8");
+    const heading = "## 近来发生的事";
+    const idx = content.indexOf(heading);
+    if (idx >= 0) {
+      const nlAfter = content.indexOf("\n", idx);
+      // If the heading is the last thing in the file (no newline after it),
+      // append to the end instead of prepending to position 0.
+      const afterHeading = nlAfter >= 0 ? nlAfter + 1 : content.length;
+      content = content.slice(0, afterHeading) + line + (nlAfter >= 0 ? content.slice(afterHeading) : "");
+    } else {
+      content += "\n" + line;
+    }
+    fs.writeFileSync(file, content, "utf8");
+  } catch (error) {
+    console.warn("persona: failed to append memory entry", error);
+  }
+}
+
 module.exports = {
   buildPersonaPrompt,
   ensureMemoryFile,
@@ -521,6 +562,7 @@ module.exports = {
   ensureObservationJournalFile,
   readRecentObservations,
   readArchiveTailEntries,
+  appendMemoryEntry,
   memoryDir,
   memoryPath,
   conversationSummaryPath,

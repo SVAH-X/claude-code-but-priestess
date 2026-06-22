@@ -7,7 +7,7 @@ let wsClient: WsClient | null = null;
 let contextCapture: ContextCapture | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log("PRTS: activating…");
+  vscode.window.showInformationMessage("PRTS: activating…");
 
   wsClient = new WsClient(context);
 
@@ -70,7 +70,7 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Vibe coding: cycle through companion → advisor → agent
+  // Vibe coding: toggle companion ↔ advisor (VS Code extension doesn't need full agent)
   context.subscriptions.push(
     vscode.commands.registerCommand("prts.toggleVibeCoding", async () => {
       if (!wsClient || !wsClient.isConnected()) return;
@@ -78,24 +78,12 @@ export function activate(context: vscode.ExtensionContext) {
         const res: any = await wsClient.send("settings:get");
         const state = res?.state || {};
         const current = state.vibeCodingMode || "companion";
-        const next = current === "companion" ? "advisor"
-                   : current === "advisor" ? "agent"
-                   : "companion";
-        // Require confirmation when switching to agent mode
-        if (next === "agent") {
-          const choice = await vscode.window.showWarningMessage(
-            "切换至代理模式将授予普瑞赛斯完整的终端权限——她可以读取、编辑文件，运行任意命令。",
-            { modal: true },
-            "确认切换",
-            "取消"
-          );
-          if (choice !== "确认切换") return;
-        }
+        // Only companion and advisor — agent is the tray app's domain.
+        const next = current === "companion" ? "advisor" : "companion";
         await wsClient.send("settings:set", { patch: { vibeCodingMode: next } });
         const labels: Record<string, string> = {
           companion: "💬 陪伴模式（仅聊天）",
           advisor: "👁 顾问模式（只读工具）",
-          agent: "⚡ 代理模式（完整权限）",
         };
         vscode.window.showInformationMessage(`PRTS: ${labels[next]}`);
       } catch (_) { /* ignore */ }
@@ -140,12 +128,12 @@ export function activate(context: vscode.ExtensionContext) {
   // ---- Connection lifecycle ----
 
   // On first connect: send vscode:active, offer to restore previous conversation
-  wsClient.on("connected", () => {
+  (wsClient as any).on("connected", () => {
     wsClient!.send("vscode:active");
   });
 
   // After auth, the server sends conversation:has-previous
-  wsClient.on("conversation:has-previous", (msg: any) => {
+  (wsClient as any).on("conversation:has-previous", (msg: any) => {
     if (msg.hasPrevious) {
       vscode.window
         .showInformationMessage(
@@ -163,7 +151,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  console.log("PRTS: activated");
+  vscode.window.showInformationMessage("PRTS: activated");
 }
 
 export function deactivate() {

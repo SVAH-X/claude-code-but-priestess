@@ -82,7 +82,7 @@ let lastInvalidCodexModelNotice = "";
 // across chunks. Handling tags anywhere (not just the reply head) also fixes
 // the Claude leak where a second text block after a tool call opened with a
 // fresh [[mood:X]] that used to slip through verbatim.
-const DIRECTIVE_RE = /\[\[\s*(?:mood\s*[:：]\s*([^\]]*?)|skill\s*:\s*([a-z_]+)(?:\s+([^\]]*?))?|observe\s*[:：]\s*([^\]]*?)|silent)\s*\]\]/gi;
+const DIRECTIVE_RE = /\[\[\s*(?:mood\s*[:：]\s*([^\]]*?)|skill\s*:\s*([a-z_]+)(?:\s+([^\]]*?))?|observe\s*[:：]\s*([^\]]*?)|remember\s*[:：]\s*([^\]]*?)|silent)\s*\]\]/gi;
 // Lenient head catcher for the finalize pass: models sometimes write the
 // opening mood tag malformed ("mood:smile", "[mood:smile]"). Streaming can't
 // strip those without risking real prose, but once the reply is complete a
@@ -97,7 +97,7 @@ const LENIENT_MOOD_HEAD_RE = /^\s*[\[（(]{0,2}\s*mood\s*[:：]\s*([a-zA-Z]+)\s*
 // finalize variant also accepts end-of-text.
 const LENIENT_MOOD_STREAM_RE = /\[\[\s*mood\s*[:：]\s*([a-zA-Z]+)\s*\](?=[^\]])[ \t]?/gi;
 const LENIENT_MOOD_FINAL_RE = /\[\[\s*mood\s*[:：]\s*([a-zA-Z]+)\s*\](?!\])[ \t]?/gi;
-const DIRECTIVE_PREFIXES = ["[[mood:", "[[skill:", "[[observe:", "[[silent]]"];
+const DIRECTIVE_PREFIXES = ["[[mood:", "[[skill:", "[[observe:", "[[remember:", "[[silent]]"];
 // Generous because [[observe:…]] carries a free-form sentence.
 const DIRECTIVE_PARTIAL_MAX = 240;
 const OBSERVATION_MAX_PER_TURN = 3;
@@ -744,7 +744,7 @@ function pruneObservationJournalIfNeeded() {
 // Handle one complete directive tag pulled from the stream (or the finalize
 // pass — skills dedupe per turn so nothing re-fires). Always returns "" so it
 // can be used directly as a String.replace handler.
-function handleDirective(full, mood, skillName, skillArg, observe) {
+function handleDirective(full, mood, skillName, skillArg, observe, remember) {
   if (mood !== undefined) {
     emitMood(mood);
   } else if (skillName) {
@@ -754,6 +754,10 @@ function handleDirective(full, mood, skillName, skillArg, observe) {
   } else if (observe !== undefined) {
     // Maintenance turns have no screen — ignore any observation they invent.
     if (silentTurnKind !== "maintenance") recordObservation(observe);
+  } else if (remember !== undefined) {
+    // [[remember:…]] writes to MEMORY.md — works in any mode, no file tools needed.
+    const text = (remember || "").trim();
+    if (text) persona.appendMemoryEntry(text);
   } else {
     sawSilentDirective = true;
   }
@@ -813,7 +817,7 @@ function stripDirectiveTags(text) {
       emitMood(mood);
       return "";
     })
-    .replace(/\[?\[\s*(?:mood|skill|observe|silent)\b[^\]]*$/i, "")
+    .replace(/\[?\[\s*(?:mood|skill|observe|remember|silent)\b[^\]]*$/i, "")
     .trim();
 }
 

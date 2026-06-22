@@ -62,14 +62,6 @@ function vibeCodingModeWarning(mode) {
   if (mode === "agent") return agentModeWarning();
 
   if (mode === "advisor") {
-    if (process.platform === "win32") {
-      return {
-        message: "Advisor mode lets her read files and search code, but not edit or run commands.",
-        detail:
-          "She can use Read, Grep, Glob, and LS to understand your project, but she cannot edit files or run shell commands. This is a safe way to get her analysis and suggestions.\n\n" +
-          "You can change modes any time from the tray menu."
-      };
-    }
     return {
       message: "Advisor mode lets her read files and search code, but not edit or run commands.",
       detail:

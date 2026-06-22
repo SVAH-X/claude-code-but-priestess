@@ -94,7 +94,7 @@ function handleInbound(ws, raw) {
       // Send VS Code's own conversation state (not Electron's)
       vscodeChat.init();
       sendTo(ws, { type: "chat:history", history: vscodeChat.getHistory() });
-      sendTo(ws, { type: "settings:state", state: settings.getAll() });
+      sendTo(ws, { type: "settings:state", state: safeSettingsState() });
       sendTo(ws, {
         type: "conversation:has-previous",
         hasPrevious: vscodeChat.hasPreviousConversation(),
@@ -230,7 +230,20 @@ function start(callbacks) {
   appVersion = require("electron").app.getVersion();
   token = generateToken();
 
-  wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  wss = new WebSocketServer({
+    host: "127.0.0.1",
+    port: 0,
+    maxPayload: 4 * 1024 * 1024,
+    verifyClient: (info) => {
+      const origin = (info.origin || "").toLowerCase();
+      if (!origin) return true;
+      if (origin.startsWith("vscode-webview://")) return true;
+      if (origin === "file://") return true;
+      if (origin.startsWith("http://127.0.0.1:")) return true;
+      if (origin.startsWith("http://localhost:")) return true;
+      return false;
+    }
+  });
 
   wss.on("listening", () => {
     port = wss.address().port;
@@ -244,8 +257,22 @@ function start(callbacks) {
       if (wss) {
         try { wss.close(); } catch (_) { /* ignore */ }
       }
+      authenticated.clear();
       token = generateToken();
-      wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+      wss = new WebSocketServer({
+    host: "127.0.0.1",
+    port: 0,
+    maxPayload: 4 * 1024 * 1024,
+    verifyClient: (info) => {
+      const origin = (info.origin || "").toLowerCase();
+      if (!origin) return true;
+      if (origin.startsWith("vscode-webview://")) return true;
+      if (origin === "file://") return true;
+      if (origin.startsWith("http://127.0.0.1:")) return true;
+      if (origin.startsWith("http://localhost:")) return true;
+      return false;
+    }
+  });
       wss.on("listening", () => {
         port = wss.address().port;
         writePortFile();

@@ -36,7 +36,7 @@
       },
       {
         "command": "prts.toggleVibeCoding",
-        "title": "PRTS: Cycle Vibe Coding Mode (陪伴 → 顾问 → 代理)",
+        "title": "PRTS: Toggle Vibe Coding Mode (陪伴 ↔ 顾问)",
         "icon": "$(sync)"
       },
       {

@@ -14,6 +14,8 @@ const fs = require("node:fs");
 const settings = require("./settings");
 const chat = require("./chat");
 const persona = require("./persona");
+// wsServer is lazy-required inside functions to break the ws-server→chat→proactive→ws-server cycle.
+function getWsServer() { return require("./ws-server"); }
 
 const TICK_MS = 60 * 1000;
 const MAINTENANCE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -22,7 +24,7 @@ const MAINTENANCE_MEMORY_MIN_BYTES = 16 * 1024;
 const MAINTENANCE_IDLE_MS = 5 * 60 * 1000;
 const BOOT_GRACE_MS = 10 * 60 * 1000;
 
-const wsServer = require("./ws-server");
+// wsServer accessed via getWsServer() to break circular require (see top of file).
 
 let tickTimer = null;
 let lastProactiveAttemptAt = 0;
@@ -92,12 +94,16 @@ function activityCooldownMs() {
 }
 
 function shouldRunDiagnosticCheck(now) {
-  if (!wsServer.isVscodeActive()) return false;
+  if (!getWsServer().isVscodeActive()) return false;
   if (settings.get("vibeCodingDiagnostics") !== true) return false;
   if (now - lastDiagnosticAttemptAt < diagnosticCooldownMs()) return false;
   if (chat.isBusy()) return false;
+  if (inQuietHours()) return false;
+  const day = localDayKey();
+  if (daily.day !== day) daily = { day, count: 0 };
+  if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
-  const diag = wsServer.getLatestDiagnostics();
+  const diag = getWsServer().getLatestDiagnostics();
   if (!diag || diag.errors === 0) return false;
   const lastTs = chat.getLastConversationTs();
   if (lastTs && now - lastTs < cooldownMs()) return false;
@@ -105,12 +111,16 @@ function shouldRunDiagnosticCheck(now) {
 }
 
 function shouldRunActivityCheck(now) {
-  if (!wsServer.isVscodeActive()) return false;
+  if (!getWsServer().isVscodeActive()) return false;
   if (settings.get("vibeCodingActivityNarration") !== true) return false;
   if (now - lastActivityAttemptAt < activityCooldownMs()) return false;
   if (chat.isBusy()) return false;
+  if (inQuietHours()) return false;
+  const day = localDayKey();
+  if (daily.day !== day) daily = { day, count: 0 };
+  if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
-  const activities = wsServer.getRecentActivities();
+  const activities = getWsServer().getRecentActivities();
   if (!activities || activities.length === 0) return false;
   // Only trigger if there's a recent activity (within last 2 minutes)
   const recent = activities.some((a) => now - a.timestamp < 2 * 60 * 1000);
@@ -160,7 +170,7 @@ function tick() {
 
     if (shouldRunDiagnosticCheck(now)) {
       lastDiagnosticAttemptAt = now;
-      const diag = wsServer.getLatestDiagnostics();
+      const diag = getWsServer().getLatestDiagnostics();
       if (chat.sendProactive({ diagnosticContext: diag })?.ok) {
         daily.count += 1;
       }
