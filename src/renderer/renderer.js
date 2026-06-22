@@ -1259,6 +1259,38 @@ function appendBubbleTime(el, msg) {
   el.append(meta);
 }
 
+// Render the files/images the Doctor attached, inside their own message bubble:
+// a thumbnail for images, a filename chip for everything else.
+function renderAttachmentList(paths) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg-attachments";
+  for (const p of paths) {
+    const name = String(p).split(/[\\/]/).pop() || String(p);
+    if (/\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(p)) {
+      const fig = document.createElement("div");
+      fig.className = "msg-attachment image";
+      fig.title = name;
+      const img = document.createElement("img");
+      img.alt = name;
+      img.loading = "lazy";
+      img.src = window.chatApi?.fileUrl?.(p) || "";
+      img.addEventListener("error", () => {
+        fig.classList.add("broken");
+        fig.textContent = name;
+      });
+      fig.appendChild(img);
+      wrap.appendChild(fig);
+    } else {
+      const chip = document.createElement("div");
+      chip.className = "msg-attachment file";
+      chip.textContent = name;
+      chip.title = p;
+      wrap.appendChild(chip);
+    }
+  }
+  return wrap;
+}
+
 function buildMsgEl(msg) {
   const el = document.createElement("div");
   el.dataset.id = msg.id;
@@ -1356,6 +1388,9 @@ function buildMsgEl(msg) {
     }
   } else {
     el.textContent = msg.text || "";
+    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+      el.appendChild(renderAttachmentList(msg.attachments));
+    }
     appendBubbleTime(el, msg);
   }
   return el;
@@ -1746,19 +1781,112 @@ composerInput.addEventListener("keydown", (event) => {
   }
 });
 
+// ============================================================
+//  Attachments — "+" button / drag-drop files & images into chat.
+//  Paths are handed to the backend; Claude reads them with Read, Codex gets
+//  images as -i input. See src/main/chat.js.
+// ============================================================
+const attachBtn = document.getElementById("attachBtn");
+const attachmentChips = document.getElementById("attachmentChips");
+let pendingAttachments = []; // [{ path, name }]
+
+function attachmentFileName(p) {
+  return String(p).split(/[\\/]/).pop() || String(p);
+}
+
+function isImageAttachment(p) {
+  return /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(p);
+}
+
+function renderChips() {
+  attachmentChips.replaceChildren();
+  attachmentChips.classList.toggle("has-items", pendingAttachments.length > 0);
+  for (const a of pendingAttachments) {
+    const chip = document.createElement("span");
+    chip.className = "chip" + (isImageAttachment(a.path) ? " image" : "");
+    const label = document.createElement("span");
+    label.className = "chip-name";
+    label.textContent = a.name;
+    label.title = a.path;
+    chip.appendChild(label);
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "chip-remove";
+    x.setAttribute("aria-label", "移除");
+    x.textContent = "×";
+    x.addEventListener("click", () => {
+      pendingAttachments = pendingAttachments.filter((it) => it.path !== a.path);
+      renderChips();
+    });
+    chip.appendChild(x);
+    attachmentChips.appendChild(chip);
+  }
+}
+
+function addAttachments(paths) {
+  let added = false;
+  for (const p of paths || []) {
+    if (!p || pendingAttachments.some((a) => a.path === p)) continue;
+    pendingAttachments.push({ path: p, name: attachmentFileName(p) });
+    added = true;
+  }
+  if (added) renderChips();
+}
+
+function clearAttachments() {
+  if (pendingAttachments.length === 0) return;
+  pendingAttachments = [];
+  renderChips();
+}
+
+attachBtn?.addEventListener("click", async () => {
+  try {
+    const paths = await window.chatApi.pickFiles();
+    addAttachments(paths);
+  } catch (error) {
+    console.error("Failed to pick files:", error);
+  }
+  composerInput.focus();
+});
+
+// Drag a file anywhere onto the chat window → attach it (never navigate).
+window.addEventListener("dragover", (event) => {
+  if (Array.from(event.dataTransfer?.types || []).includes("Files")) {
+    event.preventDefault();
+    document.body.classList.add("file-dragging");
+  }
+});
+window.addEventListener("dragleave", (event) => {
+  if (event.relatedTarget === null) document.body.classList.remove("file-dragging");
+});
+window.addEventListener("drop", (event) => {
+  document.body.classList.remove("file-dragging");
+  const dropped = event.dataTransfer?.files;
+  if (!dropped || dropped.length === 0) return;
+  event.preventDefault();
+  const paths = [];
+  for (const file of dropped) {
+    const p = window.chatApi?.getPathForFile?.(file);
+    if (p) paths.push(p);
+  }
+  addAttachments(paths);
+});
+
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = composerInput.value.trim();
-  if (!text) return;
+  const files = pendingAttachments.map((a) => a.path);
+  if (!text && files.length === 0) return;
   composerInput.value = "";
   autosizeInput();
+  clearAttachments();
   flashPunch(0.05);
   resetInactivityTimers();
   renderExpression("halfClosed");
   setTimeout(() => {
     if (chatRunning) renderExpression(MOOD_FRAME[state.mood] || state.mood);
   }, 200);
-  const result = await window.chatApi.send(text);
+  const result = await window.chatApi.send(text, files);
   if (result?.ok === false) {
     showBubble(t("send_failed", result.reason), 3000);
   }

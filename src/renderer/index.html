@@ -52,7 +52,13 @@
     </div>
 
     <footer class="composer">
+      <div id="attachmentChips" class="attachment-chips"></div>
       <form id="composer" autocomplete="off">
+        <button type="button" id="attachBtn" class="attach-btn" aria-label="Attach files or images" title="添加文件 / 图片（也可拖入）">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
         <textarea
           id="composerInput"
           placeholder="Talk to her…  (Shift+Enter for newline)"

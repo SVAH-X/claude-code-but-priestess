@@ -123,6 +123,97 @@ function setChatCatMode(mode) {
     : { cat: false, mood: "normal" };
 }
 
+// Absolute paths of files/images the Doctor attached to the turn currently being
+// dispatched (+ button / drag-drop). Set in dispatchSend, read by the invocation
+// builders and the persona prompt. Ephemeral; reset every dispatch.
+let pendingAttachments = [];
+
+function isImagePath(p) {
+  return /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(String(p || ""));
+}
+
+// Codex reads images as -i image input and other files from --add-dir'd dirs.
+function codexAttachmentArgs() {
+  const args = [];
+  const dirs = new Set();
+  for (const p of pendingAttachments) {
+    if (isImagePath(p)) args.push("-i", p);
+    else dirs.add(path.dirname(p));
+  }
+  for (const d of dirs) args.push("--add-dir", d);
+  return args;
+}
+
+// ---- Built-in (HTTP) backend attachments: no file tools, so inline them ----
+const PRIESTESS_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const PRIESTESS_TEXTFILE_MAX_CHARS = 20000;
+
+function imageToDataUri(p) {
+  try {
+    if (fs.statSync(p).size > PRIESTESS_IMAGE_MAX_BYTES) {
+      console.warn("priestess: image too large to inline, skipping", p);
+      return null;
+    }
+    const ext = path.extname(p).toLowerCase();
+    const mime =
+      ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" :
+      ext === ".webp" ? "image/webp" :
+      ext === ".gif" ? "image/gif" :
+      ext === ".bmp" ? "image/bmp" : "image/png";
+    return `data:${mime};base64,${fs.readFileSync(p).toString("base64")}`;
+  } catch (error) {
+    console.warn("priestess: failed to inline image", p, error);
+    return null;
+  }
+}
+
+function readTextFileForInline(p) {
+  try {
+    if (fs.statSync(p).size > 1024 * 1024) return null;
+    const buf = fs.readFileSync(p);
+    if (buf.includes(0)) return null; // looks binary — can't inline as text
+    let text = buf.toString("utf8");
+    if (text.length > PRIESTESS_TEXTFILE_MAX_CHARS) {
+      text = text.slice(0, PRIESTESS_TEXTFILE_MAX_CHARS) + "\n…（文件过长，已截断）";
+    }
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+// Fold this turn's attachments into the final user message: images as base64
+// image_url (OpenAI vision), text files inlined as text. Whether the configured
+// model can actually see images is up to that model.
+function applyAttachmentsToPriestessMessages(messages) {
+  if (!pendingAttachments.length) return;
+  let lastUser = null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") {
+      lastUser = messages[i];
+      break;
+    }
+  }
+  if (!lastUser) return;
+  const baseText = typeof lastUser.content === "string" ? lastUser.content : "";
+  const imageParts = [];
+  let inlined = "";
+  for (const p of pendingAttachments) {
+    if (isImagePath(p)) {
+      const uri = imageToDataUri(p);
+      if (uri) imageParts.push({ type: "image_url", image_url: { url: uri } });
+    } else {
+      const content = readTextFileForInline(p);
+      if (content != null) inlined += `\n\n【附件 ${path.basename(p)}】\n${content}`;
+    }
+  }
+  if (imageParts.length) {
+    lastUser.content = [{ type: "text", text: baseText + inlined }, ...imageParts];
+  } else if (inlined) {
+    lastUser.content = baseText + inlined;
+  }
+}
+
 function normalizeProvider(provider) {
   if (provider === PROVIDERS.CODEX) return PROVIDERS.CODEX;
   if (provider === PROVIDERS.PRIESTESS) return PROVIDERS.PRIESTESS;
@@ -591,7 +682,11 @@ function drainOutboundQueue() {
   if (quitPending || currentProcess || outboundQueue.length === 0) return;
   const next = outboundQueue.shift();
   emitQueueState();
-  dispatchSend(next, { userAlreadyShown: true, chained: true });
+  dispatchSend(next.text, {
+    userAlreadyShown: true,
+    chained: true,
+    attachments: next.attachments || []
+  });
 }
 
 function clearOutboundQueue() {
@@ -998,7 +1093,7 @@ function pushTool(name, summary, { toolUseId = null, command = null } = {}) {
   return entry;
 }
 
-function pushUser(text, provider = activeProvider(), { ephemeral = false, queued = false } = {}) {
+function pushUser(text, provider = activeProvider(), { ephemeral = false, queued = false, attachments = [] } = {}) {
   const entry = {
     id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "user",
@@ -1008,6 +1103,8 @@ function pushUser(text, provider = activeProvider(), { ephemeral = false, queued
     ephemeral: Boolean(ephemeral),
     queued: Boolean(queued)
   };
+  // Show what the Doctor attached in their own bubble (renderer renders these).
+  if (Array.isArray(attachments) && attachments.length) entry.attachments = attachments.slice();
   history.push(entry);
   if (!entry.ephemeral && !entry.queued) {
     archiveConversationEntry(entry);
@@ -1857,7 +1954,8 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
       settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
     personaNotes: settings.get("personaNotes") || "",
     catMode: silentTurnKind ? null : chatCatMode,
-    coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false
+    coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
+    attachments: silentTurnKind ? [] : pendingAttachments
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -1925,7 +2023,8 @@ function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscr
         settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
       personaNotes: settings.get("personaNotes") || "",
       catMode: silentTurnKind ? null : chatCatMode,
-      coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false
+      coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
+      attachments: silentTurnKind ? [] : pendingAttachments
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
@@ -1955,6 +2054,7 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
     if (screenshotPath) {
       args.push("-i", screenshotPath);
     }
+    args.push(...codexAttachmentArgs());
     if (isAgent) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     }
@@ -1975,6 +2075,7 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
     if (screenshotPath) {
       args.push("-i", screenshotPath);
     }
+    args.push(...codexAttachmentArgs());
     if (isAgent) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     } else if (isAdvisor) {
@@ -2004,9 +2105,13 @@ function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screens
   return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds);
 }
 
-function send(text) {
-  const trimmed = String(text ?? "").trim();
-  if (!trimmed) return { ok: false, reason: "empty" };
+function send(text, attachments) {
+  const files = Array.isArray(attachments)
+    ? attachments.filter((p) => typeof p === "string" && p.trim())
+    : [];
+  let trimmed = String(text ?? "").trim();
+  if (!trimmed && files.length === 0) return { ok: false, reason: "empty" };
+  if (!trimmed) trimmed = "看看这些。"; // attachments with no text of their own
 
   refreshProviderAvailability();
   const provider = activeProvider();
@@ -2020,18 +2125,18 @@ function send(text) {
   }
 
   if (currentProcess || turnLaunching) {
-    outboundQueue.push(trimmed);
-    pushUser(trimmed, provider, { queued: true });
+    outboundQueue.push({ text: trimmed, attachments: files });
+    pushUser(trimmed, provider, { queued: true, attachments: files });
     emitQueueState();
     return { ok: true, queued: true, queueLength: outboundQueue.length };
   }
 
-  return dispatchSend(trimmed);
+  return dispatchSend(trimmed, { attachments: files });
 }
 
 function dispatchSend(
   trimmed,
-  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false, vibeCodingMode: vibeCodingModeOverride = null } = {}
+  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false, vibeCodingMode: vibeCodingModeOverride = null, attachments = [] } = {}
 ) {
   if (currentProcess || turnLaunching) return { ok: false, reason: "busy" };
 
@@ -2041,6 +2146,9 @@ function dispatchSend(
   if (!providerInfo?.available) {
     return { ok: false, reason: "missing-cli" };
   }
+
+  // Attachments belong only to this real turn; silent self-turns never carry any.
+  pendingAttachments = silentTurnKind ? [] : (Array.isArray(attachments) ? attachments : []);
 
   // A genuine new user turn — reset the Codex auto-continue guard.
   if (!chained) {
@@ -2053,7 +2161,7 @@ function dispatchSend(
   } else if (userAlreadyShown) {
     activateQueuedUser(trimmed);
   } else {
-    pushUser(trimmed, provider);
+    pushUser(trimmed, provider, { attachments });
   }
   beginAssistant();
   turnStartedAt = Date.now();
@@ -2139,7 +2247,12 @@ function buildPriestessMessages() {
     kept.push(messages[i]);
     total += length;
   }
-  return kept.reverse();
+  const result = kept.reverse();
+  // Inline this turn's files/images into the final user message (built-in
+  // backend has no file tools). Done after budgeting so the char-length math
+  // above keeps working on plain-string content.
+  applyAttachmentsToPriestessMessages(result);
+  return result;
 }
 
 // Built-in backend turn: stream straight from the configured OpenAI-compatible
@@ -2147,6 +2260,7 @@ function buildPriestessMessages() {
 // appendAssistant path the CLIs use.
 function launchPriestessTurn(trimmed) {
   turnLaunching = false;
+  const turnHadImages = pendingAttachments.some(isImagePath);
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const system = persona.buildPersonaPrompt({
@@ -2193,6 +2307,9 @@ function launchPriestessTurn(trimmed) {
       if (!cancelled) {
         pushSystem(
           `内置普瑞赛斯后端出错：${String(error?.message || error).slice(0, 300)}\n` +
+            (turnHadImages
+              ? "（这一轮发了图片——如果你配的模型不支持看图，请换一个支持视觉的模型，或改用 Claude / Codex 后端。）\n"
+              : "") +
             "请在托盘菜单「内置普瑞赛斯设置…」中确认服务器地址、API Key 与模型名。"
         );
       }
@@ -2227,7 +2344,10 @@ async function launchProviderTurn({
   const silentTurn = Boolean(silentTurnKind);
   const proactiveCheck = silentTurnKind === "proactive";
   const isAgent = vibeCodingMode === "agent";
-  const autoScreenshot = isAgent && settings.get("autoScreenshot") !== false;
+  // When the Doctor attached files this turn, he's pointing her at THOSE — skip
+  // the auto-screenshot so a full-screen grab doesn't steal her attention.
+  const autoScreenshot =
+    isAgent && settings.get("autoScreenshot") !== false && pendingAttachments.length === 0;
   // Chained turns normally skip the screenshot, but an auto-continuation needs a
   // fresh screen so she can actually answer what she "saw". Proactive checks
   // exist to look at the screen, so they always capture one regardless of

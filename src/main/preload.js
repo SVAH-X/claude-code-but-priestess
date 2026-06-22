@@ -1,4 +1,5 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
+const { pathToFileURL } = require("node:url");
 
 function onChannel(channel) {
   return (callback) => {
@@ -59,7 +60,24 @@ contextBridge.exposeInMainWorld("updateApi", {
 });
 
 contextBridge.exposeInMainWorld("chatApi", {
-  send: (text) => ipcRenderer.invoke("chat:send", text),
+  send: (text, attachments) => ipcRenderer.invoke("chat:send", { text, attachments }),
+  pickFiles: () => ipcRenderer.invoke("chat:pick-files"),
+  // Electron ≥32 removed File.path; resolve a dropped File's real path here.
+  getPathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return "";
+    }
+  },
+  // file:// URL for showing a local attachment thumbnail in the user's bubble.
+  fileUrl: (p) => {
+    try {
+      return pathToFileURL(p).href;
+    } catch {
+      return "";
+    }
+  },
   cancel: () => ipcRenderer.invoke("chat:cancel"),
   clear: () => ipcRenderer.invoke("chat:clear"),
   getHistory: () => ipcRenderer.invoke("chat:get-history"),
