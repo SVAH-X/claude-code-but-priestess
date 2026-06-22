@@ -238,12 +238,29 @@ function checkDirectives() {
   }
 }
 
+// Side-effect-free directive stripper for finalize — directives are already
+// executed by checkDirectives() during streaming; this just cleans the text.
+function cleanDirectives(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/\[\[\s*mood\s*[:：]\s*[a-z]+\s*\]\]/gi, "")
+    .replace(/\[\[\s*mood\s*[:：]\s*[a-z]+\s*\](?=[^\]])/gi, "")
+    .replace(/\[\[\s*skill\s*[:：]\s*[a-z_]+(?:\s+[^\]]*?)?\s*\]\]/gi, "")
+    .replace(/\[\[\s*silent\s*\]\]/gi, "")
+    .replace(/\[\[\s*observe\s*[:：]\s*[^\]]*\s*\]\]/gi, "")
+    .replace(/\[\[\s*remember\s*[:：]\s*[^\]]*\s*\]\]/gi, "")
+    .replace(/\[?\[\s*(?:mood|skill|observe|remember|silent)\b[^\]]*$/i, "")
+    .trim();
+}
+
 function finalizeAssistant() {
-  // Strip all remaining directive tags
-  const clean = chat.stripDirectiveTags(pendingAssistantText);
+  // Strip directive tags from the final text (side-effect-free — directives
+  // were already executed by checkDirectives during streaming).
+  const clean = cleanDirectives(pendingAssistantText);
   const entry = history[history.length - 1];
   if (entry && entry.id === currentAssistantId) {
-    entry.text = clean || pendingAssistantText || "(empty)";
+    // If the reply was only directives, show "(silent)" instead of leaking raw tags.
+    entry.text = clean || "(silent)";
   }
   emit({ kind: "history", history: history.slice() });
   saveConversation();
@@ -331,16 +348,31 @@ function handleClaudeLine(line) {
   }
 }
 
+function codexThreadId(event) {
+  // Priority matches chat.js codexSessionIdFromEvent:
+  // session_id > sessionId > thread_id > threadId > conversation_id > conversationId > id
+  return (
+    event.session_id || event.sessionId ||
+    event.thread_id || event.threadId ||
+    event.conversation_id || event.conversationId ||
+    event.id
+  );
+}
+
 function handleCodexLine(line) {
   let event;
   try { event = JSON.parse(line); } catch { return; }
   if (!event || typeof event !== "object") return;
 
-  // Codex emits a variety of event shapes; handle the common ones
-  if (event.type === "session") {
-    vscodeSessionIds.codex = event.session_id || event.id;
-    saveConversation();
-    return;
+  // Capture session/thread ID for resume. Codex JSONL uses "thread.started"
+  // with thread_id; also handle legacy "session" events.
+  const type = typeof event.type === "string" ? event.type : "";
+  if (type === "thread.started" || type === "session" || type.includes("session")) {
+    const id = codexThreadId(event);
+    if (id) {
+      vscodeSessionIds.codex = id;
+      saveConversation();
+    }
   }
 
   const delta =

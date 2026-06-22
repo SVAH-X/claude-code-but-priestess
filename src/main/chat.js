@@ -89,7 +89,7 @@ const codexSessionFileCache = new Map();
 // across chunks. Handling tags anywhere (not just the reply head) also fixes
 // the Claude leak where a second text block after a tool call opened with a
 // fresh [[mood:X]] that used to slip through verbatim.
-const DIRECTIVE_RE = /\[\[\s*(?:mood\s*[:：]\s*([^\]]*?)|skill\s*:\s*([a-z_]+)(?:\s+([^\]]*?))?|observe\s*[:：]\s*([^\]]*?)|remember\s*[:：]\s*([^\]]*?)|silent)\s*\]\]/gi;
+const DIRECTIVE_RE = /\[\[\s*(?:mood\s*[:：]\s*([^\]]*?)|skill\s*[:：]\s*([a-z_]+)(?:\s+([^\]]*?))?|observe\s*[:：]\s*([^\]]*?)|remember\s*[:：]\s*([^\]]*?)|silent)\s*\]\]/gi;
 // Lenient head catcher for the finalize pass: models sometimes write the
 // opening mood tag malformed ("mood:smile", "[mood:smile]"). Streaming can't
 // strip those without risking real prose, but once the reply is complete a
@@ -2112,7 +2112,11 @@ async function takeScreenshot() {
   return null;
 }
 
-function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript) {
+function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
+  const isAdvisor = mode === "advisor";
+  const isMaintenance = mode === "maintenance";
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const systemPrompt = persona.buildPersonaPrompt({
@@ -2207,8 +2211,12 @@ function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscr
   );
 }
 
-function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
-  const prompt = buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript);
+function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
+  const isAdvisor = mode === "advisor";
+  const isMaintenance = mode === "maintenance";
+  const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript);
   const codexModel = validatedCodexModel();
   let args;
 
@@ -2228,6 +2236,13 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
     args.push(...codexAttachmentArgs());
     if (isAgent) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
+    } else if (isAdvisor || isMaintenance) {
+      // Resumed sessions carry their original sandbox; re-assert the current
+      // mode's sandbox so a prior agent session can't leak tools.
+      args.push("-s", isMaintenance ? "workspace-write" : "read-only",
+                 "--add-dir", persona.memoryDir());
+    } else {
+      args.push("-s", "read-only", "--add-dir", persona.memoryDir());
     }
     args.push(sessionIds[PROVIDERS.CODEX], "-");
   } else {
@@ -2251,13 +2266,13 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
       args.push("--dangerously-bypass-approvals-and-sandbox");
     } else if (isAdvisor) {
       // Read-only workspace + memory dir so she can still read her own notes.
-      args.push("-s", "workspace-read-only", "--add-dir", persona.memoryDir());
+      args.push("-s", "read-only", "--add-dir", persona.memoryDir());
     } else if (isMaintenance) {
       // Memory maintenance: needs file write access to memory dir.
       args.push("-s", "workspace-write", "--add-dir", persona.memoryDir());
     } else {
-      // Companion: tight sandbox — memory dir only, no workspace access.
-      args.push("-s", "none", "--add-dir", persona.memoryDir());
+      // Companion: read-only sandbox — memory dir accessible, no workspace access.
+      args.push("-s", "read-only", "--add-dir", persona.memoryDir());
     }
     args.push("-");
   }
@@ -2266,15 +2281,15 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
     command: resolveExecutable("codex"),
     args,
     stdin: prompt,
-    resumed: Boolean(resumeSessionId)
+    resumed: Boolean(sessionIds[PROVIDERS.CODEX])
   };
 }
 
-function buildProviderInvocation(provider, trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
+function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan) {
   if (provider === PROVIDERS.CODEX) {
-    return buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript);
+    return buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript);
   }
-  return buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript);
+  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan);
 }
 
 function send(text, attachments) {
@@ -2362,8 +2377,17 @@ function dispatchSend(
     silent: Boolean(silentTurnKind) || undefined
   });
 
-  const sharedTranscript = buildSharedTranscript();
-  const agentMode = Boolean(settings.get("agentMode"));
+  // Silent turns need tools regardless of the Doctor's vibeCodingMode setting.
+  // Proactive checks need at least Read (advisor); maintenance needs file r/w.
+  const globalMode = String(settings.get("vibeCodingMode") || "companion");
+  let vibeCodingMode = vibeCodingModeOverride || globalMode;
+  if (!vibeCodingModeOverride) {
+    if (silentTurnKind === "proactive") {
+      vibeCodingMode = globalMode === "agent" ? "agent" : "advisor";
+    } else if (silentTurnKind === "maintenance") {
+      vibeCodingMode = "maintenance";
+    }
+  }
 
   turnLaunching = true;
 

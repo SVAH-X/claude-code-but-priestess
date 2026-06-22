@@ -5,6 +5,10 @@
   "description": "Chat with Priestess (Arknights) inside VS Code, backed by your local Claude Code / Codex CLI via the PRTS tray app.",
   "publisher": "svah-x",
   "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SVAH-X/claude-code-but-priestess"
+  },
   "private": true,
   "engines": {
     "vscode": "^1.85.0"

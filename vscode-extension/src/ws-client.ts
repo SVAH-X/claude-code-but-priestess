@@ -19,8 +19,11 @@ interface PortFile {
   version: string;
 }
 
-function electronUserDataDir(): string {
-  const appName = "claude-code-but-priestess";
+// Release builds use "PRTS" as the app name; dev builds use the repo name.
+// Try the release name first, then the dev name.
+const APP_NAMES = ["PRTS", "claude-code-but-priestess"];
+
+function dataDirFor(appName: string): string {
   switch (process.platform) {
     case "win32":
       return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), appName);
@@ -32,18 +35,57 @@ function electronUserDataDir(): string {
 }
 
 function readPortFile(): PortFile | null {
-  try {
-    const filePath = path.join(electronUserDataDir(), "ws-port.json");
-    const raw = fs.readFileSync(filePath, "utf8");
-    const data = JSON.parse(raw);
-    if (typeof data.port === "number" && typeof data.token === "string") {
-      return data as PortFile;
+  for (const name of APP_NAMES) {
+    try {
+      const filePath = path.join(dataDirFor(name), "ws-port.json");
+      const raw = fs.readFileSync(filePath, "utf8");
+      const data = JSON.parse(raw);
+      if (typeof data.port === "number" && typeof data.token === "string") {
+        return data as PortFile;
+      }
+    } catch {
+      // try next name
     }
-    return null;
-  } catch {
-    return null;
   }
+  return null;
 }
+
+// Read the manual port config from VS Code settings (prts.electronPort).
+// When set, the extension connects directly to that port but still requires
+// the auth token from a ws-port.json file in one of the known data dirs.
+function manualPortConfig(): { port: number; token: string } | null {
+  const cfg = vscode.workspace.getConfiguration("prts");
+  const port = cfg.get<number>("electronPort");
+  if (!port || port <= 0) return null;
+  // When using a manual port, we still need the token from a port file.
+  for (const name of APP_NAMES) {
+    try {
+      const filePath = path.join(dataDirFor(name), "ws-port.json");
+      const raw = fs.readFileSync(filePath, "utf8");
+      const data = JSON.parse(raw);
+      if (typeof data.token === "string") {
+        return { port, token: data.token };
+      }
+    } catch {
+      // try next name
+    }
+  }
+  return null;
+}
+
+const NOTIFY_TYPES = new Set([
+  // VS Code lifecycle — no response expected
+  "vscode:active",
+  "vscode:inactive",
+  "vscode:focus",
+  // Editor events — fire-and-forget
+  "vscode:context",
+  "vscode:diagnostics",
+  "vscode:activity",
+  "vscode:workspace",
+  // Chat control — server handles but does not send reqId-matched reply
+  "chat:cancel",
+]);
 
 export class WsClient extends EventEmitter {
   private ws: any = null;
@@ -56,6 +98,8 @@ export class WsClient extends EventEmitter {
   private reqCounter = 0;
   private statusBarItem: vscode.StatusBarItem;
   private bufferedMessages: string[] = [];
+  private manualPort: number | null = null;
+  private manualToken: string | null = null;
 
   constructor(private context: vscode.ExtensionContext) {
     super();
@@ -75,22 +119,35 @@ export class WsClient extends EventEmitter {
   private connect() {
     if (this.disposed) return;
 
-    const portFile = readPortFile();
-    if (!portFile) {
-      this.scheduleReconnect();
-      return;
+    // Check manual port config first
+    const manual = manualPortConfig();
+    if (manual) {
+      this.manualPort = manual.port;
+      this.manualToken = manual.token;
+    }
+
+    let url: string;
+    let authToken: string;
+
+    if (this.manualPort) {
+      url = `ws://127.0.0.1:${this.manualPort}`;
+      authToken = this.manualToken!;
+    } else {
+      const portFile = readPortFile();
+      if (!portFile) {
+        this.scheduleReconnect();
+        return;
+      }
+      url = `ws://127.0.0.1:${portFile.port}`;
+      authToken = portFile.token;
     }
 
     try {
-      const url = `ws://127.0.0.1:${portFile.port}`;
-      // Dynamic import of ws — VS Code extensions bundle their own node_modules
       const WebSocket = require("ws");
       this.ws = new WebSocket(url);
 
       this.ws.on("open", () => {
-        // Send auth immediately
-        this.ws.send(JSON.stringify({ type: "auth", token: portFile.token }));
-        // Flush any buffered messages
+        this.ws.send(JSON.stringify({ type: "auth", token: authToken }));
         for (const msg of this.bufferedMessages) {
           this.ws.send(msg);
         }
@@ -113,7 +170,6 @@ export class WsClient extends EventEmitter {
       });
 
       this.ws.on("error", (err: Error) => {
-        // Will trigger 'close' — just log
         this.updateStatusBar("error");
       });
     } catch {
@@ -129,7 +185,6 @@ export class WsClient extends EventEmitter {
       return;
     }
 
-    // Handle auth response
     if (msg.type === "auth:ok") {
       this.authenticated = true;
       this.connected = true;
@@ -154,7 +209,20 @@ export class WsClient extends EventEmitter {
     this.emit(msg.type, msg);
   }
 
-  send(type: string, data?: Record<string, any>): Promise<any> {
+  /** Fire-and-forget notification — no response expected, no timeout. */
+  notify(type: string, data?: Record<string, any>): void {
+    const msgObj: any = { type, ...(data || {}) };
+    // Notifications carry no reqId — they won't be correlated with a response.
+    const msg = JSON.stringify(msgObj);
+    if (this.ws && this.authenticated && this.ws.readyState === 1) {
+      this.ws.send(msg);
+    } else {
+      this.bufferedMessages.push(msg);
+    }
+  }
+
+  /** Request that expects a response. Creates a Promise with 30s timeout. */
+  request(type: string, data?: Record<string, any>): Promise<any> {
     return new Promise((resolve, reject) => {
       const reqId = String(++this.reqCounter);
       const msg = JSON.stringify({ type, reqId, ...(data || {}) });
@@ -169,10 +237,18 @@ export class WsClient extends EventEmitter {
       if (this.ws && this.authenticated && this.ws.readyState === 1) {
         this.ws.send(msg);
       } else {
-        // Buffer for when we connect/authenticate
         this.bufferedMessages.push(msg);
       }
     });
+  }
+
+  /** Backward-compat: same as request() but skips the Promise for notify types. */
+  send(type: string, data?: Record<string, any>): Promise<any> {
+    if (NOTIFY_TYPES.has(type)) {
+      this.notify(type, data);
+      return Promise.resolve();
+    }
+    return this.request(type, data);
   }
 
   private scheduleReconnect() {
@@ -186,6 +262,8 @@ export class WsClient extends EventEmitter {
         this.reconnectDelay * 2,
         RECONNECT_MAX_MS
       );
+      this.manualPort = null;
+      this.manualToken = null;
       this.connect();
     }, this.reconnectDelay);
   }
@@ -230,7 +308,6 @@ export class WsClient extends EventEmitter {
       this.reconnectTimer = null;
     }
     if (this.ws) {
-      // Best-effort: tell the server we're going away
       try {
         this.ws.send(JSON.stringify({ type: "vscode:inactive" }));
       } catch {}

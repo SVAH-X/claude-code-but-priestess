@@ -1538,12 +1538,6 @@ function buildContextMenu() {
       click: (item) => settings.set({ coauthorCommits: item.checked })
     },
     {
-      label: mt("coauthorCommits"),
-      type: "checkbox",
-      checked: all.coauthorCommits !== false,
-      click: (item) => settings.set({ coauthorCommits: item.checked })
-    },
-    {
       label: mt("vibeCoding"),
       submenu: [
         {
@@ -1997,9 +1991,11 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  // Don't orphan a mid-turn CLI subprocess — it would keep running (and
-  // consuming the Doctor's quota) with no UI attached.
+  // Don't orphan mid-turn CLI subprocesses — they'd keep running
+  // (consuming quota / resources) with no UI attached.
   chat.cancel();
+  try { require("./vscode-chat").cancel(); } catch (_) { /* ignore */ }
+  try { wsServer.stop(); } catch (_) { /* ignore */ }
 });
 
 // ============================================================
