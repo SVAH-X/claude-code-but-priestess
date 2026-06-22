@@ -257,6 +257,25 @@ function localTimeBlock() {
   );
 }
 
+function attachmentIsImage(p) {
+  return /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(String(p || ""));
+}
+
+// Read a non-image attachment as text to inline into the prompt. Skips binaries
+// (NUL byte) and anything over ~1MB; truncates very long files.
+function readAttachmentText(p) {
+  try {
+    if (fs.statSync(p).size > 1024 * 1024) return null;
+    const buf = fs.readFileSync(p);
+    if (buf.includes(0)) return null;
+    let text = buf.toString("utf8");
+    if (text.length > 20000) text = text.slice(0, 20000) + "\n…（文件过长，已截断）";
+    return text;
+  } catch {
+    return null;
+  }
+}
+
 function buildPersonaPrompt({
   agentMode,
   screenshotPath,
@@ -483,20 +502,26 @@ function buildPersonaPrompt({
   }
 
   // Files/images the Doctor attached to this message (+ button or drag-drop).
-  // The built-in HTTP backend has no file tools, so it is handled separately
-  // (skipped here); Codex gets images as -i image input, Claude reads paths.
+  // Built-in HTTP backend is handled separately (skipped here). Images go by
+  // path — Codex as -i input, Claude via Read. Text files are inlined directly
+  // (no --add-dir: codex's `resume` subcommand rejects it, and inlining is the
+  // one delivery that works on every backend, fresh or resumed).
   if (Array.isArray(attachments) && attachments.length && provider !== "priestess") {
-    const list = attachments.map((p) => `  ${p}`).join("\n");
-    if (provider === "codex") {
+    const images = attachments.filter(attachmentIsImage);
+    const docs = attachments.filter((p) => !attachmentIsImage(p));
+    if (images.length) {
+      const list = images.map((p) => `  ${p}`).join("\n");
       prompt +=
-        "【博士附上的文件 / 图片】\n" +
-        "博士这一轮随消息附上了以下文件：\n" + list + "\n" +
-        "其中图片已作为图像输入直接附给你，你能看见；其余文件请用你的工具按上面的路径读取后再回答。看完给博士一个真正的回答，别只复述你做了什么。\n\n";
-    } else {
+        provider === "codex"
+          ? "【博士附上的图片】\n这些图片已作为图像输入直接附给你，你能看见，据此回答即可：\n" + list + "\n\n"
+          : "【博士附上的图片】\n你必须先用 Read 工具，按下面每个绝对路径逐个读取，再回答——真正读过之前，绝不要说「没有图片」「看不到」：\n" + list + "\n\n";
+    }
+    for (const p of docs) {
+      const content = readAttachmentText(p);
       prompt +=
-        "【博士附上的文件 / 图片】\n" +
-        "博士这一轮随消息附上了以下文件。你必须先用 Read 工具，按下面每个绝对路径逐个读取（图片、文本、PDF 都能读），再回答——在真正读过之前，绝不要说「没有图片」「看不到」之类的话：\n" + list + "\n" +
-        "读完后给博士一个真正的回答，而不是只复述你做了什么。\n\n";
+        content != null
+          ? `【博士附上的文件：${path.basename(p)}】\n${content}\n\n`
+          : `【博士附上的文件：${path.basename(p)}】\n（无法以文本读取的文件，路径：${p}）\n\n`;
     }
   }
 

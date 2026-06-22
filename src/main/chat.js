@@ -132,25 +132,23 @@ function isImagePath(p) {
   return /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(String(p || ""));
 }
 
-// Codex reads images as -i image input and other files from --add-dir'd dirs.
+// Codex gets images as -i image input. Non-image files are inlined into the
+// prompt by persona.js (no --add-dir: `codex exec resume` rejects that flag).
 function codexAttachmentArgs() {
   const args = [];
-  const dirs = new Set();
   for (const p of pendingAttachments) {
     if (isImagePath(p)) args.push("-i", p);
-    else dirs.add(path.dirname(p));
   }
-  for (const d of dirs) args.push("--add-dir", d);
   return args;
 }
 
-// Claude has no image flag — it reads attachments with its Read tool, which
-// outside agent mode is sandboxed to the cwd. Grant every attachment's parent
-// dir so she can actually read files the Doctor dropped from elsewhere (Desktop
-// etc.); without this, non-agent turns answer "no photo".
+// Claude has no image flag — it reads attached images with its Read tool, which
+// outside agent mode is sandboxed to the cwd. Grant each image's parent dir so
+// Read can reach images dropped from elsewhere (Desktop etc.); without this,
+// non-agent turns answer "no photo". Text files are inlined, so only images.
 function attachmentDirArgs() {
   const dirs = new Set();
-  for (const p of pendingAttachments) dirs.add(path.dirname(p));
+  for (const p of pendingAttachments) if (isImagePath(p)) dirs.add(path.dirname(p));
   const args = [];
   for (const d of dirs) args.push("--add-dir", d);
   return args;
