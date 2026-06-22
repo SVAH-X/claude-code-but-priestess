@@ -1,14 +1,7 @@
 #!/bin/bash
-# Build macOS (arm64) + Windows (x64) artifacts and upload them to a DRAFT
-# GitHub release for the current package.json version.
-#
-# Why this script exists:
-# - Windows must be built with --x64 explicitly (an arm64 Mac defaults to
-#   arm64 Windows binaries otherwise).
-# - latest.yml references the installer as "PRTS-Setup-X.exe" (dashes), but
-#   the file on disk has spaces and GitHub's web drag-drop uploader rewrites
-#   spaces to dots -- which 404s the auto-updater's download URL. Uploading
-#   via gh with the dashed name keeps auto-update working.
+# Build macOS artifacts and upload them to a DRAFT GitHub release for the
+# current package.json version. Windows is built from the release tag by the
+# GitHub Actions Windows runner after the draft is published.
 #
 # Usage:  ./scripts/release.sh           # build + upload to draft
 # Then review the draft notes on GitHub and publish:
@@ -18,16 +11,27 @@ cd "$(dirname "$0")/.."
 
 VERSION=$(node -p "require('./package.json').version")
 TAG="v$VERSION"
-echo "==> Building $TAG (macOS arm64 + Windows x64)..."
+DIRTY_INPUTS=$(git status --porcelain --untracked-files=all -- src assets package.json package-lock.json scripts .github)
+if [[ -n "$DIRTY_INPUTS" ]]; then
+  echo "Refusing to release with uncommitted packaging inputs:" >&2
+  echo "$DIRTY_INPUTS" >&2
+  exit 1
+fi
+
+echo "==> Checking project assets..."
+npm run lint
+
+echo "==> Building $TAG (macOS arm64)..."
 npx electron-builder --mac --publish never
-npx electron-builder --win --x64 --publish never
+
+MAC_ASAR=$(find dist -path '*/PRTS.app/Contents/Resources/app.asar' -print -quit)
+if [[ -z "$MAC_ASAR" ]]; then
+  echo "Could not find the packaged macOS app.asar." >&2
+  exit 1
+fi
+node scripts/check-packaged-assets.js "$MAC_ASAR"
 
 cd dist
-cp -f "PRTS Setup $VERSION.exe" "PRTS-Setup-$VERSION.exe"
-cp -f "PRTS Setup $VERSION.exe.blockmap" "PRTS-Setup-$VERSION.exe.blockmap"
-
-echo "==> Verifying latest.yml matches the renamed installer..."
-grep -q "PRTS-Setup-$VERSION.exe" latest.yml
 
 if ! gh release view "$TAG" > /dev/null 2>&1; then
   echo "==> Creating draft release $TAG..."
@@ -36,10 +40,6 @@ fi
 
 echo "==> Uploading assets to $TAG..."
 gh release upload "$TAG" --clobber \
-  "PRTS-Setup-$VERSION.exe" \
-  "PRTS-Setup-$VERSION.exe.blockmap" \
-  "PRTS-$VERSION-win.zip" \
-  "latest.yml" \
   "PRTS-$VERSION-arm64.dmg" \
   "PRTS-$VERSION-arm64.dmg.blockmap" \
   "PRTS-$VERSION-arm64-mac.zip" \

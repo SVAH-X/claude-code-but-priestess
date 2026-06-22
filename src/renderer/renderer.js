@@ -1259,8 +1259,12 @@ function appendBubbleTime(el, msg) {
   el.append(meta);
 }
 
+// data: URIs by path, so re-renders during streaming don't re-read the file.
+const attachmentImageCache = new Map();
+
 // Render the files/images the Doctor attached, inside their own message bubble:
-// a thumbnail for images, a filename chip for everything else.
+// a thumbnail for images (data: URI — webSecurity blocks cross-dir file://),
+// a filename chip for everything else.
 function renderAttachmentList(paths) {
   const wrap = document.createElement("div");
   wrap.className = "msg-attachments";
@@ -1269,27 +1273,71 @@ function renderAttachmentList(paths) {
     if (/\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(p)) {
       const fig = document.createElement("div");
       fig.className = "msg-attachment image";
-      fig.title = name;
+      fig.title = "点击预览：" + name;
       const img = document.createElement("img");
       img.alt = name;
-      img.loading = "lazy";
-      img.src = window.chatApi?.fileUrl?.(p) || "";
+      fig.appendChild(img);
       img.addEventListener("error", () => {
+        // Un-previewable (e.g. HEIC) — show the name; a click opens it in the OS.
         fig.classList.add("broken");
         fig.textContent = name;
       });
-      fig.appendChild(img);
+      const cached = attachmentImageCache.get(p);
+      if (cached) {
+        img.src = cached;
+      } else {
+        Promise.resolve(window.chatApi?.attachmentDataUri?.(p)).then((uri) => {
+          if (uri) {
+            attachmentImageCache.set(p, uri);
+            img.src = uri;
+          } else {
+            fig.classList.add("broken");
+            fig.textContent = name;
+          }
+        });
+      }
+      fig.addEventListener("click", () => {
+        if (fig.classList.contains("broken")) window.chatApi?.openAttachment?.(p);
+        else openLightbox(attachmentImageCache.get(p) || img.src);
+      });
       wrap.appendChild(fig);
     } else {
       const chip = document.createElement("div");
       chip.className = "msg-attachment file";
       chip.textContent = name;
-      chip.title = p;
+      chip.title = "点击打开：" + p;
+      chip.addEventListener("click", () => window.chatApi?.openAttachment?.(p));
       wrap.appendChild(chip);
     }
   }
   return wrap;
 }
+
+// Attachment Quick Look — click an image attachment to enlarge it over the
+// chat; Esc, the × button, or a backdrop click dismisses it.
+const attachmentLightbox = document.getElementById("attachmentLightbox");
+const lightboxImg = document.getElementById("lightboxImg");
+const lightboxClose = document.getElementById("lightboxClose");
+
+function openLightbox(src) {
+  if (!src || !attachmentLightbox) return;
+  lightboxImg.src = src;
+  attachmentLightbox.hidden = false;
+}
+function closeLightbox() {
+  if (!attachmentLightbox) return;
+  attachmentLightbox.hidden = true;
+  lightboxImg.src = "";
+}
+lightboxClose?.addEventListener("click", closeLightbox);
+attachmentLightbox?.addEventListener("click", (event) => {
+  if (event.target === attachmentLightbox) closeLightbox();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && attachmentLightbox && !attachmentLightbox.hidden) {
+    closeLightbox();
+  }
+});
 
 function buildMsgEl(msg) {
   const el = document.createElement("div");

@@ -69,6 +69,11 @@ let popoverExpectedSize = null;
 let moveEndFallbackTimer = null;
 let desktopPet;
 let desktopPetTimer = null;
+// True while she's streaming a reply. The idle→desktop-pet countdown must not
+// run during output, so it never collapses the chat mid-reply (even a slow one)
+// — it only starts once she goes idle. See scheduleDesktopPet + the chat status
+// handler.
+let chatTurnRunning = false;
 let desktopPetPositionSaveTimer = null;
 // Transient scale during active scroll-resizing. While set, it overrides the
 // persisted setting so resizing never has to round-trip through a synchronous
@@ -101,7 +106,7 @@ const CREDITS = [
     ]
   },
   {
-    name: "Leoluis0705",
+    name: "才好的结果",
     role: { zh: "Windows 支持 · 桌宠模式", en: "Windows support · desktop pet mode" },
     links: [{ label: "GitHub @Leoluis0705", url: "https://github.com/Leoluis0705" }]
   },
@@ -768,6 +773,9 @@ function scheduleDesktopPet() {
   clearTimeout(desktopPetTimer);
   desktopPetTimer = null;
   if (!settings.get("desktopPet")) return;
+  // Don't start the collapse countdown while she's still replying — the timer
+  // (re)starts the moment output stops, in the chat status handler.
+  if (chatTurnRunning) return;
   desktopPetTimer = setTimeout(showDesktopPet, DESKTOP_PET_IDLE_MS);
 }
 
@@ -1936,8 +1944,11 @@ app.whenReady().then(() => {
       // desktop pet blink out and back for something invisible.
       if (!event.silent) {
         if (event.status === "running") {
+          chatTurnRunning = true;
           hideDesktopPet();
         } else if (event.status === "idle") {
+          // Output stopped — now begin the idle countdown from this moment.
+          chatTurnRunning = false;
           scheduleDesktopPet();
         }
       }
@@ -2043,6 +2054,26 @@ ipcMain.handle("chat:send", (_, payload) => {
   // Back-compat: payload may be a plain string (old) or { text, attachments }.
   if (typeof payload === "string") return chat.send(payload);
   return chat.send(payload?.text, payload?.attachments);
+});
+ipcMain.handle("chat:open-attachment", (_, p) => {
+  if (typeof p === "string" && p) shell.openPath(p);
+});
+// Local image → data: URI for in-bubble thumbnails / Quick Look. Done in main
+// because the popover runs with webSecurity on, which blocks cross-dir file://.
+ipcMain.handle("chat:attachment-data-uri", (_, p) => {
+  try {
+    if (typeof p !== "string" || !p) return "";
+    if (fs.statSync(p).size > 16 * 1024 * 1024) return "";
+    const ext = path.extname(p).toLowerCase();
+    const mime =
+      ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" :
+      ext === ".webp" ? "image/webp" :
+      ext === ".gif" ? "image/gif" :
+      ext === ".bmp" ? "image/bmp" : "image/png";
+    return `data:${mime};base64,${fs.readFileSync(p).toString("base64")}`;
+  } catch {
+    return "";
+  }
 });
 ipcMain.handle("chat:pick-files", async () => {
   const result = await dialog.showOpenDialog({

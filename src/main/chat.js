@@ -27,6 +27,12 @@ const SUMMARY_MAX_CHARS = 14000;
 const SUMMARY_MESSAGE_MAX_CHARS = 720;
 const ARCHIVE_MAX_BYTES = 5 * 1024 * 1024;
 const ARCHIVE_TARGET_BYTES = 4 * 1024 * 1024;
+// Codex persists every resumed turn (including our persona and transcript) in
+// its own JSONL rollout. Once that file grows large, adding an image can turn a
+// normal request into repeated transport reconnects. PRTS already owns bounded
+// cross-backend context, so rotate the CLI session before it becomes a burden.
+const CODEX_SESSION_MAX_BYTES = 16 * 1024 * 1024;
+const CODEX_SESSION_SCAN_MAX_DEPTH = 6;
 
 const subscribers = new Set();
 const history = []; // { id, role: 'user' | 'assistant' | 'system' | 'tool', text, ts }
@@ -71,6 +77,7 @@ let claudeModelFallbackInFlight = false;
 const MAX_TOOL_OUTPUT_CHARS = 4000;
 let codexModelCatalogCache = { command: null, ts: 0, values: null };
 let lastInvalidCodexModelNotice = "";
+const codexSessionFileCache = new Map();
 
 // Hidden directive tags — she begins each reply with [[mood:X]] and may emit
 // more directives anywhere in it: additional [[mood:X]] switches when the tone
@@ -132,16 +139,137 @@ function isImagePath(p) {
   return /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(String(p || ""));
 }
 
-// Codex reads images as -i image input and other files from --add-dir'd dirs.
+function findCodexSessionFileInDir(dir, sessionId, depth = 0) {
+  if (depth > CODEX_SESSION_SCAN_MAX_DEPTH) return null;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (entry.name.endsWith(".jsonl") && entry.name.includes(sessionId)) {
+      return path.join(dir, entry.name);
+    }
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = findCodexSessionFileInDir(path.join(dir, entry.name), sessionId, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function codexSessionFile(sessionId) {
+  if (!sessionId) return null;
+  const cached = codexSessionFileCache.get(sessionId);
+  if (cached) {
+    try {
+      if (fs.statSync(cached).isFile()) return cached;
+    } catch {
+      codexSessionFileCache.delete(sessionId);
+    }
+  }
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const roots = [path.join(codexHome, "sessions"), path.join(codexHome, "archived_sessions")];
+  for (const root of roots) {
+    const found = findCodexSessionFileInDir(root, sessionId);
+    if (found) {
+      codexSessionFileCache.set(sessionId, found);
+      return found;
+    }
+  }
+  return null;
+}
+
+function codexSessionRotationReason(sessionId) {
+  if (!sessionId) return "";
+  // Image turns are relatively heavy and must not inherit an unbounded CLI
+  // rollout. The bounded shared transcript below preserves visible continuity.
+  if (pendingAttachments.some(isImagePath)) return "image attachment";
+  const file = codexSessionFile(sessionId);
+  if (!file) return "";
+  try {
+    const bytes = fs.statSync(file).size;
+    return bytes > CODEX_SESSION_MAX_BYTES ? `rollout ${Math.ceil(bytes / 1024 / 1024)} MB` : "";
+  } catch {
+    codexSessionFileCache.delete(sessionId);
+    return "";
+  }
+}
+
+function providerSessionPlan(provider) {
+  const savedSessionId = sessionIds[provider] || null;
+  if (provider !== PROVIDERS.CODEX) {
+    return { resumeSessionId: savedSessionId, rotationReason: "" };
+  }
+  const rotationReason = codexSessionRotationReason(savedSessionId);
+  if (rotationReason) {
+    console.info(`chat: starting a fresh Codex session (${rotationReason})`);
+  }
+  return {
+    resumeSessionId: rotationReason ? null : savedSessionId,
+    rotationReason
+  };
+}
+
+// Codex gets images as -i image input. Non-image files are inlined into the
+// prompt by persona.js (no --add-dir: `codex exec resume` rejects that flag).
 function codexAttachmentArgs() {
   const args = [];
-  const dirs = new Set();
   for (const p of pendingAttachments) {
     if (isImagePath(p)) args.push("-i", p);
-    else dirs.add(path.dirname(p));
   }
+  return args;
+}
+
+// Claude has no image flag — it reads attached images with its Read tool, which
+// outside agent mode is sandboxed to the cwd. Grant each image's parent dir so
+// Read can reach images dropped from elsewhere (Desktop etc.); without this,
+// non-agent turns answer "no photo". Text files are inlined, so only images.
+function attachmentDirArgs() {
+  const dirs = new Set();
+  for (const p of pendingAttachments) if (isImagePath(p)) dirs.add(path.dirname(p));
+  const args = [];
   for (const d of dirs) args.push("--add-dir", d);
   return args;
+}
+
+// Vision cost + latency scale with pixels, so cap oversized images before they
+// go to a backend (a huge screenshot/photo is mostly wasted detail). The Doctor
+// still sees the full original in their own bubble; only the backend copy
+// shrinks. Returns paths with large images swapped for downscaled temp copies.
+const ATTACHMENT_MAX_DIM = 1280;
+
+function resolveAttachmentsForBackend(paths) {
+  if (!paths.some(isImagePath)) return paths;
+  let dir = null;
+  let img = null;
+  return paths.map((p) => {
+    if (!isImagePath(p)) return p;
+    try {
+      const { nativeImage } = require("electron");
+      img = nativeImage.createFromPath(p);
+      if (img.isEmpty()) return p;
+      const { width, height } = img.getSize();
+      if (Math.max(width, height) <= ATTACHMENT_MAX_DIM) return p;
+      const resized =
+        width >= height
+          ? img.resize({ width: ATTACHMENT_MAX_DIM, quality: "good" })
+          : img.resize({ height: ATTACHMENT_MAX_DIM, quality: "good" });
+      if (!dir) {
+        dir = path.join(os.tmpdir(), "prts-attach");
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const out = path.join(dir, path.basename(p).replace(/\.[^.]+$/, "") + ".png");
+      fs.writeFileSync(out, resized.toPNG());
+      return out;
+    } catch {
+      return p;
+    }
+  });
 }
 
 // ---- Built-in (HTTP) backend attachments: no file tools, so inline them ----
@@ -1126,8 +1254,24 @@ function activateQueuedUser(text) {
       }
     }
     emitHistory();
-    return;
+    return entry;
   }
+  return null;
+}
+
+function findLatestUserEntry(text, provider) {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (
+      entry?.role === "user" &&
+      !entry.queued &&
+      entry.text === text &&
+      entry.provider === provider
+    ) {
+      return entry;
+    }
+  }
+  return null;
 }
 
 function formatSummaryTimestamp(ts) {
@@ -1232,13 +1376,36 @@ function backfillArchiveFromHistoryIfEmpty() {
   }
 }
 
-function buildSharedTranscript() {
-  const lines = [];
-  for (const entry of history) {
-    if (!entry || entry.ephemeral || !entry.text || !["user", "assistant"].includes(entry.role)) continue;
-    const label = entry.role === "user" ? "博士" : "普瑞赛斯";
-    lines.push(`${label}: ${String(entry.text).trim()}`);
+function buildSharedTranscript({ provider, forceFull = false, excludeEntryId = null, skip = false } = {}) {
+  if (skip) return "";
+  let entries = history.filter(
+    (entry) =>
+      entry &&
+      !entry.ephemeral &&
+      !entry.queued &&
+      entry.text &&
+      ["user", "assistant"].includes(entry.role)
+  );
+
+  // A resumed backend already owns everything through its most recent
+  // successful assistant reply. Only bridge messages produced while another
+  // backend was active. A fresh/rotated session receives the bounded full tail.
+  if (!forceFull && provider) {
+    let cursor = -1;
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      if (entries[i].role === "assistant" && entries[i].provider === provider) {
+        cursor = i;
+        break;
+      }
+    }
+    if (cursor >= 0) entries = entries.slice(cursor + 1);
   }
+
+  if (excludeEntryId) entries = entries.filter((entry) => entry.id !== excludeEntryId);
+  const lines = entries.map((entry) => {
+    const label = entry.role === "user" ? "博士" : "普瑞赛斯";
+    return `${label}: ${String(entry.text).trim()}`;
+  });
   const transcript = lines.slice(-RECENT_TRANSCRIPT_MESSAGE_LIMIT).join("\n\n");
   if (transcript.length <= SHARED_TRANSCRIPT_MAX_CHARS) {
     return transcript;
@@ -1295,7 +1462,7 @@ function updateConversationSummary() {
   }
 }
 
-function beginAssistant() {
+function beginAssistant(provider = currentProvider || activeProvider()) {
   resetDirectiveParsing();
   claudeResultErrored = false;
   claudeModelInvalid = false;
@@ -1310,6 +1477,7 @@ function beginAssistant() {
     id: pendingAssistantId,
     role: "assistant",
     text: "",
+    provider,
     ts: Date.now(),
     ephemeral: false
   });
@@ -1366,9 +1534,17 @@ function emitToolOnlyFallback() {
   let entry = pendingAssistantId ? history.find((h) => h.id === pendingAssistantId) : null;
   if (!entry) {
     pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    entry = { id: pendingAssistantId, role: "assistant", text: "", ts: Date.now(), ephemeral: false };
+    entry = {
+      id: pendingAssistantId,
+      role: "assistant",
+      text: "",
+      provider: currentProvider || activeProvider(),
+      ts: Date.now(),
+      ephemeral: false
+    };
     history.push(entry);
   }
+  entry.provider = currentProvider || entry.provider || activeProvider();
   entry.text = toolOnlyFallbackText(labels);
   entry.ts = Date.now();
   entry.ephemeral = false;
@@ -1450,6 +1626,7 @@ function finishSilentTurn(finalText) {
     id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "assistant",
     text,
+    provider: currentProvider || activeProvider(),
     ts: Date.now(),
     ephemeral: false,
     proactive: true
@@ -1493,6 +1670,7 @@ function finalizeAssistant(finalText) {
     }
   }
   const entry = history.find((h) => h.id === pendingAssistantId);
+  if (entry) entry.provider = currentProvider || entry.provider || activeProvider();
   if (entry && finalText && finalText !== entry.text) {
     entry.text = finalText;
   }
@@ -1934,11 +2112,7 @@ async function takeScreenshot() {
   return null;
 }
 
-function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds) {
-  const mode = vibeCodingMode || "companion";
-  const isAgent = mode === "agent";
-  const isAdvisor = mode === "advisor";
-  const isMaintenance = mode === "maintenance";
+function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript) {
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const systemPrompt = persona.buildPersonaPrompt({
@@ -1990,17 +2164,19 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     // Companion mode: chat only, no tools at all.
     args.push("--allowedTools", "");
   }
+  // Let Read reach attachments dropped from outside the project dir.
+  args.push(...attachmentDirArgs());
 
-  const effectiveSessionIds = customSessionIds || sessionIds;
-  if (effectiveSessionIds[PROVIDERS.CLAUDE]) {
-    args.push("--resume", effectiveSessionIds[PROVIDERS.CLAUDE]);
+  if (sessionIds[PROVIDERS.CLAUDE]) {
+    args.push("--resume", sessionIds[PROVIDERS.CLAUDE]);
   }
 
   return {
     command: resolveExecutable("claude"),
     args,
     stdin: `${trimmed}\n`,
-    cleanupDirs: promptFile ? [promptFile.dir] : []
+    cleanupDirs: promptFile ? [promptFile.dir] : [],
+    resumed: Boolean(sessionPlan?.resumeSessionId)
   };
 }
 
@@ -2031,17 +2207,12 @@ function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscr
   );
 }
 
-function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds) {
-  const mode = vibeCodingMode || "companion";
-  const isAgent = mode === "agent";
-  const isAdvisor = mode === "advisor";
-  const isMaintenance = mode === "maintenance";
-  const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript);
+function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
+  const prompt = buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript);
   const codexModel = validatedCodexModel();
-  const effectiveSessionIds = customSessionIds || sessionIds;
   let args;
 
-  if (effectiveSessionIds[PROVIDERS.CODEX]) {
+  if (sessionIds[PROVIDERS.CODEX]) {
     args = [
       "exec",
       "resume",
@@ -2058,7 +2229,7 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
     if (isAgent) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     }
-    args.push(effectiveSessionIds[PROVIDERS.CODEX], "-");
+    args.push(sessionIds[PROVIDERS.CODEX], "-");
   } else {
     args = [
       "exec",
@@ -2094,15 +2265,16 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
   return {
     command: resolveExecutable("codex"),
     args,
-    stdin: prompt
+    stdin: prompt,
+    resumed: Boolean(resumeSessionId)
   };
 }
 
-function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds) {
+function buildProviderInvocation(provider, trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
   if (provider === PROVIDERS.CODEX) {
-    return buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds);
+    return buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript);
   }
-  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds);
+  return buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript);
 }
 
 function send(text, attachments) {
@@ -2148,7 +2320,11 @@ function dispatchSend(
   }
 
   // Attachments belong only to this real turn; silent self-turns never carry any.
-  pendingAttachments = silentTurnKind ? [] : (Array.isArray(attachments) ? attachments : []);
+  // Backend copies get downscaled (faster/cheaper vision); the bubble keeps the
+  // full original, which was attached to the history entry above.
+  pendingAttachments = silentTurnKind
+    ? []
+    : resolveAttachmentsForBackend(Array.isArray(attachments) ? attachments : []);
 
   // A genuine new user turn — reset the Codex auto-continue guard.
   if (!chained) {
@@ -2156,14 +2332,27 @@ function dispatchSend(
     codexContinuationPending = false;
   }
 
+  let currentUserEntry = null;
   if (silentUser) {
     // Internal continuation — drive the CLI without showing a user bubble.
   } else if (userAlreadyShown) {
-    activateQueuedUser(trimmed);
+    currentUserEntry = activateQueuedUser(trimmed) || findLatestUserEntry(trimmed, provider);
   } else {
-    pushUser(trimmed, provider, { attachments });
+    currentUserEntry = pushUser(trimmed, provider, { attachments });
   }
-  beginAssistant();
+  const sessionPlan = provider === PROVIDERS.PRIESTESS ? null : providerSessionPlan(provider);
+  const sharedTranscript =
+    provider === PROVIDERS.PRIESTESS
+      ? ""
+      : buildSharedTranscript({
+          provider,
+          forceFull: !sessionPlan.resumeSessionId,
+          excludeEntryId: currentUserEntry?.id || null,
+          // A Codex tool-turn continuation is already in the same CLI session;
+          // replaying transcript data there would duplicate the turn again.
+          skip: Boolean(silentUser && chained && sessionPlan.resumeSessionId)
+        });
+  beginAssistant(provider);
   turnStartedAt = Date.now();
   currentProvider = provider;
   emitStatus("running", {
@@ -2174,23 +2363,7 @@ function dispatchSend(
   });
 
   const sharedTranscript = buildSharedTranscript();
-  // Silent turns need file tools regardless of the Doctor's vibeCodingMode:
-  // - Proactive checks: need Read (screenshot) → advisor level is enough.
-  // - Memory maintenance: need Read+Edit+Write (MEMORY.md) → needs the old
-  //   default tool set; we use a special "maintenance" mode for that.
-  const globalMode = String(settings.get("vibeCodingMode") || "companion");
-  let vibeCodingMode = vibeCodingModeOverride || globalMode;
-  if (!vibeCodingModeOverride) {
-    if (silentTurnKind === "proactive") {
-      // Waifu checks: need at least Read for screenshot. Keep agent if set,
-      // otherwise bump to advisor (read-only tools).
-      vibeCodingMode = globalMode === "agent" ? "agent" : "advisor";
-    } else if (silentTurnKind === "maintenance") {
-      // Memory tidying: need Read+Edit+Write. A dedicated internal mode that
-      // grants file r/w but not Bash/network.
-      vibeCodingMode = "maintenance";
-    }
-  }
+  const agentMode = Boolean(settings.get("agentMode"));
 
   turnLaunching = true;
 
@@ -2205,6 +2378,7 @@ function dispatchSend(
       cwd: resolveCwd(),
       vibeCodingMode,
       sharedTranscript,
+      sessionPlan,
       chained,
       forceScreenshot
     });
@@ -2328,6 +2502,7 @@ async function launchProviderTurn({
   cwd,
   vibeCodingMode,
   sharedTranscript,
+  sessionPlan,
   chained,
   forceScreenshot = false
 }) {
@@ -2372,12 +2547,13 @@ async function launchProviderTurn({
     cwd,
     vibeCodingMode,
     screenshotPath,
-    sharedTranscript
+    sharedTranscript,
+    sessionPlan
   );
   // Did this turn try to resume a Claude session? If it did and the turn dies
   // with an empty error, the session id is probably stale and we self-heal.
   const launchedWithClaudeSession =
-    provider === PROVIDERS.CLAUDE && Boolean(sessionIds[PROVIDERS.CLAUDE]);
+    provider === PROVIDERS.CLAUDE && invocation.resumed;
   let proc;
   try {
     turnLaunching = false;

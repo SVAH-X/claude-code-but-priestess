@@ -78,6 +78,10 @@ contextBridge.exposeInMainWorld("chatApi", {
       return "";
     }
   },
+  // Open a non-image attachment with the OS default app (Quick Look / Preview).
+  openAttachment: (p) => ipcRenderer.invoke("chat:open-attachment", p),
+  // Local image as a data: URI (webSecurity blocks cross-dir file:// images).
+  attachmentDataUri: (p) => ipcRenderer.invoke("chat:attachment-data-uri", p),
   cancel: () => ipcRenderer.invoke("chat:cancel"),
   clear: () => ipcRenderer.invoke("chat:clear"),
   getHistory: () => ipcRenderer.invoke("chat:get-history"),
