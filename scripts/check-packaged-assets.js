@@ -33,7 +33,9 @@ const required = [
   path.posix.join("assets", "character", "icon.png")
 ];
 
-const packaged = new Set(asar.listPackage(archive).map((entry) => entry.replace(/^\//, "")));
+const packaged = new Set(
+  asar.listPackage(archive).map((entry) => entry.replace(/\\/g, "/").replace(/^\/+/, ""))
+);
 const missing = required.filter((entry) => !packaged.has(entry));
 
 if (missing.length > 0) {
