@@ -105,7 +105,7 @@ const CREDITS = [
     ]
   },
   {
-    name: "Leoluis0705",
+    name: "才好的结果",
     role: { zh: "Windows 支持 · 桌宠模式", en: "Windows support · desktop pet mode" },
     links: [{ label: "GitHub @Leoluis0705", url: "https://github.com/Leoluis0705" }]
   },
