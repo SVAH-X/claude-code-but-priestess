@@ -144,6 +144,18 @@ function codexAttachmentArgs() {
   return args;
 }
 
+// Claude has no image flag — it reads attachments with its Read tool, which
+// outside agent mode is sandboxed to the cwd. Grant every attachment's parent
+// dir so she can actually read files the Doctor dropped from elsewhere (Desktop
+// etc.); without this, non-agent turns answer "no photo".
+function attachmentDirArgs() {
+  const dirs = new Set();
+  for (const p of pendingAttachments) dirs.add(path.dirname(p));
+  const args = [];
+  for (const d of dirs) args.push("--add-dir", d);
+  return args;
+}
+
 // ---- Built-in (HTTP) backend attachments: no file tools, so inline them ----
 const PRIESTESS_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const PRIESTESS_TEXTFILE_MAX_CHARS = 20000;
@@ -1977,6 +1989,8 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     // Bash and network tools stay off until the Doctor enables agent mode.
     args.push("--allowedTools", "Read,Edit,Write,Glob,Grep,LS");
   }
+  // Let Read reach attachments dropped from outside the project dir.
+  args.push(...attachmentDirArgs());
 
   if (sessionIds[PROVIDERS.CLAUDE]) {
     args.push("--resume", sessionIds[PROVIDERS.CLAUDE]);
