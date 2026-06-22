@@ -2299,7 +2299,10 @@ async function launchProviderTurn({
 
   const silentTurn = Boolean(silentTurnKind);
   const proactiveCheck = silentTurnKind === "proactive";
-  const autoScreenshot = agentMode && settings.get("autoScreenshot") !== false;
+  // When the Doctor attached files this turn, he's pointing her at THOSE — skip
+  // the auto-screenshot so a full-screen grab doesn't steal her attention.
+  const autoScreenshot =
+    agentMode && settings.get("autoScreenshot") !== false && pendingAttachments.length === 0;
   // Chained turns normally skip the screenshot, but an auto-continuation needs a
   // fresh screen so she can actually answer what she "saw". Proactive checks
   // exist to look at the screen, so they always capture one regardless of
