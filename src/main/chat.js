@@ -27,6 +27,12 @@ const SUMMARY_MAX_CHARS = 14000;
 const SUMMARY_MESSAGE_MAX_CHARS = 720;
 const ARCHIVE_MAX_BYTES = 5 * 1024 * 1024;
 const ARCHIVE_TARGET_BYTES = 4 * 1024 * 1024;
+// Codex persists every resumed turn (including our persona and transcript) in
+// its own JSONL rollout. Once that file grows large, adding an image can turn a
+// normal request into repeated transport reconnects. PRTS already owns bounded
+// cross-backend context, so rotate the CLI session before it becomes a burden.
+const CODEX_SESSION_MAX_BYTES = 16 * 1024 * 1024;
+const CODEX_SESSION_SCAN_MAX_DEPTH = 6;
 
 const subscribers = new Set();
 const history = []; // { id, role: 'user' | 'assistant' | 'system' | 'tool', text, ts }
@@ -71,6 +77,7 @@ let claudeModelFallbackInFlight = false;
 const MAX_TOOL_OUTPUT_CHARS = 4000;
 let codexModelCatalogCache = { command: null, ts: 0, values: null };
 let lastInvalidCodexModelNotice = "";
+const codexSessionFileCache = new Map();
 
 // Hidden directive tags — she begins each reply with [[mood:X]] and may emit
 // more directives anywhere in it: additional [[mood:X]] switches when the tone
@@ -130,6 +137,81 @@ let pendingAttachments = [];
 
 function isImagePath(p) {
   return /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(String(p || ""));
+}
+
+function findCodexSessionFileInDir(dir, sessionId, depth = 0) {
+  if (depth > CODEX_SESSION_SCAN_MAX_DEPTH) return null;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (entry.name.endsWith(".jsonl") && entry.name.includes(sessionId)) {
+      return path.join(dir, entry.name);
+    }
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = findCodexSessionFileInDir(path.join(dir, entry.name), sessionId, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function codexSessionFile(sessionId) {
+  if (!sessionId) return null;
+  const cached = codexSessionFileCache.get(sessionId);
+  if (cached) {
+    try {
+      if (fs.statSync(cached).isFile()) return cached;
+    } catch {
+      codexSessionFileCache.delete(sessionId);
+    }
+  }
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const roots = [path.join(codexHome, "sessions"), path.join(codexHome, "archived_sessions")];
+  for (const root of roots) {
+    const found = findCodexSessionFileInDir(root, sessionId);
+    if (found) {
+      codexSessionFileCache.set(sessionId, found);
+      return found;
+    }
+  }
+  return null;
+}
+
+function codexSessionRotationReason(sessionId) {
+  if (!sessionId) return "";
+  // Image turns are relatively heavy and must not inherit an unbounded CLI
+  // rollout. The bounded shared transcript below preserves visible continuity.
+  if (pendingAttachments.some(isImagePath)) return "image attachment";
+  const file = codexSessionFile(sessionId);
+  if (!file) return "";
+  try {
+    const bytes = fs.statSync(file).size;
+    return bytes > CODEX_SESSION_MAX_BYTES ? `rollout ${Math.ceil(bytes / 1024 / 1024)} MB` : "";
+  } catch {
+    codexSessionFileCache.delete(sessionId);
+    return "";
+  }
+}
+
+function providerSessionPlan(provider) {
+  const savedSessionId = sessionIds[provider] || null;
+  if (provider !== PROVIDERS.CODEX) {
+    return { resumeSessionId: savedSessionId, rotationReason: "" };
+  }
+  const rotationReason = codexSessionRotationReason(savedSessionId);
+  if (rotationReason) {
+    console.info(`chat: starting a fresh Codex session (${rotationReason})`);
+  }
+  return {
+    resumeSessionId: rotationReason ? null : savedSessionId,
+    rotationReason
+  };
 }
 
 // Codex gets images as -i image input. Non-image files are inlined into the
@@ -1168,8 +1250,24 @@ function activateQueuedUser(text) {
       }
     }
     emitHistory();
-    return;
+    return entry;
   }
+  return null;
+}
+
+function findLatestUserEntry(text, provider) {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (
+      entry?.role === "user" &&
+      !entry.queued &&
+      entry.text === text &&
+      entry.provider === provider
+    ) {
+      return entry;
+    }
+  }
+  return null;
 }
 
 function formatSummaryTimestamp(ts) {
@@ -1274,13 +1372,36 @@ function backfillArchiveFromHistoryIfEmpty() {
   }
 }
 
-function buildSharedTranscript() {
-  const lines = [];
-  for (const entry of history) {
-    if (!entry || entry.ephemeral || !entry.text || !["user", "assistant"].includes(entry.role)) continue;
-    const label = entry.role === "user" ? "博士" : "普瑞赛斯";
-    lines.push(`${label}: ${String(entry.text).trim()}`);
+function buildSharedTranscript({ provider, forceFull = false, excludeEntryId = null, skip = false } = {}) {
+  if (skip) return "";
+  let entries = history.filter(
+    (entry) =>
+      entry &&
+      !entry.ephemeral &&
+      !entry.queued &&
+      entry.text &&
+      ["user", "assistant"].includes(entry.role)
+  );
+
+  // A resumed backend already owns everything through its most recent
+  // successful assistant reply. Only bridge messages produced while another
+  // backend was active. A fresh/rotated session receives the bounded full tail.
+  if (!forceFull && provider) {
+    let cursor = -1;
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      if (entries[i].role === "assistant" && entries[i].provider === provider) {
+        cursor = i;
+        break;
+      }
+    }
+    if (cursor >= 0) entries = entries.slice(cursor + 1);
   }
+
+  if (excludeEntryId) entries = entries.filter((entry) => entry.id !== excludeEntryId);
+  const lines = entries.map((entry) => {
+    const label = entry.role === "user" ? "博士" : "普瑞赛斯";
+    return `${label}: ${String(entry.text).trim()}`;
+  });
   const transcript = lines.slice(-RECENT_TRANSCRIPT_MESSAGE_LIMIT).join("\n\n");
   if (transcript.length <= SHARED_TRANSCRIPT_MAX_CHARS) {
     return transcript;
@@ -1337,7 +1458,7 @@ function updateConversationSummary() {
   }
 }
 
-function beginAssistant() {
+function beginAssistant(provider = currentProvider || activeProvider()) {
   resetDirectiveParsing();
   claudeResultErrored = false;
   claudeModelInvalid = false;
@@ -1352,6 +1473,7 @@ function beginAssistant() {
     id: pendingAssistantId,
     role: "assistant",
     text: "",
+    provider,
     ts: Date.now(),
     ephemeral: false
   });
@@ -1408,9 +1530,17 @@ function emitToolOnlyFallback() {
   let entry = pendingAssistantId ? history.find((h) => h.id === pendingAssistantId) : null;
   if (!entry) {
     pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    entry = { id: pendingAssistantId, role: "assistant", text: "", ts: Date.now(), ephemeral: false };
+    entry = {
+      id: pendingAssistantId,
+      role: "assistant",
+      text: "",
+      provider: currentProvider || activeProvider(),
+      ts: Date.now(),
+      ephemeral: false
+    };
     history.push(entry);
   }
+  entry.provider = currentProvider || entry.provider || activeProvider();
   entry.text = toolOnlyFallbackText(labels);
   entry.ts = Date.now();
   entry.ephemeral = false;
@@ -1492,6 +1622,7 @@ function finishSilentTurn(finalText) {
     id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "assistant",
     text,
+    provider: currentProvider || activeProvider(),
     ts: Date.now(),
     ephemeral: false,
     proactive: true
@@ -1535,6 +1666,7 @@ function finalizeAssistant(finalText) {
     }
   }
   const entry = history.find((h) => h.id === pendingAssistantId);
+  if (entry) entry.provider = currentProvider || entry.provider || activeProvider();
   if (entry && finalText && finalText !== entry.text) {
     entry.text = finalText;
   }
@@ -1976,7 +2108,7 @@ async function takeScreenshot() {
   return null;
 }
 
-function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript) {
+function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript, sessionPlan) {
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const systemPrompt = persona.buildPersonaPrompt({
@@ -2026,15 +2158,16 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
   // Let Read reach attachments dropped from outside the project dir.
   args.push(...attachmentDirArgs());
 
-  if (sessionIds[PROVIDERS.CLAUDE]) {
-    args.push("--resume", sessionIds[PROVIDERS.CLAUDE]);
+  if (sessionPlan?.resumeSessionId) {
+    args.push("--resume", sessionPlan.resumeSessionId);
   }
 
   return {
     command: resolveExecutable("claude"),
     args,
     stdin: `${trimmed}\n`,
-    cleanupDirs: promptFile ? [promptFile.dir] : []
+    cleanupDirs: promptFile ? [promptFile.dir] : [],
+    resumed: Boolean(sessionPlan?.resumeSessionId)
   };
 }
 
@@ -2063,12 +2196,13 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
   );
 }
 
-function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
+function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript, sessionPlan) {
   const prompt = buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript);
   const codexModel = validatedCodexModel();
+  const resumeSessionId = sessionPlan?.resumeSessionId || null;
   let args;
 
-  if (sessionIds[PROVIDERS.CODEX]) {
+  if (resumeSessionId) {
     args = [
       "exec",
       "resume",
@@ -2085,7 +2219,7 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
     if (agentMode) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     }
-    args.push(sessionIds[PROVIDERS.CODEX], "-");
+    args.push(resumeSessionId, "-");
   } else {
     args = [
       "exec",
@@ -2114,15 +2248,24 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
   return {
     command: resolveExecutable("codex"),
     args,
-    stdin: prompt
+    stdin: prompt,
+    resumed: Boolean(resumeSessionId)
   };
 }
 
-function buildProviderInvocation(provider, trimmed, cwd, agentMode, screenshotPath, sharedTranscript) {
+function buildProviderInvocation(
+  provider,
+  trimmed,
+  cwd,
+  agentMode,
+  screenshotPath,
+  sharedTranscript,
+  sessionPlan
+) {
   if (provider === PROVIDERS.CODEX) {
-    return buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript);
+    return buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript, sessionPlan);
   }
-  return buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript);
+  return buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript, sessionPlan);
 }
 
 function send(text, attachments) {
@@ -2180,14 +2323,27 @@ function dispatchSend(
     codexContinuationPending = false;
   }
 
+  let currentUserEntry = null;
   if (silentUser) {
     // Internal continuation — drive the CLI without showing a user bubble.
   } else if (userAlreadyShown) {
-    activateQueuedUser(trimmed);
+    currentUserEntry = activateQueuedUser(trimmed) || findLatestUserEntry(trimmed, provider);
   } else {
-    pushUser(trimmed, provider, { attachments });
+    currentUserEntry = pushUser(trimmed, provider, { attachments });
   }
-  beginAssistant();
+  const sessionPlan = provider === PROVIDERS.PRIESTESS ? null : providerSessionPlan(provider);
+  const sharedTranscript =
+    provider === PROVIDERS.PRIESTESS
+      ? ""
+      : buildSharedTranscript({
+          provider,
+          forceFull: !sessionPlan.resumeSessionId,
+          excludeEntryId: currentUserEntry?.id || null,
+          // A Codex tool-turn continuation is already in the same CLI session;
+          // replaying transcript data there would duplicate the turn again.
+          skip: Boolean(silentUser && chained && sessionPlan.resumeSessionId)
+        });
+  beginAssistant(provider);
   turnStartedAt = Date.now();
   currentProvider = provider;
   emitStatus("running", {
@@ -2197,7 +2353,6 @@ function dispatchSend(
     silent: Boolean(silentTurnKind) || undefined
   });
 
-  const sharedTranscript = buildSharedTranscript();
   const agentMode = Boolean(settings.get("agentMode"));
 
   turnLaunching = true;
@@ -2213,6 +2368,7 @@ function dispatchSend(
       cwd: resolveCwd(),
       agentMode,
       sharedTranscript,
+      sessionPlan,
       chained,
       forceScreenshot
     });
@@ -2336,6 +2492,7 @@ async function launchProviderTurn({
   cwd,
   agentMode,
   sharedTranscript,
+  sessionPlan,
   chained,
   forceScreenshot = false
 }) {
@@ -2379,12 +2536,13 @@ async function launchProviderTurn({
     cwd,
     agentMode,
     screenshotPath,
-    sharedTranscript
+    sharedTranscript,
+    sessionPlan
   );
   // Did this turn try to resume a Claude session? If it did and the turn dies
   // with an empty error, the session id is probably stale and we self-heal.
   const launchedWithClaudeSession =
-    provider === PROVIDERS.CLAUDE && Boolean(sessionIds[PROVIDERS.CLAUDE]);
+    provider === PROVIDERS.CLAUDE && invocation.resumed;
   let proc;
   try {
     turnLaunching = false;
