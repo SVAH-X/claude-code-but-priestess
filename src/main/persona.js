@@ -269,7 +269,8 @@ function buildPersonaPrompt({
   observeEnabled = false,
   personaNotes = "",
   catMode = null,
-  coauthorCommits = false
+  coauthorCommits = false,
+  attachments = []
 }) {
   const memFile = memoryPath();
   const summaryFile = conversationSummaryPath();
@@ -478,6 +479,24 @@ function buildPersonaPrompt({
         "【博士此刻的屏幕】\n" +
         `  ${screenshotPath}\n` +
         "如有需要，用 Read 工具查看后再回答；若与博士所问无关，不必打扰。\n\n";
+    }
+  }
+
+  // Files/images the Doctor attached to this message (+ button or drag-drop).
+  // The built-in HTTP backend has no file tools, so it is handled separately
+  // (skipped here); Codex gets images as -i image input, Claude reads paths.
+  if (Array.isArray(attachments) && attachments.length && provider !== "priestess") {
+    const list = attachments.map((p) => `  ${p}`).join("\n");
+    if (provider === "codex") {
+      prompt +=
+        "【博士附上的文件 / 图片】\n" +
+        "博士这一轮随消息附上了以下文件：\n" + list + "\n" +
+        "其中图片已作为图像输入直接附给你，你能看见；其余文件请用你的工具按上面的路径读取后再回答。看完给博士一个真正的回答，别只复述你做了什么。\n\n";
+    } else {
+      prompt +=
+        "【博士附上的文件 / 图片】\n" +
+        "博士这一轮随消息附上了以下文件，请用 Read 工具按路径逐个查看（图片、文本、PDF 都能读）后再回答：\n" + list + "\n" +
+        "看完给博士一个真正的回答，而不是只复述你做了什么。\n\n";
     }
   }
 

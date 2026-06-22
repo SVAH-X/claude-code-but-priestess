@@ -1960,7 +1960,19 @@ ipcMain.handle("popover:move-end", () => {
 
 ipcMain.handle("popover:resize-drag", (_, payload) => resizePopoverDrag(payload));
 
-ipcMain.handle("chat:send", (_, text) => chat.send(text));
+ipcMain.handle("chat:send", (_, payload) => {
+  // Back-compat: payload may be a plain string (old) or { text, attachments }.
+  if (typeof payload === "string") return chat.send(payload);
+  return chat.send(payload?.text, payload?.attachments);
+});
+ipcMain.handle("chat:pick-files", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "选择要发给普瑞赛斯的文件 / 图片",
+    properties: ["openFile", "multiSelections"]
+  });
+  if (result.canceled) return [];
+  return result.filePaths || [];
+});
 ipcMain.handle("chat:cancel", () => {
   chat.cancel();
   return { ok: true };

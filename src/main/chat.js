@@ -123,6 +123,27 @@ function setChatCatMode(mode) {
     : { cat: false, mood: "normal" };
 }
 
+// Absolute paths of files/images the Doctor attached to the turn currently being
+// dispatched (+ button / drag-drop). Set in dispatchSend, read by the invocation
+// builders and the persona prompt. Ephemeral; reset every dispatch.
+let pendingAttachments = [];
+
+function isImagePath(p) {
+  return /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(String(p || ""));
+}
+
+// Codex reads images as -i image input and other files from --add-dir'd dirs.
+function codexAttachmentArgs() {
+  const args = [];
+  const dirs = new Set();
+  for (const p of pendingAttachments) {
+    if (isImagePath(p)) args.push("-i", p);
+    else dirs.add(path.dirname(p));
+  }
+  for (const d of dirs) args.push("--add-dir", d);
+  return args;
+}
+
 function normalizeProvider(provider) {
   if (provider === PROVIDERS.CODEX) return PROVIDERS.CODEX;
   if (provider === PROVIDERS.PRIESTESS) return PROVIDERS.PRIESTESS;
@@ -591,7 +612,11 @@ function drainOutboundQueue() {
   if (quitPending || currentProcess || outboundQueue.length === 0) return;
   const next = outboundQueue.shift();
   emitQueueState();
-  dispatchSend(next, { userAlreadyShown: true, chained: true });
+  dispatchSend(next.text, {
+    userAlreadyShown: true,
+    chained: true,
+    attachments: next.attachments || []
+  });
 }
 
 function clearOutboundQueue() {
@@ -1849,7 +1874,8 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
       settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
     personaNotes: settings.get("personaNotes") || "",
     catMode: silentTurnKind ? null : chatCatMode,
-    coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false
+    coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
+    attachments: silentTurnKind ? [] : pendingAttachments
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -1909,7 +1935,8 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
         settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
       personaNotes: settings.get("personaNotes") || "",
       catMode: silentTurnKind ? null : chatCatMode,
-      coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false
+      coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
+      attachments: silentTurnKind ? [] : pendingAttachments
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
@@ -1934,6 +1961,7 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
     if (screenshotPath) {
       args.push("-i", screenshotPath);
     }
+    args.push(...codexAttachmentArgs());
     if (agentMode) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     }
@@ -1954,6 +1982,7 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
     if (screenshotPath) {
       args.push("-i", screenshotPath);
     }
+    args.push(...codexAttachmentArgs());
     if (agentMode) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     } else {
@@ -1976,9 +2005,13 @@ function buildProviderInvocation(provider, trimmed, cwd, agentMode, screenshotPa
   return buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript);
 }
 
-function send(text) {
-  const trimmed = String(text ?? "").trim();
-  if (!trimmed) return { ok: false, reason: "empty" };
+function send(text, attachments) {
+  const files = Array.isArray(attachments)
+    ? attachments.filter((p) => typeof p === "string" && p.trim())
+    : [];
+  let trimmed = String(text ?? "").trim();
+  if (!trimmed && files.length === 0) return { ok: false, reason: "empty" };
+  if (!trimmed) trimmed = "看看这些。"; // attachments with no text of their own
 
   refreshProviderAvailability();
   const provider = activeProvider();
@@ -1992,18 +2025,18 @@ function send(text) {
   }
 
   if (currentProcess || turnLaunching) {
-    outboundQueue.push(trimmed);
+    outboundQueue.push({ text: trimmed, attachments: files });
     pushUser(trimmed, provider, { queued: true });
     emitQueueState();
     return { ok: true, queued: true, queueLength: outboundQueue.length };
   }
 
-  return dispatchSend(trimmed);
+  return dispatchSend(trimmed, { attachments: files });
 }
 
 function dispatchSend(
   trimmed,
-  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false } = {}
+  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false, attachments = [] } = {}
 ) {
   if (currentProcess || turnLaunching) return { ok: false, reason: "busy" };
 
@@ -2013,6 +2046,9 @@ function dispatchSend(
   if (!providerInfo?.available) {
     return { ok: false, reason: "missing-cli" };
   }
+
+  // Attachments belong only to this real turn; silent self-turns never carry any.
+  pendingAttachments = silentTurnKind ? [] : (Array.isArray(attachments) ? attachments : []);
 
   // A genuine new user turn — reset the Codex auto-continue guard.
   if (!chained) {
