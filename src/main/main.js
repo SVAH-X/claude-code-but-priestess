@@ -975,6 +975,7 @@ const MENU_TEXT = {
     outfitFormal: "正装（默认）",
     outfitCasual: "休闲",
     skills: "允许她使用技能（音乐 / 搜索 / 应用）",
+    coauthorCommits: "提交时署名普瑞赛斯（共同作者）",
     agentMode: "Agent mode（完整屏幕控制）",
     enableAgentTitle: "开启 agent mode？",
     enableAgent: "开启 agent mode",
@@ -1041,6 +1042,7 @@ const MENU_TEXT = {
     outfitFormal: "正装 · Formal (default)",
     outfitCasual: "休闲 · Casual",
     skills: "Let her use skills (music · search · apps)",
+    coauthorCommits: "Co-author commits as 普瑞赛斯",
     agentMode: "Agent mode (full screen control)",
     enableAgentTitle: "Enable agent mode?",
     enableAgent: "Enable agent mode",
@@ -1488,6 +1490,12 @@ function buildContextMenu() {
       type: "checkbox",
       checked: all.skillsEnabled !== false,
       click: (item) => settings.set({ skillsEnabled: item.checked })
+    },
+    {
+      label: mt("coauthorCommits"),
+      type: "checkbox",
+      checked: all.coauthorCommits !== false,
+      click: (item) => settings.set({ coauthorCommits: item.checked })
     },
     {
       label: mt("agentMode"),
