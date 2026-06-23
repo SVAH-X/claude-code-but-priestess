@@ -98,6 +98,7 @@ export class WsClient extends EventEmitter {
   private reqCounter = 0;
   private statusBarItem: vscode.StatusBarItem;
   private bufferedMessages: string[] = [];
+  private static readonly MAX_BUFFERED = 200;
   private manualPort: number | null = null;
   private manualToken: string | null = null;
 
@@ -217,7 +218,9 @@ export class WsClient extends EventEmitter {
     if (this.ws && this.authenticated && this.ws.readyState === 1) {
       this.ws.send(msg);
     } else {
-      this.bufferedMessages.push(msg);
+      if (this.bufferedMessages.length < WsClient.MAX_BUFFERED) {
+        this.bufferedMessages.push(msg);
+      }
     }
   }
 

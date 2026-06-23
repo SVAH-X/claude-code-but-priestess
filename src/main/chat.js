@@ -1984,7 +1984,7 @@ function handleCodexStreamEvent(event) {
     finalizeAssistant(pendingAssistantText);
     emitStatus("idle", {
       provider: PROVIDERS.CODEX,
-      sessionId: sessionIds[PROVIDERS.CODEX],
+      sessionId: effectiveSessions[PROVIDERS.CODEX],
       silent: wasSilentTurn || undefined
     });
   }
@@ -2115,11 +2115,12 @@ async function takeScreenshot() {
   return null;
 }
 
-function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan) {
+function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
   const isAdvisor = mode === "advisor";
   const isMaintenance = mode === "maintenance";
+  const effectiveSessions = customSessionIds || sessionIds;
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const systemPrompt = persona.buildPersonaPrompt({
@@ -2174,8 +2175,8 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
   // Let Read reach attachments dropped from outside the project dir.
   args.push(...attachmentDirArgs());
 
-  if (sessionIds[PROVIDERS.CLAUDE]) {
-    args.push("--resume", sessionIds[PROVIDERS.CLAUDE]);
+  if (effectiveSessions[PROVIDERS.CLAUDE]) {
+    args.push("--resume", effectiveSessions[PROVIDERS.CLAUDE]);
   }
 
   return {
@@ -2214,16 +2215,17 @@ function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscr
   );
 }
 
-function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript) {
+function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds) {
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
   const isAdvisor = mode === "advisor";
   const isMaintenance = mode === "maintenance";
+  const effectiveSessions = customSessionIds || sessionIds;
   const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript);
   const codexModel = validatedCodexModel();
   let args;
 
-  if (sessionIds[PROVIDERS.CODEX]) {
+  if (effectiveSessions[PROVIDERS.CODEX]) {
     args = [
       "exec",
       "resume",
@@ -2247,7 +2249,7 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
     } else {
       args.push("-s", "read-only", "--add-dir", persona.memoryDir());
     }
-    args.push(sessionIds[PROVIDERS.CODEX], "-");
+    args.push(effectiveSessions[PROVIDERS.CODEX], "-");
   } else {
     args = [
       "exec",
@@ -2284,15 +2286,15 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
     command: resolveExecutable("codex"),
     args,
     stdin: prompt,
-    resumed: Boolean(sessionIds[PROVIDERS.CODEX])
+    resumed: Boolean(effectiveSessions[PROVIDERS.CODEX])
   };
 }
 
-function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan) {
+function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
   if (provider === PROVIDERS.CODEX) {
-    return buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript);
+    return buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds);
   }
-  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan);
+  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds);
 }
 
 function send(text, attachments) {
@@ -2841,7 +2843,7 @@ function hydrate({
         : sessionIds[PROVIDERS.CLAUDE],
       [PROVIDERS.CODEX]: typeof savedSessionIds[PROVIDERS.CODEX] === "string"
         ? savedSessionIds[PROVIDERS.CODEX]
-        : sessionIds[PROVIDERS.CODEX]
+        : effectiveSessions[PROVIDERS.CODEX]
     };
   }
   backfillArchiveFromHistoryIfEmpty();

@@ -593,6 +593,11 @@ function appendMemoryEntry(text) {
       content += "\n" + line;
     }
     // Write atomically: temp file + rename to avoid concurrent-write corruption.
+    // NOTE: atomic rename prevents data corruption, but does NOT prevent lost
+    // updates — if Electron popover and VS Code chat both trigger [[remember:]]
+    // concurrently, the second rename overwrites the first. Probability is low
+    // (both must fire within the same ~50ms window). A proper fix would be an
+    // in-memory queue with serialised writes.
     const tmp = file + ".tmp." + Date.now();
     fs.writeFileSync(tmp, content, "utf8");
     fs.renameSync(tmp, file);

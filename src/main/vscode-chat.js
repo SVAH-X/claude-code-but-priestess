@@ -33,7 +33,6 @@ let messageIdCounter = 0;
 let midTurn = false;
 let outboundQueue = [];
 let vscodeSessionIds = {};
-let conversationFile = null;
 
 // Per-turn streaming state
 let pendingAssistantText = "";
@@ -461,19 +460,32 @@ function dispatchSend(trimmed, context) {
   const messageWithContext = buildContextAugmentedMessage(trimmed, context);
 
   pushUser(trimmed, context);  // store original text + context in history
+
+  // Build a shared transcript from our own history for context continuity.
+  const sharedLines = [];
+  for (let i = history.length - 1; i >= 0 && sharedLines.join("\n").length < 4000; i--) {
+    const m = history[i];
+    if (m.role === "user" || m.role === "assistant") {
+      sharedLines.unshift(`${m.role === "user" ? "博士" : "普瑞赛斯"}: ${(m.text || "").slice(0, 200)}`);
+    }
+  }
+  const sharedTranscript = sharedLines.join("\n");
+
+  const rawMode = settings.get("vibeCodingMode") || "companion";
+  // VS Code extension never gets full agent — cap at advisor.
+  const vibeCodingMode = rawMode === "agent" ? "advisor" : rawMode;
+  // Push downgrade notice BEFORE beginAssistant so it doesn't disrupt the
+  // history[history.length-1] assumption used by appendAssistant/finalizeAssistant.
+  if (rawMode === "agent") {
+    history.push({ id: nextId(), role: "system", text: "VS Code 扩展不支持代理模式，已切换至顾问模式（只读工具）。", ts: Date.now() });
+  }
+
   beginAssistant();
 
   const wsServer = require("./ws-server");
   const vscodeWs = wsServer.getVscodeWorkspace();
   const cwd = vscodeWs || settings.get("chatCwd") || "";
-
-  const rawMode = settings.get("vibeCodingMode") || "companion";
-  // VS Code extension never gets full agent — cap at advisor.
-  const vibeCodingMode = rawMode === "agent" ? "advisor" : rawMode;
-  if (rawMode === "agent") {
-    history.push({ id: nextId(), role: "system", text: "VS Code 扩展不支持代理模式，已切换至顾问模式（只读工具）。", ts: Date.now() });
-  }
-  const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, "", vscodeSessionIds);
+  const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, sharedTranscript, null, vscodeSessionIds);
 
   if (!invocation) {
     const errMsg = "No CLI provider available";
@@ -605,7 +617,6 @@ function getSessionId() {
 
 // Called on VS Code connect / disconnect
 function init() {
-  conversationFile = conversationPath();
   persona.ensureMemoryFile();
   persona.ensureConversationArchiveFile();
   persona.ensureConversationSummaryFile();

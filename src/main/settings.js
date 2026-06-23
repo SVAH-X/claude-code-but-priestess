@@ -35,11 +35,11 @@ const DEFAULTS = Object.freeze({
   // Migrated from the old `agentMode` boolean on first read.
   vibeCodingMode: "companion",
   // Vibe coding: proactive diagnostic checks (she notices lint errors).
-  vibeCodingDiagnostics: true,
+  vibeCodingDiagnostics: false,
   // Minutes between diagnostic proactive checks (min 1).
   diagnosticCheckCooldownMin: 5,
   // Vibe coding: proactive activity narration (save, git, build).
-  vibeCodingActivityNarration: true,
+  vibeCodingActivityNarration: false,
   // Minutes between activity-based proactive checks (min 1).
   activityCheckCooldownMin: 3,
   // When she commits on the Doctor's behalf, sign the commit with an honest
