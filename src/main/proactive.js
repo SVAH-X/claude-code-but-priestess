@@ -100,7 +100,12 @@ function shouldRunDiagnosticCheck(now) {
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
   const day = localDayKey();
-  if (daily.day !== day) daily = { day, count: 0 };
+  if (daily.day !== day) {
+    daily = { day, count: 0 };
+    lastDiagnosticAttemptAt = 0;
+    lastActivityAttemptAt = 0;
+    lastProactiveAttemptAt = 0;
+  }
   if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
   const diag = getWsServer().getLatestDiagnostics();
@@ -117,7 +122,12 @@ function shouldRunActivityCheck(now) {
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
   const day = localDayKey();
-  if (daily.day !== day) daily = { day, count: 0 };
+  if (daily.day !== day) {
+    daily = { day, count: 0 };
+    lastDiagnosticAttemptAt = 0;
+    lastActivityAttemptAt = 0;
+    lastProactiveAttemptAt = 0;
+  }
   if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
   const activities = getWsServer().getRecentActivities();
@@ -135,7 +145,12 @@ function shouldRunProactive(now) {
   if (now - lastProactiveAttemptAt < intervalMs()) return false;
   if (inQuietHours()) return false;
   const day = localDayKey();
-  if (daily.day !== day) daily = { day, count: 0 };
+  if (daily.day !== day) {
+    daily = { day, count: 0 };
+    lastDiagnosticAttemptAt = 0;
+    lastActivityAttemptAt = 0;
+    lastProactiveAttemptAt = 0;
+  }
   if (daily.count >= dailyCap()) return false;
   if (chat.isBusy()) return false;
   if (!hasCliProvider()) return false;

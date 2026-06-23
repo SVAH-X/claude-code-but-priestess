@@ -592,7 +592,10 @@ function appendMemoryEntry(text) {
     } else {
       content += "\n" + line;
     }
-    fs.writeFileSync(file, content, "utf8");
+    // Write atomically: temp file + rename to avoid concurrent-write corruption.
+    const tmp = file + ".tmp." + Date.now();
+    fs.writeFileSync(tmp, content, "utf8");
+    fs.renameSync(tmp, file);
   } catch (error) {
     console.warn("persona: failed to append memory entry", error);
   }

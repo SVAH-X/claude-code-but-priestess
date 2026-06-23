@@ -22,6 +22,7 @@ const PROVIDERS = Object.freeze({
   PRIESTESS: "priestess"
 });
 const SHARED_TRANSCRIPT_MAX_CHARS = 9000;
+const MAX_USER_MESSAGE_CHARS = 100_000;
 const RECENT_TRANSCRIPT_MESSAGE_LIMIT = 24;
 const SUMMARY_MAX_CHARS = 14000;
 const SUMMARY_MESSAGE_MAX_CHARS = 720;
@@ -53,6 +54,7 @@ let consecutiveQuestionReplies = 0;
 let turnSawToolUse = false;
 let assistantTextAfterLastAction = false;
 let currentTurnHadScreenshot = false;
+let unparsedLinesThisTurn = 0; // cap at 10 to prevent crash-dump flood
 // Codex sometimes ends a tool-using turn with only a progress note and no real
 // answer. We auto-continue once per user turn (the close handler re-prompts) so
 // she answers instead of going silent; the guard prevents loops.
@@ -1468,6 +1470,7 @@ function beginAssistant(provider = currentProvider || activeProvider()) {
   claudeModelInvalid = false;
   turnSawToolUse = false;
   assistantTextAfterLastAction = false;
+  unparsedLinesThisTurn = 0;
   pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   pendingAssistantText = "";
   // Silent self-turns stay invisible — no bubble unless finishSilentTurn
@@ -2299,6 +2302,7 @@ function send(text, attachments) {
   let trimmed = String(text ?? "").trim();
   if (!trimmed && files.length === 0) return { ok: false, reason: "empty" };
   if (!trimmed) trimmed = "看看这些。"; // attachments with no text of their own
+  if (trimmed.length > MAX_USER_MESSAGE_CHARS) return { ok: false, reason: "too-long" };
 
   refreshProviderAvailability();
   const provider = activeProvider();
@@ -2326,6 +2330,7 @@ function dispatchSend(
   { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false, vibeCodingMode: vibeCodingModeOverride = null, attachments = [] } = {}
 ) {
   if (currentProcess || turnLaunching) return { ok: false, reason: "busy" };
+  if (quitPending) return { ok: false, reason: "quitting" };
 
   refreshProviderAvailability();
   const provider = activeProvider();
@@ -2384,8 +2389,10 @@ function dispatchSend(
   if (!vibeCodingModeOverride) {
     if (silentTurnKind === "proactive") {
       vibeCodingMode = globalMode === "agent" ? "agent" : "advisor";
+      if (vibeCodingMode !== globalMode) console.log("proactive: overrode vibeCodingMode from %s to %s", globalMode, vibeCodingMode);
     } else if (silentTurnKind === "maintenance") {
       vibeCodingMode = "maintenance";
+      console.log("proactive: maintenance turn — forcing vibeCodingMode to maintenance");
     }
   }
 
@@ -2615,8 +2622,13 @@ async function launchProviderTurn({
         handleProviderStreamEvent(provider, JSON.parse(line));
       } catch (error) {
         if (shouldIgnoreNonJsonLine(line)) continue;
-        // Non-JSON line — surface as system note for transparency.
-        pushSystem(`Unparsed: ${line.slice(0, 200)}`);
+        // Non-JSON line — surface up to 10 per turn; merge overflow into a summary.
+        unparsedLinesThisTurn += 1;
+        if (unparsedLinesThisTurn <= 10) {
+          pushSystem(`Unparsed: ${line.slice(0, 200)}`);
+        } else if (unparsedLinesThisTurn === 11) {
+          pushSystem("Unparsed: (further non-JSON lines omitted — output may be a crash dump)");
+        }
       }
     }
   });

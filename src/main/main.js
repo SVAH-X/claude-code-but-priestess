@@ -776,6 +776,8 @@ function scheduleDesktopPet() {
   // Don't start the collapse countdown while she's still replying — the timer
   // (re)starts the moment output stops, in the chat status handler.
   if (chatTurnRunning) return;
+  // Don't schedule the pet while VS Code holds her attention.
+  if (wsServer.isVscodeActive()) return;
   desktopPetTimer = setTimeout(showDesktopPet, DESKTOP_PET_IDLE_MS);
 }
 
@@ -2059,14 +2061,19 @@ ipcMain.handle("chat:open-attachment", (_, p) => {
 ipcMain.handle("chat:attachment-data-uri", (_, p) => {
   try {
     if (typeof p !== "string" || !p) return "";
-    if (fs.statSync(p).size > 16 * 1024 * 1024) return "";
-    const ext = path.extname(p).toLowerCase();
+    // Validate: path must be absolute and within allowed roots.
+    const resolved = path.resolve(p);
+    const allowedRoots = [os.homedir(), settings.get("chatCwd") || os.homedir(), os.tmpdir()];
+    const allowed = allowedRoots.some((root) => resolved.startsWith(root + path.sep) || resolved === root);
+    if (!allowed) return "";
+    if (fs.statSync(resolved).size > 16 * 1024 * 1024) return "";
+    const ext = path.extname(resolved).toLowerCase();
     const mime =
       ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" :
       ext === ".webp" ? "image/webp" :
       ext === ".gif" ? "image/gif" :
       ext === ".bmp" ? "image/bmp" : "image/png";
-    return `data:${mime};base64,${fs.readFileSync(p).toString("base64")}`;
+    return `data:${mime};base64,${fs.readFileSync(resolved).toString("base64")}`;
   } catch {
     return "";
   }
@@ -2169,7 +2176,11 @@ ipcMain.handle("html:open-in-browser", async (_, payload) => {
   if (!html.trim()) return { ok: false, reason: "empty content" };
   const tempFile = path.join(os.tmpdir(), `prts-preview-${Date.now()}.html`);
   try {
-    fs.writeFileSync(tempFile, html, "utf8");
+    // Wrap with a restrictive CSP to prevent the model-generated HTML from
+    // executing scripts, submitting forms, or navigating away in the browser.
+    const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: https:; font-src \'none\'">';
+    const sandboxed = `<!doctype html>\n<html><head>${csp}</head><body>${html}</body></html>`;
+    fs.writeFileSync(tempFile, sandboxed, "utf8");
     const error = await shell.openPath(tempFile);
     if (error) {
       console.warn("main: shell.openPath failed:", error);

@@ -470,6 +470,9 @@ function dispatchSend(trimmed, context) {
   const rawMode = settings.get("vibeCodingMode") || "companion";
   // VS Code extension never gets full agent — cap at advisor.
   const vibeCodingMode = rawMode === "agent" ? "advisor" : rawMode;
+  if (rawMode === "agent") {
+    history.push({ id: nextId(), role: "system", text: "VS Code 扩展不支持代理模式，已切换至顾问模式（只读工具）。", ts: Date.now() });
+  }
   const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, "", vscodeSessionIds);
 
   if (!invocation) {
@@ -551,6 +554,7 @@ function send(text, context) {
     return { ok: false, reason: "empty" };
   }
   const trimmed = text.trim();
+  if (trimmed.length > 100_000) return { ok: false, reason: "too-long" };
   if (midTurn) {
     outboundQueue.push({ text: trimmed, context: context || null });
     return { ok: true, queued: true, queueLength: outboundQueue.length };

@@ -18,6 +18,7 @@ let vscodeChatUnsub = null;
 let settingsUnsub = null;
 let onVscodeConnected = null;
 let onVscodeDisconnected = null;
+let vscodeDisconnectTimer = null;
 let appVersion = null;
 
 // Vibe coding state
@@ -193,6 +194,8 @@ function handleInbound(ws, raw) {
     case "vscode:active": {
       const wasActive = vscodeActive;
       vscodeActive = true;
+      clearTimeout(vscodeDisconnectTimer);
+      vscodeDisconnectTimer = null;
       if (!wasActive && onVscodeConnected) onVscodeConnected();
       break;
     }
@@ -338,7 +341,12 @@ function handleConnection(ws) {
     authenticated.delete(ws);
     if (authenticated.size === 0 && vscodeActive) {
       vscodeActive = false;
-      if (onVscodeDisconnected) onVscodeDisconnected();
+      // Debounce: a rapid reconnect (within 200ms) cancels the disconnect callback.
+      clearTimeout(vscodeDisconnectTimer);
+      vscodeDisconnectTimer = setTimeout(() => {
+        vscodeDisconnectTimer = null;
+        if (onVscodeDisconnected) onVscodeDisconnected();
+      }, 200);
     }
   });
 }
