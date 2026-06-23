@@ -114,7 +114,7 @@ function pushUser(text, context) {
   // Archive to shared memory so the doctor's words aren't lost.
   try {
     persona.ensureConversationArchiveFile();
-    const line = JSON.stringify({ role: "user", text, ts: Date.now() });
+    const line = JSON.stringify({ role: "user", text, ts: Date.now(), provider: currentProvider });
     fs.appendFileSync(persona.conversationArchivePath(), line + "\n", "utf8");
   } catch (_) { /* best effort */ }
   return entry;
@@ -190,14 +190,33 @@ const skillExecutedThisTurn = new Set();
 let lastEmittedMood = null;
 const rememberedThisTurn = new Set();
 
+// Simple mood aliases matching chat.js normalizeMood behaviour.
+function normalizeMood(raw) {
+  const m = String(raw || "").toLowerCase().trim();
+  if (m === "happy") return "smile";
+  if (m === "threaten") return "threat";
+  if (m === "cry") return "sad";
+  return m;
+}
+
 function checkDirectives() {
   let match;
 
   // Extract and handle complete [[mood:X]] tags (strict + lenient single-bracket).
   // Dedup per-turn: only emit when the mood actually changes.
-  const moodRe = /\[\[\s*mood\s*[:：]\s*([a-z]+)\s*\]\]/gi;
+  // Uses [a-zA-Z]+ to match capitalized moods (chat.js uses [^\]]*? + normalizeMood).
+  const moodRe = /\[\[\s*mood\s*[:：]\s*([a-zA-Z]+)\s*\]\]/gi;
   while ((match = moodRe.exec(pendingDirectiveBuffer)) !== null) {
-    const thisMood = match[1];
+    const thisMood = normalizeMood(match[1]);
+    if (thisMood !== lastEmittedMood) {
+      lastEmittedMood = thisMood;
+      emit({ kind: "mood", mood: thisMood });
+    }
+  }
+  // Lenient single-bracket mood: [[mood:sad] (no second closing bracket).
+  const moodLenientRe = /\[\[\s*mood\s*[:：]\s*([a-zA-Z]+)\s*\](?=[^\]])/gi;
+  while ((match = moodLenientRe.exec(pendingDirectiveBuffer)) !== null) {
+    const thisMood = normalizeMood(match[1]);
     if (thisMood !== lastEmittedMood) {
       lastEmittedMood = thisMood;
       emit({ kind: "mood", mood: thisMood });
@@ -222,17 +241,18 @@ function checkDirectives() {
     const tag = match[0];
     if (skillExecutedThisTurn.has(tag)) continue;
     skillExecutedThisTurn.add(tag);
+    const turnToken = currentAssistantId;
     skills.runSkill(match[1], match[2] || "").then((result) => {
-      if (result.receipt) {
-        history.push({
-          id: nextId(),
-          role: "tool",
-          summary: result.receipt,
-          ts: Date.now(),
-        });
-        emit({ kind: "history", history: history.slice() });
-        saveConversation();
-      }
+      // Guard: don't inject stale skill results after clear() or a new turn.
+      if (!result.receipt || turnToken !== currentAssistantId) return;
+      history.push({
+        id: nextId(),
+        role: "tool",
+        summary: result.receipt,
+        ts: Date.now(),
+      });
+      emit({ kind: "history", history: history.slice() });
+      saveConversation();
     });
   }
 }
@@ -242,7 +262,7 @@ function checkDirectives() {
 function cleanDirectives(text) {
   if (!text) return "";
   return String(text)
-    .replace(/\[\[\s*mood\s*[:：]\s*[a-z]+\s*\]\]/gi, "")
+    .replace(/\[\[\s*mood\s*[:：]\s*[a-zA-Z]+\s*\]\]/gi, "")
     .replace(/\[\[\s*mood\s*[:：]\s*[a-z]+\s*\](?=[^\]])/gi, "")
     .replace(/\[\[\s*skill\s*[:：]\s*[a-z_]+(?:\s+[^\]]*?)?\s*\]\]/gi, "")
     .replace(/\[\[\s*silent\s*\]\]/gi, "")
@@ -271,6 +291,7 @@ function finalizeAssistant() {
       role: "assistant",
       text: clean,
       ts: Date.now(),
+      provider: currentProvider || "unknown",
     });
     fs.appendFileSync(persona.conversationArchivePath(), line + "\n", "utf8");
   } catch (_) { /* best effort */ }
@@ -441,6 +462,7 @@ function buildContextAugmentedMessage(userText, context) {
 // ---------------------------------------------------------------------------
 
 function dispatchSend(trimmed, context) {
+  if (currentProcess) { midTurn = false; return; } // re-entry guard
   midTurn = true;
   const provider = chat.getProviderAvailability().activeProvider || "claude";
   currentProvider = provider;
@@ -453,6 +475,11 @@ function dispatchSend(trimmed, context) {
     emit({ kind: "status", status: "idle", error: errMsg });
     emit({ kind: "history", history: history.slice() });
     midTurn = false;
+    // Clear queued messages — they can't be processed on this backend.
+    if (outboundQueue.length > 0) {
+      outboundQueue.length = 0;
+      emit({ kind: "queue", length: 0 });
+    }
     return;
   }
 
@@ -462,8 +489,9 @@ function dispatchSend(trimmed, context) {
   pushUser(trimmed, context);  // store original text + context in history
 
   // Build a shared transcript from our own history for context continuity.
+  const SHARED_MAX = 9000; // matches chat.js SHARED_TRANSCRIPT_MAX_CHARS
   const sharedLines = [];
-  for (let i = history.length - 1; i >= 0 && sharedLines.join("\n").length < 4000; i--) {
+  for (let i = history.length - 1; i >= 0 && sharedLines.join("\n").length < SHARED_MAX; i--) {
     const m = history[i];
     if (m.role === "user" || m.role === "assistant") {
       sharedLines.unshift(`${m.role === "user" ? "博士" : "普瑞赛斯"}: ${(m.text || "").slice(0, 200)}`);
@@ -542,10 +570,15 @@ function dispatchSend(trimmed, context) {
       emit({ kind: "status", status: "idle", provider });
     }
 
-    // Process queued messages
+    // Process queued messages — peek first, shift only on success.
     if (outboundQueue.length > 0) {
-      const next = outboundQueue.shift();
-      dispatchSend(next.text, next.context || null);
+      const next = outboundQueue[0];
+      if (next && next.text) {
+        dispatchSend(next.text, next.context || null);
+        outboundQueue.shift();
+      } else {
+        outboundQueue.shift(); // discard malformed entry
+      }
     }
   });
 
@@ -558,6 +591,16 @@ function dispatchSend(trimmed, context) {
       error: err.message,
       provider,
     });
+    // Drain queue if close event never fires (some spawn failures only emit error).
+    if (outboundQueue.length > 0) {
+      const next = outboundQueue[0];
+      if (next && next.text) {
+        dispatchSend(next.text, next.context || null);
+        outboundQueue.shift();
+      } else {
+        outboundQueue.shift(); // discard malformed entry
+      }
+    }
   });
 }
 

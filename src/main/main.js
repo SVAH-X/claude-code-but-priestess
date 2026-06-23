@@ -1665,9 +1665,10 @@ function buildContextMenu() {
 // only takes effect after a restart, so once the Doctor grants it this makes
 // "grant → restart" a single click instead of a manual quit + reopen.
 function restartApp() {
-  // app.exit() skips before-quit — kill a mid-turn CLI subprocess explicitly
-  // so it doesn't keep running (and billing) past the restart.
+  // app.exit() skips before-quit — kill mid-turn CLI subprocesses explicitly
+  // so they don't keep running (and billing) past the restart.
   chat.cancel();
+  try { require("./vscode-chat").cancel(); } catch (_) { /* ignore */ }
   app.relaunch();
   app.exit(0);
 }
@@ -2054,7 +2055,12 @@ ipcMain.handle("chat:send", (_, payload) => {
   return chat.send(payload?.text, payload?.attachments);
 });
 ipcMain.handle("chat:open-attachment", (_, p) => {
-  if (typeof p === "string" && p) shell.openPath(p);
+  if (typeof p !== "string" || !p) return;
+  // Validate: path must be within allowed roots (same as chat:attachment-data-uri).
+  const resolved = path.resolve(p);
+  const allowedRoots = [os.homedir(), settings.get("chatCwd") || os.homedir(), os.tmpdir()];
+  const allowed = allowedRoots.some((root) => resolved.startsWith(root + path.sep) || resolved === root);
+  if (allowed) shell.openPath(resolved);
 });
 // Local image → data: URI for in-bubble thumbnails / Quick Look. Done in main
 // because the popover runs with webSecurity on, which blocks cross-dir file://.

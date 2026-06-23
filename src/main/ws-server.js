@@ -53,14 +53,14 @@ function broadcast(msg, exclude) {
   for (const ws of authenticated) {
     if (ws === exclude) continue;
     if (ws.readyState === 1) {
-      ws.send(data);
+      try { ws.send(data); } catch (_) { /* socket closed between check and send */ }
     }
   }
 }
 
 function sendTo(ws, msg) {
   if (ws.readyState === 1) {
-    ws.send(JSON.stringify(msg));
+    try { ws.send(JSON.stringify(msg)); } catch (_) { /* socket closing */ }
   }
 }
 
@@ -258,7 +258,7 @@ function start(callbacks) {
     console.log("ws-server: listening on 127.0.0.1:" + port);
   });
 
-  wss.on("error", (err) => {
+  function handleWssError(err) {
     console.warn("ws-server: error", err);
     setTimeout(() => {
       if (wss) {
@@ -273,9 +273,11 @@ function start(callbacks) {
         console.log("ws-server: restarted on 127.0.0.1:" + port);
       });
       wss.on("connection", handleConnection);
-      wss.on("error", () => { /* swallow */ });
+      wss.on("error", handleWssError); // recursively retry
     }, 1000);
-  });
+  }
+
+  wss.on("error", handleWssError);
 
   wss.on("connection", handleConnection);
 

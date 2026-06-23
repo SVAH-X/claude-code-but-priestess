@@ -1908,10 +1908,10 @@ window.addEventListener("dragleave", (event) => {
   if (event.relatedTarget === null) document.body.classList.remove("file-dragging");
 });
 window.addEventListener("drop", (event) => {
+  event.preventDefault();
   document.body.classList.remove("file-dragging");
   const dropped = event.dataTransfer?.files;
   if (!dropped || dropped.length === 0) return;
-  event.preventDefault();
   const paths = [];
   for (const file of dropped) {
     const p = window.chatApi?.getPathForFile?.(file);
@@ -2214,8 +2214,10 @@ openInBrowserBtn.addEventListener("click", async () => {
 //  Boot
 // ============================================================
 window.addEventListener("resize", resizeCanvas);
+let stageResizeObserver = null;
 if (typeof ResizeObserver !== "undefined") {
-  new ResizeObserver(() => resizeCanvas()).observe(stage);
+  stageResizeObserver = new ResizeObserver(() => resizeCanvas());
+  stageResizeObserver.observe(stage);
 }
 
 // Settings decide which outfit to load, so fetch them before the first frame

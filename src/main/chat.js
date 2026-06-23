@@ -810,13 +810,18 @@ function finishTurn(extra = {}) {
 
 function drainOutboundQueue() {
   if (quitPending || currentProcess || outboundQueue.length === 0) return;
-  const next = outboundQueue.shift();
-  emitQueueState();
-  dispatchSend(next.text, {
+  // Peek, don't shift yet — if dispatchSend fails (missing-cli, quitting),
+  // the message stays in the queue for the next drain attempt.
+  const next = outboundQueue[0];
+  const result = dispatchSend(next.text, {
     userAlreadyShown: true,
     chained: true,
     attachments: next.attachments || []
   });
+  if (result?.ok) {
+    outboundQueue.shift();
+    emitQueueState();
+  }
 }
 
 function clearOutboundQueue() {
@@ -1984,7 +1989,7 @@ function handleCodexStreamEvent(event) {
     finalizeAssistant(pendingAssistantText);
     emitStatus("idle", {
       provider: PROVIDERS.CODEX,
-      sessionId: effectiveSessions[PROVIDERS.CODEX],
+      sessionId: sessionIds[PROVIDERS.CODEX],
       silent: wasSilentTurn || undefined
     });
   }
@@ -2777,11 +2782,13 @@ async function launchProviderTurn({
 function cancel() {
   if (!currentProcess) return;
   cancelRequested = true;
-  try {
-    currentProcess.kill("SIGTERM");
-  } catch (error) {
-    console.warn("chat: failed to kill subprocess", error);
-  }
+  const proc = currentProcess;
+  currentProcess = null; // unblock future sends immediately
+  try { proc.kill("SIGTERM"); } catch (_) { /* ignore */ }
+  // Force-kill after 3s if SIGTERM was ignored (defunct child, stuck I/O).
+  setTimeout(() => {
+    try { proc.kill("SIGKILL"); } catch (_) { /* ignore */ }
+  }, 3000).unref();
 }
 
 function clear() {
@@ -2843,7 +2850,7 @@ function hydrate({
         : sessionIds[PROVIDERS.CLAUDE],
       [PROVIDERS.CODEX]: typeof savedSessionIds[PROVIDERS.CODEX] === "string"
         ? savedSessionIds[PROVIDERS.CODEX]
-        : effectiveSessions[PROVIDERS.CODEX]
+        : sessionIds[PROVIDERS.CODEX]
     };
   }
   backfillArchiveFromHistoryIfEmpty();
