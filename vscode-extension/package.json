@@ -1,0 +1,162 @@
+{
+  "name": "prts-vscode",
+  "displayName": "PRTS — Priestess Chat Companion",
+  "version": "0.7.5",
+  "description": "Chat with Priestess (Arknights) inside VS Code, backed by your local Claude Code / Codex CLI via the PRTS tray app.",
+  "publisher": "svah-x",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SVAH-X/claude-code-but-priestess"
+  },
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Chat", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "prts.sendSelection",
+        "title": "PRTS: Send Selection to Priestess",
+        "icon": "$(send)"
+      },
+      {
+        "command": "prts.openChat",
+        "title": "PRTS: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "prts.newConversation",
+        "title": "PRTS: Start New Conversation",
+        "icon": "$(add)"
+      },
+      {
+        "command": "prts.restoreConversation",
+        "title": "PRTS: Restore Previous Conversation",
+        "icon": "$(history)"
+      },
+      {
+        "command": "prts.toggleVibeCoding",
+        "title": "PRTS: Toggle Vibe Coding Mode (陪伴 ↔ 顾问)",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "prts.showContextInfo",
+        "title": "PRTS: Show Editor Context Info",
+        "icon": "$(info)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prts-sidebar",
+          "title": "PRTS",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "prts-sidebar": [
+        {
+          "type": "webview",
+          "id": "prts.chatView",
+          "name": "PRTS"
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "prts.editorContext",
+        "label": "PRTS"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "submenu": "prts.editorContext",
+          "group": "navigation@9"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "submenu": "prts.editorContext",
+          "group": "navigation@9"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "prts.openChat",
+          "group": "navigation@9"
+        }
+      ],
+      "prts.editorContext": [
+        {
+          "command": "prts.sendSelection",
+          "when": "editorHasSelection",
+          "group": "1_send@1"
+        },
+        {
+          "command": "prts.showContextInfo",
+          "when": "editorTextFocus",
+          "group": "2_info@1"
+        },
+        {
+          "command": "prts.toggleVibeCoding",
+          "group": "3_mode@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "prts.sendSelection",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "prts.showContextInfo",
+          "when": "editorTextFocus"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "prts.sendSelection",
+        "key": "ctrl+shift+alt+s",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "prts.toggleVibeCoding",
+        "key": "ctrl+shift+alt+v",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "PRTS",
+      "properties": {
+        "prts.electronPort": {
+          "type": "number",
+          "default": 0,
+          "description": "WebSocket port of the PRTS Electron app. Auto-detected from ws-port.json at startup; set manually only if auto-detection fails."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:compile": "tsc -p ./",
+    "vscode:watch": "tsc -watch -p ./",
+    "vscode:package": "vsce package",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}

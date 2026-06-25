@@ -150,15 +150,15 @@ function outfitFrom(payload) {
 }
 
 const FRAME_FILES = {
-  idle: "睁眼.png",
-  halfClosed: "半眯眼.png",
-  almostClosed: "快闭眼.png",
-  closed: "闭眼.png",
-  happy: "笑.png",
-  angry: "生气.png",
-  threat: "威胁.png",
-  cry: "哭唧唧.png",
-  sleep: "睡觉.png"
+  idle: "idle.png",
+  halfClosed: "half_closed.png",
+  almostClosed: "almost_closed.png",
+  closed: "closed.png",
+  happy: "smile.png",
+  angry: "angry.png",
+  threat: "threat.png",
+  cry: "cry.png",
+  sleep: "sleep.png"
 };
 
 const BLINK_MIN_MS = 4500;
@@ -195,8 +195,8 @@ const MOOD_FRAME = {
 };
 
 const CAT_FRAME_FILES = {
-  normal: "普猫猫.png",
-  crying: "普猫猫哭.png"
+  normal: "cat_normal.png",
+  crying: "cat_crying.png"
 };
 
 let catMode = false;
@@ -1908,10 +1908,10 @@ window.addEventListener("dragleave", (event) => {
   if (event.relatedTarget === null) document.body.classList.remove("file-dragging");
 });
 window.addEventListener("drop", (event) => {
-  event.preventDefault();
   document.body.classList.remove("file-dragging");
   const dropped = event.dataTransfer?.files;
   if (!dropped || dropped.length === 0) return;
+  event.preventDefault();
   const paths = [];
   for (const file of dropped) {
     const p = window.chatApi?.getPathForFile?.(file);
@@ -2214,10 +2214,8 @@ openInBrowserBtn.addEventListener("click", async () => {
 //  Boot
 // ============================================================
 window.addEventListener("resize", resizeCanvas);
-let stageResizeObserver = null;
 if (typeof ResizeObserver !== "undefined") {
-  stageResizeObserver = new ResizeObserver(() => resizeCanvas());
-  stageResizeObserver.observe(stage);
+  new ResizeObserver(() => resizeCanvas()).observe(stage);
 }
 
 // Settings decide which outfit to load, so fetch them before the first frame

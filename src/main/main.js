@@ -23,6 +23,7 @@ const proactive = require("./proactive");
 const updater = require("./updater");
 const priestessProvider = require("./priestess-provider");
 const { spawnCli } = require("./cli-spawn");
+const wsServer = require("./ws-server");
 
 let conversationFile = null;
 let saveTimer = null;
@@ -156,6 +157,7 @@ function maybeSendCatMode(petWindow) {
   if (petWindow && !petWindow.isDestroyed()) {
     petWindow.webContents.send("desktop-pet:cat-mode", currentCatMode);
   }
+  wsServer.setCatMode(currentCatMode);
 }
 
 // ============================================================
@@ -774,6 +776,8 @@ function scheduleDesktopPet() {
   // Don't start the collapse countdown while she's still replying — the timer
   // (re)starts the moment output stops, in the chat status handler.
   if (chatTurnRunning) return;
+  // Don't schedule the pet while VS Code holds her attention.
+  if (wsServer.isVscodeActive()) return;
   desktopPetTimer = setTimeout(showDesktopPet, DESKTOP_PET_IDLE_MS);
 }
 
@@ -895,14 +899,19 @@ function showPopover() {
   popover.show();
   popover.focus();
   popover.webContents.send("popover:opened");
-  scheduleDesktopPet();
+  // Don't schedule the pet timer while VS Code has her attention — the Doctor
+  // will return to VS Code, and an idle-timer pet pop-in would be a distraction.
+  if (!wsServer.isVscodeActive()) scheduleDesktopPet();
   if (fadeIn) fadeWindow(popover, 0, 1, 180);
 }
 
 function collapsePopoverToDesktopPet() {
   clearTimeout(desktopPetTimer);
   desktopPetTimer = null;
-  if (!settings.get("desktopPet")) {
+  // When VS Code holds her attention, just hide the popover — don't show the
+  // desktop pet. The Doctor will come back to VS Code; the pet would only
+  // distract. Tray click still opens the popover normally.
+  if (!settings.get("desktopPet") || wsServer.isVscodeActive()) {
     hideDesktopPet();
     clearWindowFade();
     if (popover && !popover.isDestroyed()) {
@@ -987,6 +996,13 @@ const MENU_TEXT = {
     agentMode: "Agent mode（完整屏幕控制）",
     enableAgentTitle: "开启 agent mode？",
     enableAgent: "开启 agent mode",
+    vibeCoding: "Vibe Coding",
+    vibeCodingCompanion: "💬 陪伴模式（仅聊天）",
+    vibeCodingAdvisor: "👁 顾问模式（只读工具）",
+    vibeCodingAgent: "⚡ 代理模式（完整权限）",
+    enableAdvisorTitle: "切换到顾问模式？",
+    enableAgentModeTitle: "切换到代理模式？",
+    enableCompanion: "切换到陪伴模式",
     waifuMode: "老婆模式",
     enableWaifuTitle: "开启老婆模式？",
     enableWaifu: "开启老婆模式",
@@ -1054,6 +1070,13 @@ const MENU_TEXT = {
     agentMode: "Agent mode (full screen control)",
     enableAgentTitle: "Enable agent mode?",
     enableAgent: "Enable agent mode",
+    vibeCoding: "Vibe Coding",
+    vibeCodingCompanion: "💬 Companion (chat only)",
+    vibeCodingAdvisor: "👁 Advisor (read-only tools)",
+    vibeCodingAgent: "⚡ Agent (full access)",
+    enableAdvisorTitle: "Switch to advisor mode?",
+    enableAgentModeTitle: "Switch to agent mode?",
+    enableCompanion: "Switch to companion mode",
     waifuMode: "老婆模式 · Waifu mode",
     enableWaifuTitle: "Enable waifu mode?",
     enableWaifu: "Enable waifu mode",
@@ -1144,12 +1167,16 @@ async function toggleWaifuMode(nextValue) {
   settings.set({ waifuMode: Boolean(nextValue) });
 }
 
-async function toggleAgentMode(nextValue) {
-  if (nextValue) {
+async function setVibeCodingMode(mode) {
+  const current = settings.get("vibeCodingMode") || "companion";
+  if (mode === current) return;
+
+  // Only warn when switching to agent; advisor and companion are safe.
+  if (mode === "agent") {
     const warning = platform.agentModeWarning();
     const result = await dialog.showMessageBox({
       type: "warning",
-      title: mt("enableAgentTitle"),
+      title: mt("enableAgentModeTitle"),
       message: warning.message,
       detail: warning.detail,
       buttons: [mt("cancel"), mt("enableAgent")],
@@ -1157,8 +1184,11 @@ async function toggleAgentMode(nextValue) {
       cancelId: 0
     });
     if (result.response !== 1) return;
+  } else if (mode === "advisor" && current === "companion") {
+    // No warning needed for advisor — it's read-only and safe.
   }
-  settings.set({ agentMode: Boolean(nextValue) });
+
+  settings.set({ vibeCodingMode: mode });
 }
 
 function setTheme(value) {
@@ -1174,11 +1204,15 @@ function setMenuLanguage(value) {
 
 function buildSettingsState() {
   const providerAvailability = chat.getProviderAvailability({ refresh: false });
+  const vibeCodingMode = settings.get("vibeCodingMode") || "companion";
   return {
     ...settings.getAll(),
     chatProvider: providerAvailability.activeProvider || settings.get("chatProvider"),
     providerAvailability,
-    appVersion: app.getVersion()
+    appVersion: app.getVersion(),
+    // Derive agentMode for backward compat (renderer badge, auto-screenshot visibility, etc.)
+    agentMode: vibeCodingMode === "agent",
+    vibeCodingMode
   };
 }
 
@@ -1506,12 +1540,27 @@ function buildContextMenu() {
       click: (item) => settings.set({ coauthorCommits: item.checked })
     },
     {
-      label: mt("agentMode"),
-      type: "checkbox",
-      checked: Boolean(all.agentMode),
-      click: (item) => {
-        toggleAgentMode(item.checked);
-      }
+      label: mt("vibeCoding"),
+      submenu: [
+        {
+          label: mt("vibeCodingCompanion"),
+          type: "radio",
+          checked: all.vibeCodingMode === "companion" || !all.vibeCodingMode,
+          click: () => setVibeCodingMode("companion")
+        },
+        {
+          label: mt("vibeCodingAdvisor"),
+          type: "radio",
+          checked: all.vibeCodingMode === "advisor",
+          click: () => setVibeCodingMode("advisor")
+        },
+        {
+          label: mt("vibeCodingAgent"),
+          type: "radio",
+          checked: all.vibeCodingMode === "agent",
+          click: () => setVibeCodingMode("agent")
+        }
+      ]
     },
     {
       label: mt("waifuMode"),
@@ -1616,9 +1665,10 @@ function buildContextMenu() {
 // only takes effect after a restart, so once the Doctor grants it this makes
 // "grant → restart" a single click instead of a manual quit + reopen.
 function restartApp() {
-  // app.exit() skips before-quit — kill a mid-turn CLI subprocess explicitly
-  // so it doesn't keep running (and billing) past the restart.
+  // app.exit() skips before-quit — kill mid-turn CLI subprocesses explicitly
+  // so they don't keep running (and billing) past the restart.
   chat.cancel();
+  try { require("./vscode-chat").cancel(); } catch (_) { /* ignore */ }
   app.relaunch();
   app.exit(0);
 }
@@ -1736,6 +1786,7 @@ function wipePersistedConversation() {
 // carrying her words, unless the Doctor is already looking at the chat.
 // Clicking the notification opens the popover.
 function notifyProactiveMessage(text) {
+  if (wsServer.isVscodeActive()) return;
   if (popover && popover.isVisible() && popover.isFocused()) return;
   if (!Notification.isSupported()) return;
   try {
@@ -1767,10 +1818,9 @@ function notifyProactiveMessage(text) {
 function maybeNotifyDoneNotification(event) {
   if (event.status !== "idle") return;
   if (event.error || event.cancelled || event.silent) return;
+  if (wsServer.isVscodeActive()) return;
   const duration = chat.getLastTurnDurationMs();
   if (duration < 20000) return;
-  // Only fire if the popover isn't currently focused — no point notifying
-  // about something the Doctor is already watching.
   if (popover && popover.isVisible() && popover.isFocused()) return;
   if (!Notification.isSupported()) return;
   try {
@@ -1832,6 +1882,32 @@ app.whenReady().then(() => {
   // memory tidy-ups. All gating — interval, cooldown, quiet hours, daily cap,
   // backend availability — lives in proactive.js.
   proactive.start();
+
+  // WebSocket server for VS Code extension bridge
+  wsServer.start({
+    onVscodeConnected() {
+      clearTimeout(desktopPetTimer);
+      desktopPetTimer = null;
+      // Hide the popover cleanly (no fade, no pet-collapse animation).
+      if (popover && !popover.isDestroyed()) {
+        clearWindowFade();
+        popover.hide();
+        popover.setOpacity(1);
+      }
+      // Hide the desktop pet — VS Code is her window now.
+      if (desktopPet && !desktopPet.isDestroyed()) {
+        desktopPet.hide();
+      }
+    },
+    onVscodeDisconnected() {
+      // Bring the desktop pet back immediately, no idle delay.
+      if (settings.get("desktopPet")) {
+        clearTimeout(desktopPetTimer);
+        desktopPetTimer = null;
+        showDesktopPet();
+      }
+    }
+  });
 
   setTimeout(() => {
     chat.refreshProviderAvailability();
@@ -1918,9 +1994,11 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  // Don't orphan a mid-turn CLI subprocess — it would keep running (and
-  // consuming the Doctor's quota) with no UI attached.
+  // Don't orphan mid-turn CLI subprocesses — they'd keep running
+  // (consuming quota / resources) with no UI attached.
   chat.cancel();
+  try { require("./vscode-chat").cancel(); } catch (_) { /* ignore */ }
+  try { wsServer.stop(); } catch (_) { /* ignore */ }
 });
 
 // ============================================================
@@ -1977,21 +2055,31 @@ ipcMain.handle("chat:send", (_, payload) => {
   return chat.send(payload?.text, payload?.attachments);
 });
 ipcMain.handle("chat:open-attachment", (_, p) => {
-  if (typeof p === "string" && p) shell.openPath(p);
+  if (typeof p !== "string" || !p) return;
+  // Validate: path must be within allowed roots (same as chat:attachment-data-uri).
+  const resolved = path.resolve(p);
+  const allowedRoots = [os.homedir(), settings.get("chatCwd") || os.homedir(), os.tmpdir()];
+  const allowed = allowedRoots.some((root) => resolved.startsWith(root + path.sep) || resolved === root);
+  if (allowed) shell.openPath(resolved);
 });
 // Local image → data: URI for in-bubble thumbnails / Quick Look. Done in main
 // because the popover runs with webSecurity on, which blocks cross-dir file://.
 ipcMain.handle("chat:attachment-data-uri", (_, p) => {
   try {
     if (typeof p !== "string" || !p) return "";
-    if (fs.statSync(p).size > 16 * 1024 * 1024) return "";
-    const ext = path.extname(p).toLowerCase();
+    // Validate: path must be absolute and within allowed roots.
+    const resolved = path.resolve(p);
+    const allowedRoots = [os.homedir(), settings.get("chatCwd") || os.homedir(), os.tmpdir()];
+    const allowed = allowedRoots.some((root) => resolved.startsWith(root + path.sep) || resolved === root);
+    if (!allowed) return "";
+    if (fs.statSync(resolved).size > 16 * 1024 * 1024) return "";
+    const ext = path.extname(resolved).toLowerCase();
     const mime =
       ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" :
       ext === ".webp" ? "image/webp" :
       ext === ".gif" ? "image/gif" :
       ext === ".bmp" ? "image/bmp" : "image/png";
-    return `data:${mime};base64,${fs.readFileSync(p).toString("base64")}`;
+    return `data:${mime};base64,${fs.readFileSync(resolved).toString("base64")}`;
   } catch {
     return "";
   }
@@ -2094,7 +2182,11 @@ ipcMain.handle("html:open-in-browser", async (_, payload) => {
   if (!html.trim()) return { ok: false, reason: "empty content" };
   const tempFile = path.join(os.tmpdir(), `prts-preview-${Date.now()}.html`);
   try {
-    fs.writeFileSync(tempFile, html, "utf8");
+    // Wrap with a restrictive CSP to prevent the model-generated HTML from
+    // executing scripts, submitting forms, or navigating away in the browser.
+    const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: https:; font-src \'none\'">';
+    const sandboxed = `<!doctype html>\n<html><head>${csp}</head><body>${html}</body></html>`;
+    fs.writeFileSync(tempFile, sandboxed, "utf8");
     const error = await shell.openPath(tempFile);
     if (error) {
       console.warn("main: shell.openPath failed:", error);

@@ -18,17 +18,17 @@ function outfitFrom(payload) {
 }
 
 const FRAME_FILES = {
-  idle: "睁眼.png",
-  halfClosed: "半眯眼.png",
-  almostClosed: "快闭眼.png",
-  closed: "闭眼.png",
-  happy: "笑.png",
-  sleep: "睡觉.png",
-  angry: "生气.png"
+  idle: "idle.png",
+  halfClosed: "half_closed.png",
+  almostClosed: "almost_closed.png",
+  closed: "closed.png",
+  happy: "smile.png",
+  sleep: "sleep.png",
+  angry: "angry.png"
 };
 const CAT_FRAME_FILES = {
-  normal: "普猫猫.png",
-  crying: "普猫猫哭.png"
+  normal: "cat_normal.png",
+  crying: "cat_crying.png"
 };
 const BLINK_SEQUENCE = [
   ["halfClosed", 70],
