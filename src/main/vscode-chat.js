@@ -33,6 +33,7 @@ let messageIdCounter = 0;
 let midTurn = false;
 let outboundQueue = [];
 let vscodeSessionIds = {};
+let staleRetryInFlight = false;
 
 // Per-turn streaming state
 let pendingAssistantText = "";
@@ -128,6 +129,8 @@ function beginAssistant() {
   skillExecutedThisTurn.clear();
   rememberedThisTurn.clear();
   lastEmittedMood = null;
+  staleRetryInFlight = false;
+  currentToolName = null;
   history.push({
     id: currentAssistantId,
     role: "assistant",
@@ -444,9 +447,15 @@ function buildContextAugmentedMessage(userText, context) {
   if (context.selection && context.selection.text) {
     const lang = context.activeFileLanguage || "";
     const s = context.selection;
+    const MAX_SELECTION = 30_000;
+    let selText = s.text;
+    if (selText.length > MAX_SELECTION) {
+      selText = selText.slice(0, MAX_SELECTION) +
+        `\n…(已截断，完整选区共 ${selText.length} 字符)`;
+    }
     lines.push(`\n博士选中的代码 (${s.startLine}-${s.endLine}行):`);
     lines.push("```" + lang);
-    lines.push(s.text);
+    lines.push(selText);
     lines.push("```");
   }
 
@@ -462,7 +471,7 @@ function buildContextAugmentedMessage(userText, context) {
 // ---------------------------------------------------------------------------
 
 function dispatchSend(trimmed, context) {
-  if (currentProcess) { midTurn = false; return; } // re-entry guard
+  if (currentProcess) return; // re-entry guard — don't touch midTurn, it belongs to the running turn
   midTurn = true;
   const provider = chat.getProviderAvailability().activeProvider || "claude";
   currentProvider = provider;
@@ -521,6 +530,7 @@ function dispatchSend(trimmed, context) {
     emit({ kind: "status", status: "idle", error: errMsg });
     emit({ kind: "history", history: history.slice() });
     midTurn = false;
+    currentAssistantId = null; // unwind empty assistant entry from beginAssistant()
     return;
   }
 
@@ -559,6 +569,21 @@ function dispatchSend(trimmed, context) {
     currentProcess = null;
     midTurn = false;
 
+    // Finalize the assistant entry — mirrors chat.js close handler behaviour.
+    if (currentAssistantId) finalizeAssistant();
+
+    // Self-heal: drop stale session on "not found" errors and retry once.
+    const sessionLost = /no conversation found|session.*not found|invalid.*session/i.test(stderr);
+    if (sessionLost && !staleRetryInFlight) {
+      staleRetryInFlight = true;
+      vscodeSessionIds[provider] = null;
+      saveConversation();
+      // Retry with a fresh session. staleRetryInFlight stays true until the
+      // retry succeeds — prevents loops if the fresh session also fails.
+      dispatchSend(trimmed, context);
+      return;
+    }
+
     if (code !== 0 && code !== null) {
       emit({
         kind: "status",
@@ -585,6 +610,8 @@ function dispatchSend(trimmed, context) {
   currentProcess.on("error", (err) => {
     currentProcess = null;
     midTurn = false;
+    staleRetryInFlight = false;
+    if (currentAssistantId) finalizeAssistant();
     emit({
       kind: "status",
       status: "idle",
@@ -620,11 +647,18 @@ function send(text, context) {
 
 function cancel() {
   if (currentProcess) {
-    try { currentProcess.kill(); } catch (_) { /* ignore */ }
+    const proc = currentProcess;
     currentProcess = null;
+    try { proc.kill("SIGTERM"); } catch (_) { /* ignore */ }
+    // Force-kill after 3s if SIGTERM was ignored (matches chat.js pattern).
+    setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch (_) { /* ignore */ }
+    }, 3000).unref();
   }
   outboundQueue.length = 0;
   midTurn = false;
+  currentAssistantId = null;
+  emit({ kind: "tool", active: false });
   emit({ kind: "status", status: "idle", cancelled: true });
 }
 
@@ -651,6 +685,7 @@ function hydrate(data) {
   if (data && data.sessionIds) {
     vscodeSessionIds = data.sessionIds || {};
   }
+  saveConversation();
 }
 
 function getSessionId() {
