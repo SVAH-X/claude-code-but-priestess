@@ -1834,7 +1834,44 @@ function maybeNotifyDoneNotification(event) {
   }
 }
 
-app.whenReady().then(() => {
+// ============================================================
+//  Single-instance lock — prevent multiple copies from running.
+//  On a second launch the existing instance is brought forward and
+//  the new process shows an alert then exits.
+// ============================================================
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.whenReady().then(async () => {
+    await dialog.showMessageBox({
+      type: "info",
+      title: "PRTS · 普瑞赛斯",
+      message: "普瑞赛斯已在运行中",
+      detail:
+        "普瑞赛斯已经在系统托盘（Windows 通知区域 / macOS 菜单栏）中运行。\n" +
+        "如需重新启动，请先在托盘右键菜单中选择「退出」，再重新打开。",
+      buttons: ["确定"]
+    });
+    app.exit(0);
+  });
+} else {
+  app.on("second-instance", (_event, _commandLine, _workingDirectory) => {
+    // Someone tried to launch a second copy — bring the existing
+    // instance forward instead.
+    if (popover && !popover.isDestroyed()) {
+      if (popover.isMinimized()) popover.restore();
+      if (!popover.isVisible()) {
+        hideDesktopPet();
+        positionPopover();
+        showPopover();
+      }
+      popover.focus();
+    } else {
+      togglePopover();
+    }
+  });
+
+  app.whenReady().then(() => {
   // On macOS, become a status-menu accessory BEFORE creating the Tray.
   // Packaged builds set LSUIElement=true in Info.plist so they already launch
   // as accessories; dev (`npm run dev`) and raw Electron.app launches need an
@@ -2198,3 +2235,5 @@ ipcMain.handle("html:open-in-browser", async (_, payload) => {
     return { ok: false, reason: err.message };
   }
 });
+
+} // end single-instance else
