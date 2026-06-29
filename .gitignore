@@ -6,3 +6,7 @@ dist/
 # Local archives (e.g. zipping the repo to move it to another machine).
 *.7z
 CLAUDE.md
+
+# VS Code extension build output
+vscode-extension/out/
+*.vsix

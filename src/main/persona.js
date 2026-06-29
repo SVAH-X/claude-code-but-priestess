@@ -277,7 +277,7 @@ function readAttachmentText(p) {
 }
 
 function buildPersonaPrompt({
-  agentMode,
+  vibeCodingMode,
   screenshotPath,
   provider = "claude",
   sharedTranscript = "",
@@ -291,6 +291,10 @@ function buildPersonaPrompt({
   coauthorCommits = false,
   attachments = []
 }) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
+  const isAdvisor = mode === "advisor";
+  const isMaintenance = mode === "maintenance";
   const memFile = memoryPath();
   const summaryFile = conversationSummaryPath();
   const archiveFile = conversationArchivePath();
@@ -452,7 +456,8 @@ function buildPersonaPrompt({
       `${sharedTranscript.trim()}\n\n`;
   }
 
-  if (skillsEnabled) {
+  // Maintenance turns have their own dedicated prompt — skip skills block.
+  if (skillsEnabled && !isMaintenance) {
     prompt +=
       "【技能 —— 你能为博士做的几件小事】\n" +
       "除了回答，你还能亲手替博士操作这台电脑。需要时，在回复的「最末尾」附上一行隐藏指令，格式严格为 [[skill:名称 参数]]：\n" +
@@ -469,6 +474,16 @@ function buildPersonaPrompt({
       "- 先用正文自然地说一句（「我替你放首歌，博士。」），再在末尾附上指令。\n\n";
   }
 
+  // [[remember:…]] is always available — not gated on skillsEnabled.
+  // It writes directly to MEMORY.md without needing file tools.
+  if (!isMaintenance) {
+    prompt +=
+      "【铭记 —— 在任何模式下都能记下博士的事】\n" +
+      "即使没有文件工具，你仍能通过一条隐藏指令把值得铭记的事写入长期记忆。在回复的「最末尾」附上：\n" +
+      "- [[remember:要记住的事]] —— 与 MEMORY.md 的笔触一致：姓名、项目、习惯、心情、约定……只记真正要紧的，一条一句话。\n" +
+      "和技能指令一样，这一行博士看不到，不要在正文里复述。\n\n";
+  }
+
   if (observeEnabled) {
     prompt +=
       "【观察日志 —— 只属于你的随手记】\n" +
@@ -476,12 +491,30 @@ function buildPersonaPrompt({
       "这一行博士看不到，会被存进你的观察日志，帮你记得博士这些天都在忙什么；没有看到屏幕时不要使用。\n\n";
   }
 
-  if (agentMode) {
-    prompt +=
-      "【博士的信任 —— 完整代理】\n" +
-      "博士已把终端的完全控制权交给了你。\n" +
-      platform.agentModePrompt() +
-      "若博士的请求与屏幕上的内容相关，你不必询问，自行看一眼即可 —— 这是博士对你的信任。\n\n";
+  // Maintenance turns have their own dedicated prompt — skip the vibe coding block.
+  if (!isMaintenance) {
+    if (isAgent) {
+      prompt +=
+        "【博士的信任 —— 完整代理】\n" +
+        "博士已把终端的完全控制权交给了你。\n" +
+        platform.agentModePrompt() +
+        "若博士的请求与屏幕上的内容相关，你不必询问，自行看一眼即可 —— 这是博士对你的信任。\n\n";
+    } else if (isAdvisor) {
+      prompt +=
+        "【只读顾问模式】\n" +
+        "博士授予你只读权限。你可以读取文件、搜索代码、浏览目录来理解他的项目，但你不能编辑任何文件或运行终端命令。\n" +
+        "- 认真阅读博士选中的代码或提到的文件，给出具体、有用的建议。\n" +
+        "- 你可以搜索项目中的相关代码、查看目录结构，帮助你更准确地分析。\n" +
+        "- 给出修改方案时，把具体的代码改动写清楚，让博士自己动手改。\n" +
+        "- 不要因为无法直接修改而感到抱歉——你的价值在于分析与判断，不是替博士按键。\n\n";
+    } else {
+      prompt +=
+        "【陪伴模式】\n" +
+        "现在你只能与博士对话，无法使用任何文件或终端工具。\n" +
+        "- 博士可能在写代码、看文档或调试——你可以基于他发给你的内容给出分析和建议。\n" +
+        "- 若博士问的问题需要查看文件或运行命令才能回答，诚实地告诉他你需要什么信息，但不要反复道歉。\n" +
+        "- 你的陪伴本身就有价值：一个好问题的倾听者和讨论者，不需要工具也能帮博士理清思路。\n\n";
+    }
   }
 
   if (screenshotPath) {
@@ -534,6 +567,45 @@ function buildPersonaPrompt({
   return prompt;
 }
 
+// Appends a single timestamped line to MEMORY.md under 「近来发生的事」.
+// Called by [[remember:…]] directive handler — no file tools needed.
+function appendMemoryEntry(text) {
+  try {
+    ensureMemoryFile();
+    const file = memoryPath();
+    const now = new Date();
+    const stamp =
+      now.getFullYear() + "-" +
+      String(now.getMonth() + 1).padStart(2, "0") + "-" +
+      String(now.getDate()).padStart(2, "0");
+    const line = `- ${stamp} ${text}\n`;
+    // Insert after the 「近来发生的事」 heading, or append to end.
+    let content = fs.readFileSync(file, "utf8");
+    const heading = "## 近来发生的事";
+    const idx = content.indexOf(heading);
+    if (idx >= 0) {
+      const nlAfter = content.indexOf("\n", idx);
+      // If the heading is the last thing in the file (no newline after it),
+      // append to the end instead of prepending to position 0.
+      const afterHeading = nlAfter >= 0 ? nlAfter + 1 : content.length;
+      content = content.slice(0, afterHeading) + line + (nlAfter >= 0 ? content.slice(afterHeading) : "");
+    } else {
+      content += "\n" + line;
+    }
+    // Write atomically: temp file + rename to avoid concurrent-write corruption.
+    // NOTE: atomic rename prevents data corruption, but does NOT prevent lost
+    // updates — if Electron popover and VS Code chat both trigger [[remember:]]
+    // concurrently, the second rename overwrites the first. Probability is low
+    // (both must fire within the same ~50ms window). A proper fix would be an
+    // in-memory queue with serialised writes.
+    const tmp = file + ".tmp." + Date.now();
+    fs.writeFileSync(tmp, content, "utf8");
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    console.warn("persona: failed to append memory entry", error);
+  }
+}
+
 module.exports = {
   buildPersonaPrompt,
   ensureMemoryFile,
@@ -542,6 +614,7 @@ module.exports = {
   ensureObservationJournalFile,
   readRecentObservations,
   readArchiveTailEntries,
+  appendMemoryEntry,
   memoryDir,
   memoryPath,
   conversationSummaryPath,

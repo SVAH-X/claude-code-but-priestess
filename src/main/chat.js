@@ -22,6 +22,7 @@ const PROVIDERS = Object.freeze({
   PRIESTESS: "priestess"
 });
 const SHARED_TRANSCRIPT_MAX_CHARS = 9000;
+const MAX_USER_MESSAGE_CHARS = 100_000;
 const RECENT_TRANSCRIPT_MESSAGE_LIMIT = 24;
 const SUMMARY_MAX_CHARS = 14000;
 const SUMMARY_MESSAGE_MAX_CHARS = 720;
@@ -53,6 +54,7 @@ let consecutiveQuestionReplies = 0;
 let turnSawToolUse = false;
 let assistantTextAfterLastAction = false;
 let currentTurnHadScreenshot = false;
+let unparsedLinesThisTurn = 0; // cap at 10 to prevent crash-dump flood
 // Codex sometimes ends a tool-using turn with only a progress note and no real
 // answer. We auto-continue once per user turn (the close handler re-prompts) so
 // she answers instead of going silent; the guard prevents loops.
@@ -89,7 +91,7 @@ const codexSessionFileCache = new Map();
 // across chunks. Handling tags anywhere (not just the reply head) also fixes
 // the Claude leak where a second text block after a tool call opened with a
 // fresh [[mood:X]] that used to slip through verbatim.
-const DIRECTIVE_RE = /\[\[\s*(?:mood\s*[:：]\s*([^\]]*?)|skill\s*:\s*([a-z_]+)(?:\s+([^\]]*?))?|observe\s*[:：]\s*([^\]]*?)|silent)\s*\]\]/gi;
+const DIRECTIVE_RE = /\[\[\s*(?:mood\s*[:：]\s*([^\]]*?)|skill\s*[:：]\s*([a-z_]+)(?:\s+([^\]]*?))?|observe\s*[:：]\s*([^\]]*?)|remember\s*[:：]\s*([^\]]*?)|silent)\s*\]\]/gi;
 // Lenient head catcher for the finalize pass: models sometimes write the
 // opening mood tag malformed ("mood:smile", "[mood:smile]"). Streaming can't
 // strip those without risking real prose, but once the reply is complete a
@@ -104,7 +106,7 @@ const LENIENT_MOOD_HEAD_RE = /^\s*[\[（(]{0,2}\s*mood\s*[:：]\s*([a-zA-Z]+)\s*
 // finalize variant also accepts end-of-text.
 const LENIENT_MOOD_STREAM_RE = /\[\[\s*mood\s*[:：]\s*([a-zA-Z]+)\s*\](?=[^\]])[ \t]?/gi;
 const LENIENT_MOOD_FINAL_RE = /\[\[\s*mood\s*[:：]\s*([a-zA-Z]+)\s*\](?!\])[ \t]?/gi;
-const DIRECTIVE_PREFIXES = ["[[mood:", "[[skill:", "[[observe:", "[[silent]]"];
+const DIRECTIVE_PREFIXES = ["[[mood:", "[[skill:", "[[observe:", "[[remember:", "[[silent]]"];
 // Generous because [[observe:…]] carries a free-form sentence.
 const DIRECTIVE_PARTIAL_MAX = 240;
 const OBSERVATION_MAX_PER_TURN = 3;
@@ -808,13 +810,18 @@ function finishTurn(extra = {}) {
 
 function drainOutboundQueue() {
   if (quitPending || currentProcess || outboundQueue.length === 0) return;
-  const next = outboundQueue.shift();
-  emitQueueState();
-  dispatchSend(next.text, {
+  // Peek, don't shift yet — if dispatchSend fails (missing-cli, quitting),
+  // the message stays in the queue for the next drain attempt.
+  const next = outboundQueue[0];
+  const result = dispatchSend(next.text, {
     userAlreadyShown: true,
     chained: true,
     attachments: next.attachments || []
   });
+  if (result?.ok) {
+    outboundQueue.shift();
+    emitQueueState();
+  }
 }
 
 function clearOutboundQueue() {
@@ -967,7 +974,7 @@ function pruneObservationJournalIfNeeded() {
 // Handle one complete directive tag pulled from the stream (or the finalize
 // pass — skills dedupe per turn so nothing re-fires). Always returns "" so it
 // can be used directly as a String.replace handler.
-function handleDirective(full, mood, skillName, skillArg, observe) {
+function handleDirective(full, mood, skillName, skillArg, observe, remember) {
   if (mood !== undefined) {
     emitMood(mood);
   } else if (skillName) {
@@ -977,6 +984,10 @@ function handleDirective(full, mood, skillName, skillArg, observe) {
   } else if (observe !== undefined) {
     // Maintenance turns have no screen — ignore any observation they invent.
     if (silentTurnKind !== "maintenance") recordObservation(observe);
+  } else if (remember !== undefined) {
+    // [[remember:…]] writes to MEMORY.md — works in any mode, no file tools needed.
+    const text = (remember || "").trim();
+    if (text) persona.appendMemoryEntry(text);
   } else {
     sawSilentDirective = true;
   }
@@ -1036,7 +1047,7 @@ function stripDirectiveTags(text) {
       emitMood(mood);
       return "";
     })
-    .replace(/\[?\[\s*(?:mood|skill|observe|silent)\b[^\]]*$/i, "")
+    .replace(/\[?\[\s*(?:mood|skill|observe|remember|silent)\b[^\]]*$/i, "")
     .trim();
 }
 
@@ -1464,6 +1475,7 @@ function beginAssistant(provider = currentProvider || activeProvider()) {
   claudeModelInvalid = false;
   turnSawToolUse = false;
   assistantTextAfterLastAction = false;
+  unparsedLinesThisTurn = 0;
   pendingAssistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   pendingAssistantText = "";
   // Silent self-turns stay invisible — no bubble unless finishSilentTurn
@@ -2108,11 +2120,16 @@ async function takeScreenshot() {
   return null;
 }
 
-function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript, sessionPlan) {
+function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
+  const isAdvisor = mode === "advisor";
+  const isMaintenance = mode === "maintenance";
+  const effectiveSessions = customSessionIds || sessionIds;
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const systemPrompt = persona.buildPersonaPrompt({
-    agentMode,
+    vibeCodingMode: mode,
     screenshotPath,
     provider: PROVIDERS.CLAUDE,
     sharedTranscript,
@@ -2121,7 +2138,7 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     skillsEnabled: settings.get("skillsEnabled") !== false,
     deepPersona: shouldUseDeepPersona(trimmed),
     observeEnabled:
-      settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
+      settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
     personaNotes: settings.get("personaNotes") || "",
     catMode: silentTurnKind ? null : chatCatMode,
     coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
@@ -2148,18 +2165,23 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
     args.push("--model", claudeModel);
   }
 
-  if (agentMode) {
+  if (isAgent) {
     args.push("--dangerously-skip-permissions");
-  } else {
-    // Without agent mode she still needs file tools for memory + light helpfulness.
-    // Bash and network tools stay off until the Doctor enables agent mode.
+  } else if (isAdvisor) {
+    // Read-only tools: she can read, search, and browse but not edit or execute.
+    args.push("--allowedTools", "Read,Grep,Glob,LS");
+  } else if (isMaintenance) {
+    // Memory maintenance: needs file r/w but not Bash/network.
     args.push("--allowedTools", "Read,Edit,Write,Glob,Grep,LS");
+  } else {
+    // Companion mode: chat only, no tools at all.
+    args.push("--allowedTools", "");
   }
   // Let Read reach attachments dropped from outside the project dir.
   args.push(...attachmentDirArgs());
 
-  if (sessionPlan?.resumeSessionId) {
-    args.push("--resume", sessionPlan.resumeSessionId);
+  if (effectiveSessions[PROVIDERS.CLAUDE]) {
+    args.push("--resume", effectiveSessions[PROVIDERS.CLAUDE]);
   }
 
   return {
@@ -2171,12 +2193,14 @@ function buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscr
   };
 }
 
-function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) {
+function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscript) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   return (
     persona.buildPersonaPrompt({
-      agentMode,
+      vibeCodingMode: mode,
       screenshotPath,
       provider: PROVIDERS.CODEX,
       sharedTranscript,
@@ -2185,7 +2209,7 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
       skillsEnabled: settings.get("skillsEnabled") !== false,
       deepPersona: shouldUseDeepPersona(trimmed),
       observeEnabled:
-        settings.get("waifuMode") === true && (Boolean(screenshotPath) || agentMode),
+        settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
       personaNotes: settings.get("personaNotes") || "",
       catMode: silentTurnKind ? null : chatCatMode,
       coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
@@ -2196,13 +2220,17 @@ function buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript) 
   );
 }
 
-function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript, sessionPlan) {
-  const prompt = buildCodexPrompt(trimmed, agentMode, screenshotPath, sharedTranscript);
+function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds) {
+  const mode = vibeCodingMode || "companion";
+  const isAgent = mode === "agent";
+  const isAdvisor = mode === "advisor";
+  const isMaintenance = mode === "maintenance";
+  const effectiveSessions = customSessionIds || sessionIds;
+  const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript);
   const codexModel = validatedCodexModel();
-  const resumeSessionId = sessionPlan?.resumeSessionId || null;
   let args;
 
-  if (resumeSessionId) {
+  if (effectiveSessions[PROVIDERS.CODEX]) {
     args = [
       "exec",
       "resume",
@@ -2216,10 +2244,17 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
       args.push("-i", screenshotPath);
     }
     args.push(...codexAttachmentArgs());
-    if (agentMode) {
+    if (isAgent) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
+    } else if (isAdvisor || isMaintenance) {
+      // Resumed sessions carry their original sandbox; re-assert the current
+      // mode's sandbox so a prior agent session can't leak tools.
+      args.push("-s", isMaintenance ? "workspace-write" : "read-only",
+                 "--add-dir", persona.memoryDir());
+    } else {
+      args.push("-s", "read-only", "--add-dir", persona.memoryDir());
     }
-    args.push(resumeSessionId, "-");
+    args.push(effectiveSessions[PROVIDERS.CODEX], "-");
   } else {
     args = [
       "exec",
@@ -2237,10 +2272,17 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
       args.push("-i", screenshotPath);
     }
     args.push(...codexAttachmentArgs());
-    if (agentMode) {
+    if (isAgent) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
-    } else {
+    } else if (isAdvisor) {
+      // Read-only workspace + memory dir so she can still read her own notes.
+      args.push("-s", "read-only", "--add-dir", persona.memoryDir());
+    } else if (isMaintenance) {
+      // Memory maintenance: needs file write access to memory dir.
       args.push("-s", "workspace-write", "--add-dir", persona.memoryDir());
+    } else {
+      // Companion: read-only sandbox — memory dir accessible, no workspace access.
+      args.push("-s", "read-only", "--add-dir", persona.memoryDir());
     }
     args.push("-");
   }
@@ -2249,23 +2291,15 @@ function buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTra
     command: resolveExecutable("codex"),
     args,
     stdin: prompt,
-    resumed: Boolean(resumeSessionId)
+    resumed: Boolean(effectiveSessions[PROVIDERS.CODEX])
   };
 }
 
-function buildProviderInvocation(
-  provider,
-  trimmed,
-  cwd,
-  agentMode,
-  screenshotPath,
-  sharedTranscript,
-  sessionPlan
-) {
+function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
   if (provider === PROVIDERS.CODEX) {
-    return buildCodexInvocation(trimmed, cwd, agentMode, screenshotPath, sharedTranscript, sessionPlan);
+    return buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, customSessionIds);
   }
-  return buildClaudeInvocation(trimmed, agentMode, screenshotPath, sharedTranscript, sessionPlan);
+  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds);
 }
 
 function send(text, attachments) {
@@ -2275,6 +2309,7 @@ function send(text, attachments) {
   let trimmed = String(text ?? "").trim();
   if (!trimmed && files.length === 0) return { ok: false, reason: "empty" };
   if (!trimmed) trimmed = "看看这些。"; // attachments with no text of their own
+  if (trimmed.length > MAX_USER_MESSAGE_CHARS) return { ok: false, reason: "too-long" };
 
   refreshProviderAvailability();
   const provider = activeProvider();
@@ -2299,9 +2334,10 @@ function send(text, attachments) {
 
 function dispatchSend(
   trimmed,
-  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false, attachments = [] } = {}
+  { userAlreadyShown = false, chained = false, forceScreenshot = false, silentUser = false, vibeCodingMode: vibeCodingModeOverride = null, attachments = [] } = {}
 ) {
   if (currentProcess || turnLaunching) return { ok: false, reason: "busy" };
+  if (quitPending) return { ok: false, reason: "quitting" };
 
   refreshProviderAvailability();
   const provider = activeProvider();
@@ -2353,7 +2389,19 @@ function dispatchSend(
     silent: Boolean(silentTurnKind) || undefined
   });
 
-  const agentMode = Boolean(settings.get("agentMode"));
+  // Silent turns need tools regardless of the Doctor's vibeCodingMode setting.
+  // Proactive checks need at least Read (advisor); maintenance needs file r/w.
+  const globalMode = String(settings.get("vibeCodingMode") || "companion");
+  let vibeCodingMode = vibeCodingModeOverride || globalMode;
+  if (!vibeCodingModeOverride) {
+    if (silentTurnKind === "proactive") {
+      vibeCodingMode = globalMode === "agent" ? "agent" : "advisor";
+      if (vibeCodingMode !== globalMode) console.log("proactive: overrode vibeCodingMode from %s to %s", globalMode, vibeCodingMode);
+    } else if (silentTurnKind === "maintenance") {
+      vibeCodingMode = "maintenance";
+      console.log("proactive: maintenance turn — forcing vibeCodingMode to maintenance");
+    }
+  }
 
   turnLaunching = true;
 
@@ -2366,7 +2414,7 @@ function dispatchSend(
       trimmed,
       provider,
       cwd: resolveCwd(),
-      agentMode,
+      vibeCodingMode,
       sharedTranscript,
       sessionPlan,
       chained,
@@ -2428,7 +2476,7 @@ function launchPriestessTurn(trimmed) {
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
   const includeLongMemory = !longMemoryDormant || memoryRecallRequested;
   const system = persona.buildPersonaPrompt({
-    agentMode: false,
+    vibeCodingMode: "companion",
     screenshotPath: null,
     provider: PROVIDERS.PRIESTESS,
     // History is sent as real chat messages below, so the transcript is not
@@ -2490,7 +2538,7 @@ async function launchProviderTurn({
   trimmed,
   provider,
   cwd,
-  agentMode,
+  vibeCodingMode,
   sharedTranscript,
   sessionPlan,
   chained,
@@ -2508,10 +2556,11 @@ async function launchProviderTurn({
 
   const silentTurn = Boolean(silentTurnKind);
   const proactiveCheck = silentTurnKind === "proactive";
+  const isAgent = vibeCodingMode === "agent";
   // When the Doctor attached files this turn, he's pointing her at THOSE — skip
   // the auto-screenshot so a full-screen grab doesn't steal her attention.
   const autoScreenshot =
-    agentMode && settings.get("autoScreenshot") !== false && pendingAttachments.length === 0;
+    isAgent && settings.get("autoScreenshot") !== false && pendingAttachments.length === 0;
   // Chained turns normally skip the screenshot, but an auto-continuation needs a
   // fresh screen so she can actually answer what she "saw". Proactive checks
   // exist to look at the screen, so they always capture one regardless of
@@ -2534,7 +2583,7 @@ async function launchProviderTurn({
     provider,
     trimmed,
     cwd,
-    agentMode,
+    vibeCodingMode,
     screenshotPath,
     sharedTranscript,
     sessionPlan
@@ -2580,8 +2629,13 @@ async function launchProviderTurn({
         handleProviderStreamEvent(provider, JSON.parse(line));
       } catch (error) {
         if (shouldIgnoreNonJsonLine(line)) continue;
-        // Non-JSON line — surface as system note for transparency.
-        pushSystem(`Unparsed: ${line.slice(0, 200)}`);
+        // Non-JSON line — surface up to 10 per turn; merge overflow into a summary.
+        unparsedLinesThisTurn += 1;
+        if (unparsedLinesThisTurn <= 10) {
+          pushSystem(`Unparsed: ${line.slice(0, 200)}`);
+        } else if (unparsedLinesThisTurn === 11) {
+          pushSystem("Unparsed: (further non-JSON lines omitted — output may be a crash dump)");
+        }
       }
     }
   });
@@ -2728,11 +2782,13 @@ async function launchProviderTurn({
 function cancel() {
   if (!currentProcess) return;
   cancelRequested = true;
-  try {
-    currentProcess.kill("SIGTERM");
-  } catch (error) {
-    console.warn("chat: failed to kill subprocess", error);
-  }
+  const proc = currentProcess;
+  currentProcess = null; // unblock future sends immediately
+  try { proc.kill("SIGTERM"); } catch (_) { /* ignore */ }
+  // Force-kill after 3s if SIGTERM was ignored (defunct child, stuck I/O).
+  setTimeout(() => {
+    try { proc.kill("SIGKILL"); } catch (_) { /* ignore */ }
+  }, 3000).unref();
 }
 
 function clear() {
@@ -2855,13 +2911,67 @@ function canRunSilentTurn() {
 
 // A self-initiated check (proactive care): she looks at the screen and decides
 // whether anything is worth saying. Nothing appears in chat unless she speaks.
-function sendProactive() {
+function sendProactive(opts) {
   const gate = canRunSilentTurn();
   if (!gate.ok) return gate;
   silentTurnKind = "proactive";
-  const result = dispatchSend(buildProactivePrompt(), { silentUser: true });
+  const prompt = buildVibeProactivePrompt(opts);
+  const result = dispatchSend(prompt, { silentUser: true });
   if (!result?.ok) silentTurnKind = null;
   return result;
+}
+
+// Build a proactive prompt that may include diagnostic or activity context
+// from the VS Code extension.
+function buildVibeProactivePrompt(opts) {
+  if (opts?.diagnosticContext) {
+    return buildDiagnosticProactivePrompt(opts.diagnosticContext);
+  }
+  if (opts?.activityContext) {
+    return buildActivityProactivePrompt();
+  }
+  return buildProactivePrompt();
+}
+
+function buildDiagnosticProactivePrompt(diag) {
+  const lines = [
+    buildProactivePrompt(),
+    "",
+    "另外，博士的 VS Code 编辑器刚刚检测到以下问题：",
+    `- ${diag.errors} 个错误，${diag.warnings} 个警告，涉及 ${diag.totalFilesWithProblems} 个文件`,
+  ];
+  const top5 = (diag.details || []).slice(0, 5);
+  for (const d of top5) {
+    const file = (d.file || "").split(/[\\/]/).pop();
+    lines.push(`  - [${d.severity}] ${file}:${d.line}: ${d.message}`);
+  }
+  lines.push(
+    "",
+    "请用你自然的风格轻声提醒博士这些错误——你注意到了，可以帮他看看。",
+    "不要逐条罗列，用你的话概括最值得关注的。如果你觉得只是小问题，也可以只说 [[silent]]。"
+  );
+  return lines.join("\n");
+}
+
+function buildActivityProactivePrompt() {
+  const wsServer = require("./ws-server");
+  const activities = wsServer.getRecentActivities();
+  const lines = [
+    buildProactivePrompt(),
+    "",
+    "博士最近的编辑器活动：",
+  ];
+  const recent = (activities || []).slice(-5);
+  for (const a of recent) {
+    const time = new Date(a.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+    lines.push(`  - [${time}] ${a.detail}`);
+  }
+  lines.push(
+    "",
+    "请根据博士最近的操作，自然地给一句鼓励、提醒或轻松的话。",
+    "若觉得没什么值得说的，可直接回复 [[silent]]。"
+  );
+  return lines.join("\n");
 }
 
 // A memory-curation pass: she tidies MEMORY.md with her file tools and stays
@@ -2927,5 +3037,9 @@ module.exports = {
   isLongMemoryDormant,
   getLastTurnDurationMs,
   setChatCatMode,
-  getOutboundQueueLength: () => outboundQueue.length
+  getOutboundQueueLength: () => outboundQueue.length,
+  // Exported for vscode-chat.js (VS Code extension independent sessions)
+  buildProviderInvocation,
+  consumeDirectives,
+  stripDirectiveTags,
 };

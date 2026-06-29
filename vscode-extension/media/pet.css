@@ -1,0 +1,21 @@
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+#petCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  filter: drop-shadow(0 8px 8px rgba(0, 0, 0, 0.38));
+}
+
+body.is-dragging #petCanvas {
+  cursor: grabbing;
+}
