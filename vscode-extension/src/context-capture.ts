@@ -287,6 +287,11 @@ export class ContextCapture {
       }
     }
 
+    // Cap details at 50 entries to avoid blowing up WS payload (large projects
+    // can produce thousands of diagnostics, potentially exceeding maxPayload).
+    const MAX_DETAILS = 50;
+    if (details.length > MAX_DETAILS) details.length = MAX_DETAILS;
+
     return {
       errors,
       warnings,

@@ -129,7 +129,6 @@ function beginAssistant() {
   skillExecutedThisTurn.clear();
   rememberedThisTurn.clear();
   lastEmittedMood = null;
-  staleRetryInFlight = false;
   currentToolName = null;
   history.push({
     id: currentAssistantId,
@@ -592,6 +591,7 @@ function dispatchSend(trimmed, context) {
         provider,
       });
     } else {
+      staleRetryInFlight = false; // retry succeeded — clear the guard
       emit({ kind: "status", status: "idle", provider });
     }
 
@@ -641,6 +641,7 @@ function send(text, context) {
     outboundQueue.push({ text: trimmed, context: context || null });
     return { ok: true, queued: true, queueLength: outboundQueue.length };
   }
+  staleRetryInFlight = false; // new user message — clear self-heal guard
   dispatchSend(trimmed, context || null);
   return { ok: true };
 }

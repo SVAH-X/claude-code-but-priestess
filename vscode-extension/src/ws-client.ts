@@ -240,7 +240,9 @@ export class WsClient extends EventEmitter {
       if (this.ws && this.authenticated && this.ws.readyState === 1) {
         this.ws.send(msg);
       } else {
-        this.bufferedMessages.push(msg);
+        if (this.bufferedMessages.length < WsClient.MAX_BUFFERED) {
+          this.bufferedMessages.push(msg);
+        }
       }
     });
   }

@@ -5,6 +5,8 @@ import { ContextCapture } from "./context-capture";
 
 export class ChatPanelProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | null = null;
+  private wsUnsubs: (() => void)[] = [];
+  private themeUnsub: vscode.Disposable | null = null;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -17,6 +19,11 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ): void | Thenable<void> {
+    // Clean up previous wiring to prevent listener accumulation on re-resolve.
+    for (const unsub of this.wsUnsubs) { try { unsub(); } catch (_) { /* ignore */ } }
+    this.wsUnsubs.length = 0;
+    if (this.themeUnsub) { this.themeUnsub.dispose(); this.themeUnsub = null; }
+
     this.view = webviewView;
 
     webviewView.webview.options = {
@@ -44,7 +51,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    vscode.window.onDidChangeActiveColorTheme(() => {
+    this.themeUnsub = vscode.window.onDidChangeActiveColorTheme(() => {
       this.syncTheme(webviewView.webview);
     });
   }
@@ -356,9 +363,11 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     ];
 
     for (const evt of events) {
-      this.wsClient.on(evt, (data: any) => {
-        webview.postMessage(data);
-      });
+      const handler = (data: any) => {
+        if (this.wsClient) webview.postMessage(data);
+      };
+      this.wsClient.on(evt, handler);
+      this.wsUnsubs.push(() => { try { (this.wsClient as any)?.removeListener?.(evt, handler); } catch (_) { /* ignore */ } });
     }
   }
 

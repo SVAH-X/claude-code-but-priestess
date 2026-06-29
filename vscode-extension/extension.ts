@@ -7,7 +7,7 @@ let wsClient: WsClient | null = null;
 let contextCapture: ContextCapture | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
-  vscode.window.showInformationMessage("PRTS: activating…");
+  console.log("PRTS: activating…");
 
   wsClient = new WsClient(context);
 
@@ -132,9 +132,13 @@ export function activate(context: vscode.ExtensionContext) {
     wsClient!.send("vscode:active");
   });
 
-  // After auth, the server sends conversation:has-previous
+  // After auth, the server sends conversation:has-previous.
+  // Only prompt once per extension session — reconnects shouldn't re-ask.
+  let hasPromptedRestore = false;
+
   (wsClient as any).on("conversation:has-previous", (msg: any) => {
-    if (msg.hasPrevious) {
+    if (msg.hasPrevious && !hasPromptedRestore) {
+      hasPromptedRestore = true;
       vscode.window
         .showInformationMessage(
           "PRTS: You have a previous conversation. Restore it?",
@@ -151,7 +155,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  vscode.window.showInformationMessage("PRTS: activated");
+  console.log("PRTS: activated");
 }
 
 export function deactivate() {
