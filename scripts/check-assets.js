@@ -34,6 +34,9 @@ const required = [
   path.join("assets", "character", "casual", "威胁.png"),
   path.join("assets", "character", "casual", "哭唧唧.png"),
   path.join("assets", "character", "casual", "睡觉.png"),
+  // 普猫猫彩蛋资源会在主界面和桌宠启动时预加载。
+  path.join("assets", "character", "普猫猫", "普猫猫.png"),
+  path.join("assets", "character", "普猫猫", "普猫猫哭.png"),
   path.join("assets", "character", "icon.png")
 ];
 
