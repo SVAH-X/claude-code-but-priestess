@@ -89,6 +89,19 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
     what you've already heard). Say a platform (`bilibili` / `youtube` /
     `网易云` / `spotify` / `apple music`) to pick where. A song that isn't in
     the small built-in registry opens a search you click to play.
+  - **Windows NetEase client (experimental)**: install and sign in to NetEase
+    Cloud Music, then choose **"NetEase Music client (experimental)"** under
+    **"Music playback"** in the tray menu.
+    Normal requests search and play in the desktop client; “play anything”
+    randomly selects from Monster Siren Records' current NetEase hot-song top
+    50. NetEase cannot reliably search for an arbitrary track while fully
+    backgrounded, so PRTS briefly brings it forward to verify the result. If
+    NetEase was not already the active window, PRTS sends the same minimize
+    command as the title bar and verifies the resulting state; if the client
+    refuses it, PRTS hides the window instead. This also runs on failure, then
+    restores the previously active window. No
+    App ID, secret, or extra player is required. Bilibili remains the default,
+    and this does not change macOS or Linux behavior.
   - **Open app**: opened by the app's real installed name, so refer to apps by
     that name (e.g. NetEase Cloud Music is usually **NetEase Music**, not
     「网易云音乐」). Common Chinese music-app names are mapped for you; if a name
