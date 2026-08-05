@@ -1002,6 +1002,9 @@ const MENU_TEXT = {
     outfitFormal: "正装（默认）",
     outfitCasual: "休闲",
     skills: "允许她使用技能（音乐 / 搜索 / 应用）",
+    musicPlayback: "歌曲播放设置",
+    musicBilibili: "Bilibili（默认）",
+    musicNeteaseClient: "网易云音乐客户端（实验性）",
     coauthorCommits: "提交时署名普瑞赛斯（共同作者）",
     agentMode: "Agent mode（完整屏幕控制）",
     enableAgentTitle: "开启 agent mode？",
@@ -1090,6 +1093,9 @@ const MENU_TEXT = {
     outfitFormal: "正装 · Formal (default)",
     outfitCasual: "休闲 · Casual",
     skills: "Let her use skills (music · search · apps)",
+    musicPlayback: "Music playback",
+    musicBilibili: "Bilibili (default)",
+    musicNeteaseClient: "NetEase Music client (experimental)",
     coauthorCommits: "Co-author commits as 普瑞赛斯",
     agentMode: "Agent mode (full screen control)",
     enableAgentTitle: "Enable agent mode?",
@@ -1666,6 +1672,30 @@ function buildContextMenu() {
       checked: all.skillsEnabled !== false,
       click: (item) => settings.set({ skillsEnabled: item.checked })
     },
+    ...(process.platform === "win32"
+      ? [
+          {
+            label: mt("musicPlayback"),
+            enabled: all.skillsEnabled !== false,
+            submenu: [
+              {
+                label: mt("musicBilibili"),
+                type: "radio",
+                checked: all.windowsNeteaseClientControl !== true,
+                click: () =>
+                  settings.set({ windowsNeteaseClientControl: false })
+              },
+              {
+                label: mt("musicNeteaseClient"),
+                type: "radio",
+                checked: all.windowsNeteaseClientControl === true,
+                click: () =>
+                  settings.set({ windowsNeteaseClientControl: true })
+              }
+            ]
+          }
+        ]
+      : []),
     {
       label: mt("coauthorCommits"),
       type: "checkbox",
