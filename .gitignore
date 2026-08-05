@@ -9,5 +9,6 @@ CLAUDE.md
 
 # VS Code extension build output
 vscode-extension/out/
+vscode-extension/.vscode-test/
 *.vsix
 GPT-SoVITS-v2pro-20250604/

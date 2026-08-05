@@ -2790,7 +2790,7 @@ async function launchProviderTurn({
   });
 
   proc.on("error", (error) => {
-    if (currentProcess !== proc) return;
+    if (currentProcess && currentProcess !== proc) return;
     cleanupInvocation(invocation);
     pushSystem(`\`${providerLabel(provider)}\` process error: ${error.message}`);
     finalizeAssistant("");
@@ -2812,7 +2812,7 @@ async function launchProviderTurn({
   });
 
   proc.on("close", (code) => {
-    if (currentProcess !== proc) return;
+    if (currentProcess && currentProcess !== proc) return;
     if (buffer.trim()) {
       try {
         handleProviderStreamEvent(provider, JSON.parse(buffer.trim()));
