@@ -1,0 +1,24 @@
+﻿{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run PRTS Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/vscode-extension"],
+      "outFiles": ["${workspaceFolder}/vscode-extension/out/**/*.js"],
+      "preLaunchTask": "${defaultBuildTask}"
+    },
+    {
+      "name": "PRTS Extension Tests",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode-extension",
+        "--extensionTestsPath=${workspaceFolder}/vscode-extension/out/src/test/suite/index"
+      ],
+      "outFiles": ["${workspaceFolder}/vscode-extension/out/**/*.js"],
+      "preLaunchTask": "${defaultBuildTask}"
+    }
+  ]
+}

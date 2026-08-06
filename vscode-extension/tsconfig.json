@@ -2,7 +2,9 @@
   "compilerOptions": {
     "module": "commonjs",
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "outDir": "out",
     "rootDir": ".",
     "sourceMap": true,
@@ -12,8 +14,18 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "declaration": false,
-    "types": ["node"]
+    "types": [
+      "node"
+    ],
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   },
-  "include": ["**/*.ts"],
-  "exclude": ["node_modules", "out", ".vscode-test"]
+  "include": [
+    "**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "out",
+    ".vscode-test"
+  ]
 }

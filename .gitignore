@@ -6,8 +6,12 @@ dist/
 # Local archives (e.g. zipping the repo to move it to another machine).
 *.7z
 CLAUDE.md
+AGENTS.md
 
 # VS Code extension build output
 vscode-extension/out/
+# VS Code extension test artifacts (downloaded VS Code instance)
+vscode-extension/.vscode-test/
+
 *.vsix
 GPT-SoVITS-v2pro-20250604/
