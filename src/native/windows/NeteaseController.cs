@@ -186,6 +186,8 @@ internal static class NeteaseController
             {
                 ShowWindow(handle, SW_RESTORE);
                 SetForegroundWindow(handle);
+                if (!WaitForForegroundProcess(process.Id, 1800))
+                    return Fail("无法将网易云音乐置于前台，已停止发送搜索输入");
                 Thread.Sleep(350);
 
                 RECT windowRect;
@@ -262,6 +264,18 @@ internal static class NeteaseController
         uint ownerProcessId;
         GetWindowThreadProcessId(handle, out ownerProcessId);
         return ownerProcessId == (uint)processId;
+    }
+
+    private static bool WaitForForegroundProcess(int processId, int timeoutMs)
+    {
+        Stopwatch watch = Stopwatch.StartNew();
+        while (watch.ElapsedMilliseconds < timeoutMs)
+        {
+            if (WindowBelongsToProcess(GetForegroundWindow(), processId))
+                return true;
+            Thread.Sleep(50);
+        }
+        return WindowBelongsToProcess(GetForegroundWindow(), processId);
     }
 
     private static string PutClientAway(

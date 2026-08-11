@@ -10,6 +10,12 @@ if (process.platform !== "win32") {
 const root = path.resolve(__dirname, "..");
 const source = path.join(root, "src", "native", "windows", "NeteaseController.cs");
 const output = path.join(root, "src", "native", "windows", "NeteaseController.exe");
+
+function skip(message) {
+  console.warn(`windows helper: skipped (${message})`);
+  process.exit(0);
+}
+
 const frameworkRoots = [
   path.join(process.env.WINDIR || "C:\\Windows", "Microsoft.NET", "Framework64", "v4.0.30319"),
   path.join(process.env.WINDIR || "C:\\Windows", "Microsoft.NET", "Framework", "v4.0.30319")
@@ -19,8 +25,7 @@ const compilerRoot = frameworkRoots.find((candidate) =>
 );
 
 if (!compilerRoot) {
-  console.error("windows helper: .NET Framework C# compiler was not found");
-  process.exit(1);
+  skip(".NET Framework C# compiler was not found; NetEase client playback will be unavailable");
 }
 
 function findFrameworkAssembly(name) {
@@ -61,8 +66,7 @@ if (
   !windowsBase ||
   !fs.existsSync(accessibility)
 ) {
-  console.error("windows helper: Windows UI Automation assemblies were not found");
-  process.exit(1);
+  skip("Windows UI Automation assemblies were not found; NetEase client playback will be unavailable");
 }
 
 const result = spawnSync(
@@ -83,6 +87,11 @@ const result = spawnSync(
 
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
-if (result.status !== 0) process.exit(result.status || 1);
+if (result.error) {
+  skip(`C# compiler could not start: ${result.error.message}`);
+}
+if (result.status !== 0) {
+  skip(`C# compiler exited with ${result.status}; NetEase client playback will be unavailable`);
+}
 
 console.log(`windows helper: built ${path.relative(root, output)}`);

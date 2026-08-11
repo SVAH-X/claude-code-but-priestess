@@ -94,7 +94,8 @@ No ordinary app window and no taskbar or Dock clutter. Just one tray icon.
     **"Music playback"** in the tray menu.
     Normal requests search and play in the desktop client; “play anything”
     randomly selects from Monster Siren Records' current NetEase hot-song top
-    50. NetEase cannot reliably search for an arbitrary track while fully
+    50. This random playlist uses an undocumented NetEase endpoint and may
+    stop working if the service changes, rate-limits, or requires login. NetEase cannot reliably search for an arbitrary track while fully
     backgrounded, so PRTS briefly brings it forward to verify the result. If
     NetEase was not already the active window, PRTS sends the same minimize
     command as the title bar and verifies the resulting state; if the client
