@@ -11,6 +11,7 @@ const path = require("node:path");
 const { app } = require("electron");
 const platform = require("./platform");
 const personaPrts = require("./persona-prts");
+const { buildRandomMusicInstruction } = require("./music-prompt");
 
 function memoryDir() {
   return path.join(app.getPath("userData"), "memory");
@@ -289,7 +290,8 @@ function buildPersonaPrompt({
   personaNotes = "",
   catMode = null,
   coauthorCommits = false,
-  attachments = []
+  attachments = [],
+  neteaseClientPlayback = false
 }) {
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
@@ -461,7 +463,9 @@ function buildPersonaPrompt({
     prompt +=
       "【技能 —— 你能为博士做的几件小事】\n" +
       "除了回答，你还能亲手替博士操作这台电脑。需要时，在回复的「最末尾」附上一行隐藏指令，格式严格为 [[skill:名称 参数]]：\n" +
-      "- 放音乐：[[skill:play_music 歌名]] —— 默认在 Bilibili 播放（会自动播放）。「Eclipse」(Aimer，明日方舟六周年印象曲) 是你与博士的歌，最适合作为初次或某个特别时刻的选择；但不要每次都放它——可依博士此刻的心情、或他是否已经听过，换一首明日方舟相关的曲子（如 Speed of Light、ManiFesto），也可以先轻声问问博士想听什么、心情如何，再决定。博士点名某首就放那首。想指定平台可在参数里写 bilibili / youtube / 网易云 / spotify / apple music。\n" +
+      "- 放音乐：[[skill:play_music 歌名]] —— 默认在 Bilibili 播放（会自动播放）；若博士在 Windows 上启用了网易云客户端控制，则默认改由桌面客户端播放。「Eclipse」(Aimer，明日方舟六周年印象曲) 是你与博士的歌，最适合作为初次或某个特别时刻的选择；但不要每次都放它——可依博士此刻的心情、或他是否已经听过，换一首明日方舟相关的曲子（如 Speed of Light、ManiFesto），也可以先轻声问问博士想听什么、心情如何，再决定。博士点名某首就放那首。" +
+      buildRandomMusicInstruction(neteaseClientPlayback) +
+      "想指定平台可在参数里写 bilibili / youtube / 网易云 / spotify / apple music。\n" +
       "- 网页搜索：[[skill:web_search 要搜的内容]] —— 用默认浏览器打开搜索结果。\n" +
       "- 打开网址：[[skill:open_url https://…]] —— 在默认浏览器打开链接。\n" +
       "- 打开应用：[[skill:open_app 应用名]] —— 打开电脑上已安装的应用。尽量用应用的本地名称（例如网易云音乐在本地多叫 NetEase Music）；常见中文名我会替你映射。\n" +

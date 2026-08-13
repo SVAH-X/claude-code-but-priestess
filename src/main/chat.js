@@ -381,6 +381,13 @@ function activeProvider() {
     normalizeProvider(settings.get("chatProvider"));
 }
 
+function neteaseClientPlaybackEnabled() {
+  return (
+    process.platform === "win32" &&
+    settings.get("windowsNeteaseClientControl") === true
+  );
+}
+
 function providerLabel(provider = activeProvider()) {
   if (provider === PROVIDERS.CODEX) return "Codex";
   if (provider === PROVIDERS.PRIESTESS) return "Priestess (built-in)";
@@ -2308,7 +2315,8 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     personaNotes: settings.get("personaNotes") || "",
     catMode: silentTurnKind ? null : chatCatMode,
     coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
-    attachments: silentTurnKind ? [] : pendingAttachments
+    attachments: silentTurnKind ? [] : pendingAttachments,
+    neteaseClientPlayback: neteaseClientPlaybackEnabled()
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -2383,7 +2391,8 @@ function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscr
       personaNotes: settings.get("personaNotes") || "",
       catMode: silentTurnKind ? null : chatCatMode,
       coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
-      attachments: silentTurnKind ? [] : pendingAttachments
+      attachments: silentTurnKind ? [] : pendingAttachments,
+      neteaseClientPlayback: neteaseClientPlaybackEnabled()
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
@@ -2628,7 +2637,8 @@ function launchPriestessTurn(trimmed) {
     skillsEnabled: settings.get("skillsEnabled") !== false,
     deepPersona: shouldUseDeepPersona(trimmed),
     personaNotes: settings.get("personaNotes") || "",
-    catMode: silentTurnKind ? null : chatCatMode
+    catMode: silentTurnKind ? null : chatCatMode,
+    neteaseClientPlayback: neteaseClientPlaybackEnabled()
   });
 
   const finishCommon = () => {

@@ -7,6 +7,10 @@ dist/
 *.7z
 CLAUDE.md
 
+# Built from the checked-in Windows UI Automation helper source.
+src/native/windows/NeteaseController.exe
+src/native/windows/NeteaseController.pdb
+
 # VS Code extension build output
 vscode-extension/out/
 vscode-extension/.vscode-test/

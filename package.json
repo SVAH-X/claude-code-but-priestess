@@ -5,13 +5,14 @@
   "main": "src/main/main.js",
   "private": true,
   "scripts": {
-    "dev": "node scripts/run-electron.js",
-    "start": "node scripts/run-electron.js",
+    "build:win-helper": "node scripts/build-windows-helper.js",
+    "dev": "npm run build:win-helper && node scripts/run-electron.js",
+    "start": "npm run build:win-helper && node scripts/run-electron.js",
     "test": "node --test test/*.test.js",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder",
+    "pack": "npm run build:win-helper && electron-builder --dir",
+    "dist": "npm run build:win-helper && electron-builder",
     "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win",
+    "dist:win": "npm run build:win-helper && electron-builder --win",
     "lint": "node scripts/check-assets.js",
     "release": "bash scripts/release.sh",
     "vscode:sync": "node scripts/sync-vscode-assets.js",
@@ -51,6 +52,9 @@
       "!assets/character/Nano Banana Workspace Image.png",
       "!assets/character/new*.png",
       "package.json"
+    ],
+    "asarUnpack": [
+      "src/native/windows/NeteaseController.exe"
     ],
     "directories": {
       "buildResources": "assets/build"

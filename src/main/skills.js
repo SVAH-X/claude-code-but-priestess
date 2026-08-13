@@ -17,6 +17,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const settings = require("./settings");
+const {
+  fetchMonsterSirenHotSongs,
+  pickRandomHotSong,
+  isRandomMusicRequest,
+  buildMonsterSirenSearchQuery
+} = require("./netease-hot-songs");
+const { playInNeteaseClient } = require("./netease-client");
 
 const SKILL_NAMES = Object.freeze([
   "play_music",
@@ -52,7 +59,8 @@ const SONGS = [
   {
     label: "DJ Okawari feat. Ai Ninomiya — Speed of Light",
     aliases: ["speed of light", "光速", "企鹅物流"],
-    monstersiren: "880374"
+    monstersiren: "880374",
+    netease: "1403774122"
   },
   {
     label: "ManiFesto",
@@ -74,6 +82,7 @@ const SERVICE_BUILDERS = {
 // their own (Bilibili first, per the Doctor's preference).
 const DEFAULT_SERVICE_ORDER = ["bilibili", "monstersiren", "youtube", "netease", "apple", "spotify"];
 const AUTOPLAY_SERVICES = new Set(["bilibili", "youtube", "monstersiren"]);
+let lastNeteaseSongId = "";
 
 const SERVICE_KEYWORDS = [
   ["bilibili", /bilibili|哔哩|b\s*站|bili/i],
@@ -143,6 +152,48 @@ function resolveMusic(arg) {
   const svc = service || "bilibili";
   const build = SERVICE_SEARCH[svc] || SERVICE_SEARCH.bilibili;
   return { url: build(q), label: query || "Aimer — Eclipse", autoplay: false };
+}
+
+function songTitle(song) {
+  const parts = String(song?.label || "").split(/\s+—\s+/);
+  return (parts.length > 1 ? parts.at(-1) : parts[0]).trim();
+}
+
+async function playWithNeteaseClient(arg) {
+  if (isRandomMusicRequest(arg)) {
+    const songs = await fetchMonsterSirenHotSongs();
+    const song = pickRandomHotSong(
+      songs,
+      undefined,
+      lastNeteaseSongId
+    );
+    await playInNeteaseClient({
+      id: song.id,
+      title: song.name,
+      query: buildMonsterSirenSearchQuery(song.name)
+    });
+    lastNeteaseSongId = song.id;
+    return {
+      ok: true,
+      receipt: `♪ 网易云热门 50 · ${song.name}`
+    };
+  }
+
+  const query = stripServiceWords(arg);
+  const song = findSong(query);
+  const title = song ? songTitle(song) : query;
+  if (!title) return { ok: false, error: "没有要播放的歌曲" };
+
+  await playInNeteaseClient({
+    id: song?.netease || "",
+    title,
+    query: song ? buildMonsterSirenSearchQuery(title) : query
+  });
+  if (song?.netease) lastNeteaseSongId = song.netease;
+  return {
+    ok: true,
+    receipt: `♪ 网易云播放 ${song?.label || title}`
+  };
 }
 
 // ----------------------------------------------------------------
@@ -418,6 +469,13 @@ async function runSkill(name, arg) {
   try {
     switch (skill) {
       case "play_music": {
+        const requestedService = detectService(value);
+        const useNeteaseClient =
+          process.platform === "win32" &&
+          settings.get("windowsNeteaseClientControl") === true &&
+          (!requestedService || requestedService === "netease");
+        if (useNeteaseClient) return playWithNeteaseClient(value);
+
         const { url, label, autoplay } = resolveMusic(value);
         await openExternal(url);
         return {

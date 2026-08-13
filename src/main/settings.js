@@ -57,6 +57,12 @@ const DEFAULTS = Object.freeze({
   // a URL/app) via hidden [[skill:…]] directives. Closed whitelist + sanitized
   // args, so it's safe without agent mode. PRTS-internal only.
   skillsEnabled: true,
+  // Optional Windows-only NetEase Cloud Music desktop control. When enabled,
+  // normal music requests use the installed client; random requests draw from
+  // Monster Siren Records' current NetEase hot-song top 50. If PRTS has to
+  // foreground the client for a verified search, it minimizes it again and
+  // restores the Doctor's previous foreground window afterwards.
+  windowsNeteaseClientControl: false,
   // Update channel: "stable" (default) only ever offers full releases.
   // "prerelease" is a developer/tester flag — there is deliberately no menu
   // option for it; flip it by hand in settings.json (tray → 打开数据目录) to
