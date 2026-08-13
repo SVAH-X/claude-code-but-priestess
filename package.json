@@ -1,7 +1,7 @@
 {
   "name": "claude-code-but-priestess",
   "version": "0.7.6",
-  "description": "A cross-platform tray companion that lets you chat with 普瑞赛斯, backed by local Claude Code or Codex CLI usage.",
+  "description": "A cross-platform tray companion that lets you chat with \u666e\u745e\u8d5b\u65af, backed by local Claude Code or Codex CLI usage.",
   "main": "src/main/main.js",
   "private": true,
   "scripts": {
@@ -81,5 +81,8 @@
   "dependencies": {
     "electron-updater": "^6.8.9",
     "ws": "^8.18.0"
+  },
+  "overrides": {
+    "js-yaml": "4.3.1"
   }
 }
