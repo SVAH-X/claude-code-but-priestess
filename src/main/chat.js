@@ -2741,6 +2741,13 @@ async function launchProviderTurn({
       env: { ...process.env, CLAUDE_CODE_NONINTERACTIVE: "1" },
     });
     if (invocation.stdin != null) {
+      // A prompt is tens of KB, so it won't clear the pipe buffer in one go. If
+      // the CLI dies before draining it (not logged in, bad flag, instant
+      // crash), the rest of the write lands as an async EPIPE on stdin — which
+      // the try/catch here cannot see, and an unhandled stream error takes the
+      // whole main process down. The close/error handlers already report the
+      // dead turn, so swallowing it is enough.
+      proc.stdin.on("error", () => {});
       proc.stdin.end(invocation.stdin);
     }
   } catch (error) {

@@ -580,6 +580,10 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
   currentProcess = proc;
 
   if (invocation.stdin) {
+    // Same as chat.js: a CLI that exits before draining stdin turns the rest of
+    // this write into an async EPIPE, and an unhandled stream error would kill
+    // the main process instead of just failing the turn.
+    proc.stdin.on("error", () => {});
     proc.stdin.write(invocation.stdin);
     proc.stdin.end();
   }
