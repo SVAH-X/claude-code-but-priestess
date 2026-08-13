@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        node-version: [22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: |
+          npm install --prefix vscode-extension
+          npm install --omit=dev
+
+      - name: Syntax check (JavaScript)
+        run: |
+          for f in src/main/chat.js src/main/vscode-chat.js src/main/ws-server.js \
+                   src/main/main.js src/main/persona.js src/main/settings.js \
+                   src/main/proactive.js src/main/platform.js src/main/ws-policy.js \
+                   src/main/chat-runtime.js src/main/directive-stream.js \
+                   src/renderer/renderer.js; do
+            node --check "$f" || { echo "FAIL: $f"; exit 1; }
+          done
+          echo "All JS syntax checks passed"
+
+      - name: Syntax check (TypeScript)
+        run: |
+          cd vscode-extension
+          ./node_modules/.bin/tsc --noEmit
+
+      - name: Run tests
+        run: node test/run.js
+      - name: VS Code extension unit tests
+        run: |
+          cd vscode-extension
+          npm run test:unit
+
+      # Launches a real VS Code instance headlessly (xvfb) - downloads VS Code
+      # on first run, hence the larger job timeout.
+      - name: VS Code extension integration tests
+        run: |
+          cd vscode-extension
+          xvfb-run -a npm run test:integration
+
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check required asset files
+        run: node scripts/check-assets.js

@@ -4,3 +4,5 @@ src/**
 tsconfig.json
 .gitignore
 **/.DS_Store
+out/src/test/**
+dist/**

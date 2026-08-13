@@ -13,8 +13,13 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Chat", "Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -47,6 +52,31 @@
         "command": "prts.showContextInfo",
         "title": "PRTS: Show Editor Context Info",
         "icon": "$(info)"
+      },
+      {
+        "command": "prts.suggestFix",
+        "title": "PRTS: Suggest Fix for Selected Code",
+        "icon": "$(lightbulb)"
+      },
+      {
+        "command": "prts.explainError",
+        "title": "PRTS: Explain Error at Cursor",
+        "icon": "$(question)"
+      },
+      {
+        "command": "prts.reviewFile",
+        "title": "PRTS: Review Current File",
+        "icon": "$(search)"
+      },
+      {
+        "command": "prts.summarizeChanges",
+        "title": "PRTS: Summarize Recent Git Changes",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "prts.generateTests",
+        "title": "PRTS: Generate Tests for Selected Code",
+        "icon": "$(beaker)"
       }
     ],
     "viewsContainers": {
@@ -106,6 +136,21 @@
         {
           "command": "prts.toggleVibeCoding",
           "group": "3_mode@1"
+        },
+        {
+          "command": "prts.suggestFix",
+          "when": "editorTextFocus",
+          "group": "4_fix@1"
+        },
+        {
+          "command": "prts.explainError",
+          "when": "editorTextFocus",
+          "group": "4_fix@2"
+        },
+        {
+          "command": "prts.reviewFile",
+          "when": "editorTextFocus",
+          "group": "4_fix@3"
         }
       ],
       "commandPalette": [
@@ -129,6 +174,26 @@
         "command": "prts.toggleVibeCoding",
         "key": "ctrl+shift+alt+v",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "prts.explainError",
+        "key": "ctrl+shift+alt+e",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "prts.reviewFile",
+        "key": "ctrl+shift+alt+r",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "prts.summarizeChanges",
+        "key": "ctrl+shift+alt+g",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "prts.generateTests",
+        "key": "ctrl+shift+alt+t",
+        "when": "editorTextFocus"
       }
     ],
     "configuration": {
@@ -138,6 +203,11 @@
           "type": "number",
           "default": 0,
           "description": "WebSocket port of the PRTS Electron app. Auto-detected from ws-port.json at startup; set manually only if auto-detection fails."
+        },
+        "prts.advisorFileBlacklist": {
+          "type": "string",
+          "default": ".env\n.env.*\n*secret*\n*credential*\n*.pem\n*.key\nid_rsa*\n*password*\n*token*",
+          "description": "Prompt the model to avoid reading files matching these patterns (gitignore-style, one per line). This is a model-prompt constraint, not a filesystem security guarantee."
         }
       }
     }
@@ -148,15 +218,25 @@
     "vscode:package": "vsce package",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:compile": "tsc -p ./",
+    "test:unit": "tsc -p ./ && mocha \"out/src/test/unit/**/*.test.js\" --require ./out/src/test/unit/helpers/vscode-stub.js --ui bdd --timeout 20000",
+    "test:integration": "tsc -p ./ && node ./out/src/test/runTest.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.10",
-    "typescript": "^5.3.0",
-    "@vscode/vsce": "^3.9.2"
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.2",
+    "mocha": "^11.7.6",
+    "typescript": "^5.3.0"
+  },
+  "overrides": {
+    "diff": "^5.2.0"
   }
 }

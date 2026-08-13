@@ -5,6 +5,7 @@
  */
 
 import * as vscode from "vscode";
+import * as path from "path";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,11 +43,34 @@ export interface DiagnosticDetail {
 }
 
 export interface ActivityEvent {
-  kind: "save" | "task-start" | "task-end" | "task-error" | "git-commit" | "git-branch-switch" | "file-open";
+  kind: "save" | "task-start" | "task-end" | "task-error" | "git-commit" | "git-branch-switch" | "file-open" | "terminal-output";
   detail: string;
   timestamp: number;
   file: string;
 }
+
+export interface TerminalEvent {
+  kind: "build-error" | "test-fail" | "test-pass" | "lint-warning";
+  detail: string;
+  source: string; // terminal name
+  timestamp: number;
+}
+
+/**
+ * Upper bound for selection text attached to chat context. The selection is
+ * sent over the WS bridge (server maxPayload is 4MB) and included in every
+ * prompt; a full-file selection on a huge file would blow both. Truncate
+ * with a marker so the model knows the selection was cut off.
+ */
+const MAX_SELECTION_CHARS = 20_000;
+
+/**
+ * Cap for the terminal-output buffer. Long-running streams (e.g.
+ * `npm run watch`) never pause, so the 500ms silence debounce would never
+ * fire and the buffer would grow without bound. When the cap is hit the
+ * buffer is flushed immediately (keeping the most recent output).
+ */
+const MAX_TERMINAL_BUFFER = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // ContextCapture
@@ -59,13 +83,20 @@ export class ContextCapture {
   private contextDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private diagnosticsSnapshot: DiagnosticsSnapshot | null = null;
   private disposables: vscode.Disposable[] = [];
-  private gitWatcher: vscode.Disposable | null = null;
+  private gitWatchers: vscode.Disposable[] = [];
+  /**
+   * Last observed HEAD per repository root (fsPath -> { name, hash }). Used
+   * to classify git state changes into branch switches vs new commits.
+   */
+  private gitHeadState = new Map<string, { name: string | null; hash: string | null }>();
+  private terminalBuffer = "";
+  private terminalDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   // -----------------------------------------------------------------------
   // Construction
   // -----------------------------------------------------------------------
 
-  constructor(wsClient: any, context: vscode.ExtensionContext) {
+  constructor(wsClient: any) {
     this.wsClient = wsClient;
     this.currentContext = this.emptyContext();
 
@@ -144,10 +175,16 @@ export class ContextCapture {
         })
       );
       this.disposables.push(
-        vscode.tasks.onDidEndTask((e) => {
+        // onDidEndTask gives a TaskEndEvent with no process outcome at all;
+        // the old code tried to read exitCode from the task *definition*, but
+        // that is static JSON from tasks.json and never carries a runtime
+        // exit code - so every task end was misreported as "failed".
+        // onDidEndTaskProcess exposes the real process exit code, so success
+        // (0) and failure (non-zero) are now reported accurately.
+        vscode.tasks.onDidEndTaskProcess((e) => {
           this.sendActivity({
-            kind: e.execution.task.definition?.exitCode === 0 ? "task-end" : "task-error",
-            detail: `Task ${e.execution.task.name} ${e.execution.task.definition?.exitCode === 0 ? "completed" : "failed"}`,
+            kind: e.exitCode === 0 ? "task-end" : "task-error",
+            detail: `Task ${e.execution.task.name} ${e.exitCode === 0 ? "completed" : "failed"}`,
             timestamp: Date.now(),
             file: e.execution.task.definition?.program || "",
           });
@@ -158,7 +195,28 @@ export class ContextCapture {
     }
 
     // ---- Git (optional, best-effort) ----
-    this.tryWatchGit(context);
+    this.tryWatchGit();
+
+    // ---- Terminal output monitoring ----
+    try {
+      this.disposables.push(
+        (vscode.window as any).onDidWriteTerminalData((e: any) => {
+          this.terminalBuffer += String(e.data || "");
+          if (this.terminalBuffer.length > MAX_TERMINAL_BUFFER) {
+            // The stream never pauses (e.g. `npm run watch`): flush right
+            // away to bound memory instead of waiting for 500ms of silence.
+            this.terminalBuffer = this.terminalBuffer.slice(-MAX_TERMINAL_BUFFER);
+            this.flushTerminalBuffer();
+            return;
+          }
+          if (this.terminalDebounceTimer) clearTimeout(this.terminalDebounceTimer);
+          // Debounce: wait 500ms of silence before parsing.
+          this.terminalDebounceTimer = setTimeout(() => this.flushTerminalBuffer(), 500);
+        })
+      );
+    } catch {
+      // onDidWriteTerminalData unavailable in some VS Code versions
+    }
 
     // Send initial context
     this.refreshContext(vscode.window.activeTextEditor);
@@ -182,7 +240,7 @@ export class ContextCapture {
   /** Forces an immediate context flush to the Electron backend. */
   flushContext(): void {
     if (!this.wsClient?.isConnected()) return;
-    this.wsClient.send("vscode:context", { context: this.currentContext });
+    this.wsClient.notify("vscode:context", { context: this.currentContext });
   }
 
   dispose(): void {
@@ -190,10 +248,11 @@ export class ContextCapture {
       try { d.dispose(); } catch (_) { /* ignore */ }
     }
     this.disposables.length = 0;
-    if (this.gitWatcher) {
-      try { this.gitWatcher.dispose(); } catch (_) { /* ignore */ }
-      this.gitWatcher = null;
+    for (const w of this.gitWatchers) {
+      try { w.dispose(); } catch (_) { /* ignore */ }
     }
+    this.gitWatchers.length = 0;
+    this.gitHeadState.clear();
     if (this.diagnosticsDebounceTimer) {
       clearTimeout(this.diagnosticsDebounceTimer);
       this.diagnosticsDebounceTimer = null;
@@ -202,6 +261,11 @@ export class ContextCapture {
       clearTimeout(this.contextDebounceTimer);
       this.contextDebounceTimer = null;
     }
+    if (this.terminalDebounceTimer) {
+      clearTimeout(this.terminalDebounceTimer);
+      this.terminalDebounceTimer = null;
+    }
+    this.terminalBuffer = "";
   }
 
   // -----------------------------------------------------------------------
@@ -225,9 +289,14 @@ export class ContextCapture {
     }
     const doc = editor.document;
     const sel = editor.selection;
-    const selectionText = sel.isEmpty
+    let selectionText = sel.isEmpty
       ? null
       : doc.getText(sel);
+    // Cap oversized selections (see MAX_SELECTION_CHARS) so a huge
+    // selection cannot blow the WS payload or inflate every prompt.
+    if (selectionText && selectionText.length > MAX_SELECTION_CHARS) {
+      selectionText = selectionText.slice(0, MAX_SELECTION_CHARS) + "\n…(选中内容过长已截断)";
+    }
 
     this.currentContext = {
       activeFile: doc.fileName,
@@ -308,7 +377,7 @@ export class ContextCapture {
       this.diagnosticsDebounceTimer = null;
       this.diagnosticsSnapshot = this.captureDiagnostics();
       if (!this.wsClient?.isConnected()) return;
-      this.wsClient.send("vscode:diagnostics", {
+      this.wsClient.notify("vscode:diagnostics", {
         diagnostics: this.diagnosticsSnapshot,
       });
     }, 2000); // 2s debounce — diagnostics can fire in bursts
@@ -321,7 +390,7 @@ export class ContextCapture {
   private sendWorkspace(): void {
     if (!this.wsClient?.isConnected()) return;
     const folders = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
-    this.wsClient.send("vscode:workspace", {
+    this.wsClient.notify("vscode:workspace", {
       workspaceFolders: folders,
       primaryWorkspace: folders[0] || null,
     });
@@ -337,7 +406,7 @@ export class ContextCapture {
     if (activity.kind === "save") {
       this.sendActivityImpl("vscode:activity", { activity });
     } else {
-      this.wsClient.send("vscode:activity", { activity });
+      this.wsClient.notify("vscode:activity", { activity });
     }
   }
 
@@ -348,35 +417,121 @@ export class ContextCapture {
       if (now - this.lastSaveTs < 3000) return;
       this.lastSaveTs = now;
     }
-    this.wsClient.send(type, payload);
+    this.wsClient.notify(type, payload);
+  }
+
+  // -----------------------------------------------------------------------
+  // Internals — terminal output parsing
+  // -----------------------------------------------------------------------
+
+  private parseTerminalOutput(text: string): TerminalEvent | null {
+    // Detect build/test/lint results from terminal output.
+    if (/Build failed|Compilation failed|error TS\d+/.test(text)) {
+      const lines = text.split("\n").filter((l: string) => /error|Error|FAIL/i.test(l));
+      return {
+        kind: "build-error",
+        detail: lines.slice(0, 5).join("\n") || "Build/compilation error detected",
+        source: "terminal",
+        timestamp: Date.now(),
+      };
+    }
+    if (/(\d+)\s+failing|Tests:\s+\d+\s+failed|FAIL\s/.test(text)) {
+      const failMatch = text.match(/(\d+)\s+failing/);
+      const failCount = failMatch ? parseInt(failMatch[1], 10) : 1;
+      return {
+        kind: "test-fail",
+        detail: `${failCount} test${failCount > 1 ? "s" : ""} failing`,
+        source: "terminal",
+        timestamp: Date.now(),
+      };
+    }
+    if (/All tests passed|Tests:\s+\d+\s+passed.*0\s+failed/.test(text)) {
+      return {
+        kind: "test-pass",
+        detail: "All tests passed",
+        source: "terminal",
+        timestamp: Date.now(),
+      };
+    }
+    return null;
   }
 
   // -----------------------------------------------------------------------
   // Internals — git (best-effort)
   // -----------------------------------------------------------------------
 
-  private tryWatchGit(context: vscode.ExtensionContext): void {
+  /**
+   * Parses and forwards the accumulated terminal output, then clears the
+   * buffer. Used by both the silence debounce and the overflow path.
+   */
+  private flushTerminalBuffer(): void {
+    if (this.terminalDebounceTimer) {
+      clearTimeout(this.terminalDebounceTimer);
+      this.terminalDebounceTimer = null;
+    }
+    const txt = this.terminalBuffer;
+    this.terminalBuffer = "";
+    const parsed = this.parseTerminalOutput(txt);
+    if (parsed && this.wsClient?.isConnected()) {
+      this.wsClient.notify("vscode:terminal-event", parsed);
+    }
+  }
+
+  private tryWatchGit(): void {
     try {
-      // The git extension API is not directly importable — detect at runtime
+      // The git extension API is not directly importable - detect at runtime
       const gitExt = vscode.extensions.getExtension("vscode.git");
       if (!gitExt) return;
       Promise.resolve(gitExt.activate()).then((api: any) => {
         if (!api || !api.repositories) return;
         for (const repo of api.repositories) {
-          this.gitWatcher = repo.state.onDidChange(() => {
-            // Heuristic: detect new commits by monitoring HEAD changes
-            this.sendActivity({
-              kind: "git-branch-switch",
-              detail: `HEAD changed in ${repo.rootUri?.fsPath || "repo"}`,
-              timestamp: Date.now(),
-              file: repo.rootUri?.fsPath || "",
-            });
-          });
-          break; // watch first repo only
+          const root = repo.rootUri?.fsPath || "";
+          // Remember the current HEAD so state changes can be classified.
+          // repo.state fires on ANY change (file status, index, HEAD...), so
+          // comparing the HEAD reference lets us report real branch switches
+          // and new commits instead of "HEAD changed" for every refresh.
+          const snapshot = this.snapshotGitHead(repo);
+          if (snapshot) this.gitHeadState.set(root, snapshot);
+          this.gitWatchers.push(
+            repo.state.onDidChange(() => {
+              const next = this.snapshotGitHead(repo);
+              if (!next) return;
+              const prev = this.gitHeadState.get(root);
+              this.gitHeadState.set(root, next);
+              if (prev && next.name && prev.name !== next.name) {
+                // The branch pointer moved - a real branch switch.
+                this.sendActivity({
+                  kind: "git-branch-switch",
+                  detail: `Branch switched to ${next.name} in ${path.basename(root) || "repo"}`,
+                  timestamp: Date.now(),
+                  file: root,
+                });
+              } else if (prev && next.hash && prev.hash !== next.hash) {
+                // Same branch, new commit.
+                this.sendActivity({
+                  kind: "git-commit",
+                  detail: `New commit ${next.hash.slice(0, 7)} in ${path.basename(root) || "repo"}`,
+                  timestamp: Date.now(),
+                  file: root,
+                });
+              }
+              // Otherwise: a plain working-tree/index change - nothing to report.
+            })
+          );
         }
       }, () => { /* git not available */ });
     } catch {
-      // Git extension not available — silently ignore
+      // Git extension not available - silently ignore
     }
+  }
+
+  /**
+   * Reads the current HEAD reference (name + commit hash). Returns null when
+   * the repository has no HEAD yet (empty repo / detached with no commit).
+   */
+  private snapshotGitHead(repo: any): { name: string | null; hash: string | null } | null {
+    const head = repo.state?.HEAD;
+    if (!head) return null;
+    return { name: head.name ?? null, hash: head.commit?.hash ?? null };
   }
 }

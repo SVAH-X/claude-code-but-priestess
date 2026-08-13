@@ -74,6 +74,9 @@ function copyPngDir(srcRel, dstRel) {
 function patchRendererFile(dstRel) {
   const filePath = path.join(TARGET, dstRel);
   let content = fs.readFileSync(filePath, "utf8");
+  // Normalize line endings so the multi-line anchors below match regardless
+  // of the source EOL style (Electron sources are CRLF on Windows checkouts).
+  content = content.replace(/\r\n/g, "\n");
   let changed = false;
   for (const [cn, ascii] of Object.entries(NAME_MAP)) {
     const before = content;
@@ -83,6 +86,87 @@ function patchRendererFile(dstRel) {
   if (changed) {
     fs.writeFileSync(filePath, content, "utf8");
     console.log("  (patched) " + dstRel);
+  }
+}
+
+// The VS Code webview serves character frames from a different origin than the
+// document (vscode-webview:// vs the extension's webview URI), which taints the
+// canvas that prepareTransparentFrame reads back. The webview build therefore
+// needs CORS-aware frame loading and a tainted-canvas fallback, while the
+// Electron popover serves frames same-origin and keeps the simpler code.
+// These patches are applied AFTER every copy so `npm run vscode:sync` stays
+// deterministic and re-runnable without losing the webview-specific fixes.
+function patchWebviewRenderer(dstRel) {
+  const filePath = path.join(TARGET, dstRel);
+  let content = fs.readFileSync(filePath, "utf8");
+  let changed = false;
+
+  // 1) Guard the pixel read in prepareTransparentFrame: a tainted canvas
+  //    throws on getImageData; degrade to an untrimmed frame instead of
+  //    throwing and blanking the stage.
+  const guardFrom =
+    "  srcCtx.drawImage(image, 0, 0);\n" +
+    "  const imageData = srcCtx.getImageData(0, 0, source.width, source.height);\n" +
+    "  const { data, width, height } = imageData;\n";
+  const guardTo =
+    "  srcCtx.drawImage(image, 0, 0);\n" +
+    "  let imageData;\n" +
+    "  try {\n" +
+    "    imageData = srcCtx.getImageData(0, 0, source.width, source.height);\n" +
+    "  } catch {\n" +
+    "    // A tainted canvas denies pixel reads. The shipped frames already carry\n" +
+    "    // their alpha, so the fill has nothing to remove and only the crop is\n" +
+    "    // lost: an untrimmed character still renders, which beats a blank stage.\n" +
+    "    return {\n" +
+    "      canvas: source,\n" +
+    "      bbox: { minX: 0, minY: 0, maxX: source.width - 1, maxY: source.height - 1 }\n" +
+    "    };\n" +
+    "  }\n" +
+    "  const { data, width, height } = imageData;\n";
+  if (content.includes(guardFrom)) {
+    content = content.split(guardFrom).join(guardTo);
+    changed = true;
+  }
+
+  // 2) Load frames CORS-first (with a plain retry): asking for anonymous CORS
+  //    keeps the trim working on hosts that send CORS headers; hosts that send
+  //    none fail the decode instead of the later pixel read.
+  const loadFrom =
+    "async function loadFrame(fileName, dir) {\n" +
+    "  const image = new Image();\n" +
+    "  image.decoding = \"async\";\n" +
+    "  image.src = new URL(fileName, dir).href;\n" +
+    "  await image.decode();\n" +
+    "  return prepareTransparentFrame(image);\n" +
+    "}\n";
+  const loadTo =
+    "function decodeImage(href, crossOrigin) {\n" +
+    "  const image = new Image();\n" +
+    "  image.decoding = \"async\";\n" +
+    "  if (crossOrigin) image.crossOrigin = crossOrigin;\n" +
+    "  image.src = href;\n" +
+    "  return image.decode().then(() => image);\n" +
+    "}\n" +
+    "\n" +
+    "async function loadFrame(fileName, dir) {\n" +
+    "  const href = new URL(fileName, dir).href;\n" +
+    "  // Frames are served from a different origin than the document in the VS Code\n" +
+    "  // webview, and drawing one in taints the canvas that prepareTransparentFrame\n" +
+    "  // reads back. Ask for CORS first so the trim below keeps working; hosts that\n" +
+    "  // serve the frames same-origin (the Electron popover) ignore the attribute,\n" +
+    "  // and a host that sends no CORS headers fails the decode instead of the\n" +
+    "  // pixel read — hence the plain retry.\n" +
+    "  const image = await decodeImage(href, \"anonymous\").catch(() => decodeImage(href, null));\n" +
+    "  return prepareTransparentFrame(image);\n" +
+    "}\n";
+  if (content.includes(loadFrom)) {
+    content = content.split(loadFrom).join(loadTo);
+    changed = true;
+  }
+
+  if (changed) {
+    fs.writeFileSync(filePath, content, "utf8");
+    console.log("  (webview-patched) " + dstRel);
   }
 }
 
@@ -99,6 +183,7 @@ copyFile("src/renderer/desktop-pet.css","media/pet.css");
 
 // Patch the copied JS so filenames match the renamed PNGs
 patchRendererFile("media/renderer.js");
+patchWebviewRenderer("media/renderer.js");
 patchRendererFile("media/pet.js");
 
 // Character sprites (renamed)

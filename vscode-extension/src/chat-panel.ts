@@ -1,12 +1,18 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs";
+import * as os from "os";
 import { generateApiShim } from "./api-shim";
 import { ContextCapture } from "./context-capture";
 
 export class ChatPanelProvider implements vscode.WebviewViewProvider {
-  private view: vscode.WebviewView | null = null;
   private wsUnsubs: (() => void)[] = [];
   private themeUnsub: vscode.Disposable | null = null;
+  /**
+   * Temp directories created for fix-diff / HTML preview files. Cleaned up
+   * in dispose() so previews do not leak one directory each.
+   */
+  private tempDirs: string[] = [];
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -24,7 +30,6 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     this.wsUnsubs.length = 0;
     if (this.themeUnsub) { this.themeUnsub.dispose(); this.themeUnsub = null; }
 
-    this.view = webviewView;
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -229,6 +234,22 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
       max-width: 100%;
       opacity: 0.75;
     }
+    /* Apply fix button on code blocks */
+    .apply-fix-btn {
+      display: block;
+      margin-top: 4px;
+      padding: 2px 10px;
+      font-size: 0.75em;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      float: right;
+    }
+    .apply-fix-btn:hover { background: var(--vscode-button-hoverBackground); }
+    .code-block-wrapper { overflow: hidden; }
+
     /* HTML preview panel */
     .preview-divider { display: none; }
     .html-preview { display: none; }
@@ -280,6 +301,28 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
 </html>`;
   }
 
+  /**
+   * Sends an error envelope back to the webview. Every request handler
+   * below routes failures through this helper: a ws request rejects when
+   * the tray app is closed or times out, and without a .catch() the
+   * rejection would become an unhandled promise rejection in the extension
+   * host while the chat panel silently waits. The webview shim resolves
+   * __prts_request() with this envelope, so the renderer can surface the
+   * failure to the user instead of hanging.
+   */
+  private replyWithError(webview: vscode.Webview, resultType: string, reqId: unknown, error: unknown) {
+    try {
+      webview.postMessage({
+        type: resultType,
+        reqId,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } catch (_) {
+      // The webview may have been disposed while the request was in flight.
+    }
+  }
+
   private handleWebviewMessage(msg: any, webview: vscode.Webview) {
     if (!this.wsClient) return;
 
@@ -288,7 +331,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     switch (type) {
       case "chat:send":
         this.wsClient
-          .send("chat:send", {
+          .request("chat:send", {
             text: msg.text,
             context: this.contextCapture?.getCurrentContext() || null,
           })
@@ -298,50 +341,87 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
               reqId: msg.reqId,
               ...res,
             });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "chat:send:result", msg.reqId, err);
           });
         break;
       case "chat:cancel":
-        this.wsClient.send("chat:cancel");
+        // chat:cancel is a fire-and-forget notification - the server never
+        // replies, so there is nothing to resolve or reject here.
+        this.wsClient.notify("chat:cancel");
         break;
       case "chat:clear":
-        this.wsClient.send("chat:clear").then((res: any) => {
-          webview.postMessage({ type: "chat:clear:result", reqId: msg.reqId });
-        });
+        this.wsClient
+          .request("chat:clear")
+          .then(() => {
+            webview.postMessage({ type: "chat:clear:result", reqId: msg.reqId });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "chat:clear:result", msg.reqId, err);
+          });
         break;
       case "chat:get-history":
-        this.wsClient.send("chat:get-history").then((res: any) => {
-          webview.postMessage({
-            type: "chat:get-history:result",
-            reqId: msg.reqId,
-            history: res.history,
+        this.wsClient
+          .request("chat:get-history")
+          .then((res: any) => {
+            webview.postMessage({
+              type: "chat:get-history:result",
+              reqId: msg.reqId,
+              history: res.history,
+            });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "chat:get-history:result", msg.reqId, err);
           });
-        });
         break;
       case "settings:get":
-        this.wsClient.send("settings:get").then((res: any) => {
-          webview.postMessage({
-            type: "settings:get:result",
-            reqId: msg.reqId,
-            state: res.state,
+        this.wsClient
+          .request("settings:get")
+          .then((res: any) => {
+            webview.postMessage({
+              type: "settings:get:result",
+              reqId: msg.reqId,
+              state: res.state,
+            });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "settings:get:result", msg.reqId, err);
           });
-        });
         break;
       case "settings:set":
-        this.wsClient.send("settings:set", { patch: msg.patch });
+        this.wsClient
+          .request("settings:set", { patch: msg.patch })
+          .catch((err: any) => {
+            this.replyWithError(webview, "settings:set:result", msg.reqId, err);
+          });
         break;
       case "desktop-pet:cat-mode-get":
-        this.wsClient.send("desktop-pet:cat-mode-get").then((res: any) => {
-          webview.postMessage({
-            type: "desktop-pet:cat-mode-get:result",
-            reqId: msg.reqId,
-            ...res,
+        this.wsClient
+          .request("desktop-pet:cat-mode-get")
+          .then((res: any) => {
+            webview.postMessage({
+              type: "desktop-pet:cat-mode-get:result",
+              reqId: msg.reqId,
+              ...res,
+            });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "desktop-pet:cat-mode-get:result", msg.reqId, err);
           });
-        });
+        break;
+      case "fix:apply":
+        // Open a diff view comparing the suggested fix against the original file.
+        this.applyFix(msg.filePath, msg.newCode);
+        break;
+      case "html:open-in-browser":
+        // Open the generated HTML in the built-in Simple Browser (sandboxed)
+        // rather than the system browser - see openHtmlInBrowser().
+        this.openHtmlInBrowser(msg.html);
         break;
       case "preview:open":
       case "preview:close":
-      case "html:open-in-browser":
-        // These are local to the webview — no server round-trip needed
+        // These are local to the webview - no server round-trip needed
         break;
       default:
         break;
@@ -382,5 +462,81 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
 
   private syncTheme(webview: vscode.Webview) {
     webview.postMessage({ type: "theme", scheme: this.themeScheme() });
+  }
+
+  /**
+   * Opens assistant-generated HTML in the VS Code Simple Browser (built-in,
+   * sandboxed) instead of the system browser: the content comes from the
+   * model and may contain scripts, so keeping it inside VS Code avoids
+   * exposing it to the user's default browser with full local privileges.
+   * The temp file is tracked for cleanup on dispose(), same as fix diffs.
+   */
+  private openHtmlInBrowser(html: string) {
+    if (typeof html !== "string" || !html.trim()) {
+      vscode.window.showErrorMessage("PRTS: 没有可预览的 HTML 内容。");
+      return;
+    }
+    try {
+      const tmpDir = this.createTempDir("prts-preview-");
+      const tmpFile = path.join(tmpDir, "preview.html");
+      fs.writeFileSync(tmpFile, html, "utf8");
+      vscode.commands.executeCommand("vscode.openWith", vscode.Uri.file(tmpFile), "simpleBrowser");
+    } catch (err) {
+      vscode.window.showErrorMessage("PRTS: 打开预览失败 — " + (err as Error).message);
+    }
+  }
+
+  /**
+   * Creates a temp directory and tracks it for cleanup on dispose(). Diff and
+   * HTML preview files would otherwise leak one directory per preview.
+   */
+  private createTempDir(prefix: string): string {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    this.tempDirs.push(tmpDir);
+    return tmpDir;
+  }
+
+  private applyFix(filePath: string, newCode: string) {
+    const uri = vscode.Uri.file(filePath);
+    try {
+      if (!fs.existsSync(uri.fsPath)) {
+        vscode.window.showErrorMessage("PRTS: File not found: " + filePath);
+        return;
+      }
+      // Safety: only allow files inside an open workspace folder.
+      // getWorkspaceFolder() uses VS Code's own path normalization (handles
+      // case differences on Windows), unlike a manual startsWith() compare
+      // that would both false-reject valid paths and be bypassable via
+      // symlinks pointing outside the workspace.
+      const folder = vscode.workspace.getWorkspaceFolder(uri);
+      if (!folder) {
+        vscode.window.showErrorMessage("PRTS: File is outside the workspace: " + filePath);
+        return;
+      }
+      const tmpDir = this.createTempDir("prts-suggestion-");
+      const tmpFile = path.join(tmpDir, path.basename(filePath));
+      fs.writeFileSync(tmpFile, newCode, "utf8");
+      const tmpUri = vscode.Uri.file(tmpFile);
+      vscode.commands.executeCommand("vscode.diff", uri, tmpUri,
+        `PRTS Suggestion — ${path.basename(filePath)}`);
+    } catch (err) {
+      vscode.window.showErrorMessage("PRTS: Failed to create suggestion diff: " +
+        (err as Error).message);
+    }
+  }
+
+  /**
+   * Cleans up temp files created for fix diffs / HTML previews and
+   * unsubscribes WS relays. Called from extension deactivate(); VS Code
+   * disposes the provider's own registered subscriptions separately.
+   */
+  dispose(): void {
+    for (const dir of this.tempDirs) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+    }
+    this.tempDirs.length = 0;
+    for (const unsub of this.wsUnsubs) { try { unsub(); } catch (_) { /* ignore */ } }
+    this.wsUnsubs.length = 0;
+    if (this.themeUnsub) { this.themeUnsub.dispose(); this.themeUnsub = null; }
   }
 }

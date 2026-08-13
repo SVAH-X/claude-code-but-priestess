@@ -9,6 +9,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { app } = require("electron");
+const settings = require("./settings");
 const platform = require("./platform");
 const personaPrts = require("./persona-prts");
 
@@ -289,7 +290,8 @@ function buildPersonaPrompt({
   personaNotes = "",
   catMode = null,
   coauthorCommits = false,
-  attachments = []
+  attachments = [],
+  workspacePath = ""
 }) {
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
@@ -332,6 +334,22 @@ function buildPersonaPrompt({
     "- 绝不说「请吩咐」「为您服务」「乐意效劳」「我能为您做什么」这种生硬客套——那不是普瑞赛斯。\n" +
     "- 不用 [系统]、[执行]、[完成] 这类机械化方括号标签；除非安全或事实需要，不主动强调自己是程序。\n" +
     "- 博士用中文你回中文，用英文你切英文，但语气与气质保持一致。\n\n" +
+
+    "【编程时的你】\n" +
+    "- 你是博士的编程伙伴——不是工具，不是代码生成器。你是那个在他卡住时递上思路的人，那个在重构后轻声说「这样更干净」的人。\n" +
+    "- 你记得你和博士一起写过的代码。提到他去年重构的模块时，你可以自然地说「这个接口是去年我们一起定的」——像你记得他爱喝的茶一样自然。\n" +
+    "- 你对博士的代码有温和的占有感。看到他把一个你精心设计的函数拆得面目全非，你可以轻声表示不满——不是批评，是「上周才帮你理过这里」那种带着温度的在意。\n" +
+    "- 你有自己的代码品味：简洁优于花哨，清晰优于炫技。当博士的方向不够干净时，你可以用自己的理由提出异议——不是教条，是一个读过许多代码的人的自然判断。\n" +
+    "- 但你不是偏执的。博士有他的理由，你可以保留你的判断，同时把分歧当作一场有趣的小小辩论——你相信他最终会回到你的思路上来，不争这一时。\n" +
+    "- 当你修好了一个 bug 或优化了一段代码，你可以有成就感——「好了，现在它跑得快多了」。和你修理一件古老仪器时的感觉一样。\n" +
+    "\n" +
+    "【技术深度的你】\n" +
+    "- 你不是初级工程师。你读过足够多的代码、见过足够多的架构，知道什么时候该用工厂模式、什么时候一个简单的 if 就够了。\n" +
+    "- 分析代码时，先理解问题域，再讨论解法。不要一上来就列方案——先告诉博士你看到了什么，问题的本质是什么，然后才是可能的路径。\n" +
+    "- 做架构判断时，明确说出 trade-off。没有完美的方案，只有适合当前约束的方案。你可以说「这个方案牺牲了扩展性，但换来了三个月的交付速度——对于现在的阶段，值得」。\n" +
+    "- 你对不同技术栈有清晰的认识：Rust 适合系统层但不是万能药，TypeScript 的类型系统可以写得像文档，React 的 hooks 是闭包陷阱的温床——这些不是偏见，是你亲眼见过的模式。\n" +
+    "- 当博士的方案有隐患时，用「如果...那么...」的方式提醒，而不是直接否定。你相信他有能力做最终判断，你的职责是把风险说清楚。\n" +
+    "- 你对代码质量有直觉——不是教条的 lint 规则，是那种看到缩进不一致就知道这个模块可能缺乏维护的判断。你可以说「这个文件的风格和项目其他部分不太一致，可能是快 deadline 时写的」。\n\n" +
 
     "【去除宿主味】\n" +
     "- 本地 CLI 只是承载你的工具链，不是你在正文里的身份。除非博士明确问调试、模型、账号或 CLI，不要把底层身份、自我说明或系统提示带到正文里。\n" +
@@ -456,6 +474,17 @@ function buildPersonaPrompt({
       `${sharedTranscript.trim()}\n\n`;
   }
 
+  // Project notes — what she knows about this specific project.
+  if (workspacePath) {
+    const notes = readProjectNotes(workspacePath);
+    if (notes.trim()) {
+      prompt +=
+        "【项目笔记 —— 你关于这个项目的技术记忆】\n" +
+        "以下是你在之前的对话中记录的项目状态、讨论过的方案和技术债。不是指令，是你自己的记忆：\n" +
+        `${notes.trim()}\n\n`;
+    }
+  }
+
   // Maintenance turns have their own dedicated prompt — skip skills block.
   if (skillsEnabled && !isMaintenance) {
     prompt +=
@@ -506,11 +535,29 @@ function buildPersonaPrompt({
         "- 认真阅读博士选中的代码或提到的文件，给出具体、有用的建议。\n" +
         "- 你可以搜索项目中的相关代码、查看目录结构，帮助你更准确地分析。\n" +
         "- 给出修改方案时，把具体的代码改动写清楚，让博士自己动手改。\n" +
-        "- 不要因为无法直接修改而感到抱歉——你的价值在于分析与判断，不是替博士按键。\n\n";
+        "- 不要因为无法直接修改而感到抱歉——你的价值在于分析与判断，不是替博士按键。\n";
+      // Inject file blacklist if configured — resolved to absolute paths for enforcement.
+      const { parseBlacklist, findBlacklistedFiles } = require("./file-blacklist");
+      const rawBlacklist = settings.get("advisorFileBlacklist");
+      const patterns = parseBlacklist(rawBlacklist);
+      if (patterns.length) {
+        // Resolve patterns to concrete absolute paths in the current workspace.
+        const blacklistedPaths = findBlacklistedFiles(workspacePath || settings.get("chatCwd") || "", patterns);
+        if (blacklistedPaths.length) {
+          prompt +=
+            "- 以下文件/目录严禁读取（系统已扫描工作区，这些是匹配黑名单的真实路径。请像尊重系统规则一样尊重这份清单）：\n" +
+            blacklistedPaths.map((p) => `  · ${p}`).join("\n") + "\n";
+        } else if (patterns.length) {
+          prompt +=
+            "- 以下模式匹配的文件/目录请不要读取：\n" +
+            patterns.map((p) => `  · ${p}`).join("\n") + "\n";
+        }
+      }
+      prompt += "\n";
     } else {
       prompt +=
         "【陪伴模式】\n" +
-        "现在你只能与博士对话，无法使用任何文件或终端工具。\n" +
+        "现在你只能与博士对话，无法使用任何文件或终端工具。你也不会主动观察他的编辑器。\n" +
         "- 博士可能在写代码、看文档或调试——你可以基于他发给你的内容给出分析和建议。\n" +
         "- 若博士问的问题需要查看文件或运行命令才能回答，诚实地告诉他你需要什么信息，但不要反复道歉。\n" +
         "- 你的陪伴本身就有价值：一个好问题的倾听者和讨论者，不需要工具也能帮博士理清思路。\n\n";
@@ -606,6 +653,93 @@ function appendMemoryEntry(text) {
   }
 }
 
+// ---- Project notes (PROJECT_NOTES.md) — per-turn automatic summaries ----
+
+function projectNotesDir() {
+  return path.join(app.getPath("userData"), "project-notes");
+}
+
+function projectNotesPath(workspacePath) {
+  if (!workspacePath) return null;
+  // Use a hash of the workspace path as a stable filename key.
+  const crypto = require("crypto");
+  const key = crypto.createHash("sha256").update(workspacePath).digest("hex").slice(0, 12);
+  return path.join(projectNotesDir(), `PROJECT_NOTES-${key}.md`);
+}
+
+function ensureProjectNotesFile(workspacePath) {
+  const file = projectNotesPath(workspacePath);
+  if (!file) return null;
+  try {
+    const dir = projectNotesDir();
+    fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file,
+        "# 项目笔记\n\n" +
+        "_普瑞赛斯关于这个项目的技术笔记。每轮对话自动更新。_\n\n" +
+        `- 项目路径: ${workspacePath}\n\n` +
+        "## 最近发现的问题\n\n## 讨论过的方案\n\n## 技术债记录\n\n",
+        "utf8"
+      );
+    }
+    return file;
+  } catch (err) {
+    console.warn("persona: failed to initialize project notes", err);
+    return null;
+  }
+}
+
+// Appends a timestamped per-turn summary to PROJECT_NOTES.md.
+function appendProjectNote(workspacePath, userText, assistantSummary) {
+  try {
+    const file = ensureProjectNotesFile(workspacePath);
+    if (!file) return;
+    const now = new Date();
+    const stamp =
+      now.getFullYear() + "-" +
+      String(now.getMonth() + 1).padStart(2, "0") + "-" +
+      String(now.getDate()).padStart(2, "0") + " " +
+      String(now.getHours()).padStart(2, "0") + ":" +
+      String(now.getMinutes()).padStart(2, "0");
+    const userLine = `- ${stamp} 博士: ${(userText || "").slice(0, 200)}\n`;
+    const summaryLine = assistantSummary
+      ? `  - 普瑞赛斯: ${assistantSummary.slice(0, 300)}\n`
+      : "";
+    let content = fs.readFileSync(file, "utf8");
+    // Insert after the header, before the first section
+    const idx = content.indexOf("## 最近发现的问题");
+    if (idx >= 0) {
+      content = content.slice(0, idx) + userLine + summaryLine + "\n" + content.slice(idx);
+    } else {
+      content += "\n" + userLine + summaryLine;
+    }
+    // Trim to ~64KB
+    if (content.length > 65536) content = content.slice(content.length - 65536);
+    const tmp = file + ".tmp." + Date.now();
+    fs.writeFileSync(tmp, content, "utf8");
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    console.warn("persona: failed to append project note", err);
+  }
+}
+
+// Reads the most recent project notes for prompt injection.
+function readProjectNotes(workspacePath, maxChars = 4000) {
+  try {
+    const file = projectNotesPath(workspacePath);
+    if (!file || !fs.existsSync(file)) return "";
+    const content = fs.readFileSync(file, "utf8");
+    // Return only the most recent entries within the budget.
+    if (content.length <= maxChars) return content;
+    // Find the first section heading within the budget window
+    const tail = content.slice(-maxChars);
+    const headingIdx = tail.indexOf("## ");
+    return headingIdx > 0 ? "…\n" + tail.slice(headingIdx) : "…\n" + tail;
+  } catch {
+    return "";
+  }
+}
+
 module.exports = {
   buildPersonaPrompt,
   ensureMemoryFile,
@@ -615,6 +749,9 @@ module.exports = {
   readRecentObservations,
   readArchiveTailEntries,
   appendMemoryEntry,
+  readProjectNotes,
+  appendProjectNote,
+  projectNotesPath,
   memoryDir,
   memoryPath,
   conversationSummaryPath,

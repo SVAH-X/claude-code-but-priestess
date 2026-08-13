@@ -41,13 +41,17 @@ const DEFAULTS = Object.freeze({
   // Migrated from the old `agentMode` boolean on first read.
   vibeCodingMode: "companion",
   // Vibe coding: proactive diagnostic checks (she notices lint errors).
+  // Deprecated: proactivity is now tied to vibeCodingMode (companion=silent,
+  // advisor=diagnostics, agent=full). These keys are kept only for backward compat.
   vibeCodingDiagnostics: false,
-  // Minutes between diagnostic proactive checks (min 1).
   diagnosticCheckCooldownMin: 5,
-  // Vibe coding: proactive activity narration (save, git, build).
   vibeCodingActivityNarration: false,
   // Minutes between activity-based proactive checks (min 1).
   activityCheckCooldownMin: 3,
+  // Advisor mode file blacklist — gitignore-style patterns, one per line.
+  // She won't read files matching any of these. Editable from VS Code settings
+  // (prts.advisorFileBlacklist) or directly in settings.json.
+  advisorFileBlacklist: ".env\n.env.*\n*secret*\n*credential*\n*.pem\n*.key\nid_rsa*\n*password*\n*token*",
   // When she commits on the Doctor's behalf, sign the commit with an honest
   // Co-Authored-By trailer (普瑞赛斯 <prts.priestess@outlook.com>) so she shows
   // up as a real contributor — the same idea as Claude Code's trailer. On by

@@ -25,6 +25,7 @@ const {
   reasoningEffortsForModel,
   resolveCodexModel
 } = require("./codex-model-catalog");
+const { parseBlacklist, findBlacklistedFiles, isBlacklisted } = require("./file-blacklist");
 const {
   classifyCodexRejection,
   codexEventErrorText,
@@ -246,7 +247,7 @@ function providerSessionPlan(provider) {
 // prompt by persona.js (no --add-dir: `codex exec resume` rejects that flag).
 function codexAttachmentArgs() {
   const args = [];
-  for (const p of pendingAttachments) {
+  for (const p of filterBlacklistedPaths(pendingAttachments)) {
     if (isImagePath(p)) args.push("-i", p);
   }
   return args;
@@ -258,10 +259,20 @@ function codexAttachmentArgs() {
 // non-agent turns answer "no photo". Text files are inlined, so only images.
 function attachmentDirArgs() {
   const dirs = new Set();
-  for (const p of pendingAttachments) if (isImagePath(p)) dirs.add(path.dirname(p));
+  for (const p of filterBlacklistedPaths(pendingAttachments)) if (isImagePath(p)) dirs.add(path.dirname(p));
   const args = [];
   for (const d of dirs) args.push("--add-dir", d);
   return args;
+}
+
+// Drop blacklisted attachments before they reach any CLI arg or inline prompt.
+// The advisor file blacklist is a real deny here (absolute-path match), not just
+// a persona hint - Read/-i/--add-dir never see these paths.
+function filterBlacklistedPaths(paths) {
+  if (!Array.isArray(paths) || !paths.length) return paths;
+  const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
+  if (!patterns.length) return paths;
+  return paths.filter((p) => !isBlacklisted(path.resolve(String(p)), patterns));
 }
 
 // Vision cost + latency scale with pixels, so cap oversized images before they
@@ -950,6 +961,12 @@ function drainOutboundQueue() {
   if (result?.ok) {
     outboundQueue.shift();
     emitQueueState();
+  } else if (outboundQueue.length > 0 && result?.reason !== "busy" && result?.reason !== "quitting") {
+    // Dispatch failed (e.g. missing-cli) — retry after a delay so the queue
+    // isn't permanently stuck when the CLI becomes available again.
+    setTimeout(() => {
+      if (!quitPending && !currentProcess) drainOutboundQueue();
+    }, 5000).unref();
   }
 }
 
@@ -1786,15 +1803,20 @@ function finishSilentTurn(finalText) {
   notify({ kind: "proactive", spoke: true, text });
 }
 
-function finalizeAssistant(finalText) {
+function finalizeAssistant(finalText, opts) {
   // Anything the stream redactor was still holding is, by construction, an
   // incomplete directive prefix (never prose) — drop it.
+  const hadError = opts?.hadError === true;
   directiveTailBuffer = "";
   if (typeof finalText === "string" && finalText) {
     finalText = stripDirectiveTags(finalText);
   }
   if (silentTurnKind) {
-    finishSilentTurn(finalText);
+    // When called from a self-heal retry path, suppress the proactive
+    // notification — the retry will finalize again with the real result.
+    if (!opts?.suppressProactiveNotify) {
+      finishSilentTurn(finalText);
+    }
     return;
   }
   if (!pendingAssistantId) {
@@ -1807,8 +1829,11 @@ function finalizeAssistant(finalText) {
       appendAssistant(finalText);
     } else {
       // No bubble was opened and no text arrived — if tools ran this turn,
-      // speak a short summary of them instead of leaving her silent.
-      emitToolOnlyFallback();
+      // speak a short summary of them instead of leaving her silent. Skip
+      // when the turn errored — a cheerful summary after a crash is misleading.
+      if (!hadError) {
+        emitToolOnlyFallback();
+      }
       return;
     }
   }
@@ -1943,7 +1968,8 @@ function handleClaudeStreamEvent(event) {
     for (const block of blocks) {
       if (block?.type === "tool_use") {
         const summary = summarizeToolInput(block.name, block.input);
-        emitTool(true, block.name, summary);
+        // Don't re-emit the tool indicator — the stream_event path already
+        // handled it. Just record the tool entry with summary in history.
         pushTool(block.name, summary, {
           toolUseId: block.id,
           command: toolCommandDetail(block.name, block.input)
@@ -2033,6 +2059,9 @@ function isCodexAssistantEvent(event, type) {
 }
 
 function codexSessionIdFromEvent(event) {
+  // Only use unambiguous session/thread/conversation identifiers.
+  // event.id is a per-event UUID — storing it as a session ID corrupts
+  // session tracking and causes silent resume failures.
   return (
     event.session_id ||
     event.sessionId ||
@@ -2040,7 +2069,7 @@ function codexSessionIdFromEvent(event) {
     event.threadId ||
     event.conversation_id ||
     event.conversationId ||
-    event.id
+    null
   );
 }
 
@@ -2435,9 +2464,11 @@ function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screens
 }
 
 function send(text, attachments) {
-  const files = Array.isArray(attachments)
-    ? attachments.filter((p) => typeof p === "string" && p.trim())
-    : [];
+  const files = filterBlacklistedPaths(
+    Array.isArray(attachments)
+      ? attachments.filter((p) => typeof p === "string" && p.trim())
+      : []
+  );
   let trimmed = String(text ?? "").trim();
   if (!trimmed && files.length === 0) return { ok: false, reason: "empty" };
   if (!trimmed) trimmed = "看看这些。"; // attachments with no text of their own
@@ -2843,15 +2874,11 @@ async function launchProviderTurn({
       resumeRetryInFlight = true;
       claudeResultErrored = false;
       const retrySilentKind = silentTurnKind;
-      // Read now, not inside the callback: pendingAttachments is module state
-      // that the next turn overwrites, so a deferred read can replay the wrong
-      // images — or none.
       const retryAttachments = pendingAttachments;
-      if (pendingAssistantId) finalizeAssistant(""); // clears the empty bubble
+      if (pendingAssistantId) finalizeAssistant("", { suppressProactiveNotify: true });
       cleanupInvocation(invocation);
       currentProcess = null;
       currentProvider = null;
-      // Replay keeps the turn's silent nature (finalize just reset it).
       silentTurnKind = retrySilentKind;
       setImmediate(() => dispatchSend(trimmed, {
         userAlreadyShown: true,
@@ -2876,11 +2903,8 @@ async function launchProviderTurn({
       claudeModelFallbackInFlight = true;
       claudeModelInvalid = false;
       const retrySilentKind = silentTurnKind;
-      // Read now, not inside the callback: pendingAttachments is module state
-      // that the next turn overwrites, so a deferred read can replay the wrong
-      // images — or none.
       const retryAttachments = pendingAttachments;
-      if (pendingAssistantId) finalizeAssistant("");
+      if (pendingAssistantId) finalizeAssistant("", { suppressProactiveNotify: true });
       pushSystem(`Claude 模型 \`${badClaudeModel}\` 当前账号不可用，已切回默认并重试。`);
       cleanupInvocation(invocation);
       currentProcess = null;
@@ -2997,7 +3021,8 @@ async function launchProviderTurn({
         "Claude 返回了一个空的错误回复。请再试一次，或确认 `claude` CLI 已登录且额度未用尽。"
       );
     }
-    if (pendingAssistantId) finalizeAssistant("");
+    const turnHadError = (code !== 0 && code !== null) || claudeResultErrored;
+    if (pendingAssistantId) finalizeAssistant("", { hadError: turnHadError });
     cleanupInvocation(invocation);
     currentProcess = null;
     currentProvider = null;
@@ -3177,10 +3202,43 @@ function buildVibeProactivePrompt(opts) {
   if (opts?.diagnosticContext) {
     return buildDiagnosticProactivePrompt(opts.diagnosticContext);
   }
+  if (opts?.diagnosticImprovement) {
+    return buildImprovementPrompt(opts.diagnosticImprovement);
+  }
+  if (opts?.terminalEvent) {
+    return buildTerminalPrompt(opts.terminalEvent);
+  }
   if (opts?.activityContext) {
     return buildActivityProactivePrompt();
   }
   return buildProactivePrompt();
+}
+
+function buildImprovementPrompt(diag) {
+  const lines = [
+    buildProactivePrompt(),
+    "",
+    "博士刚刚修好了代码——编辑器的报错数量降到了 0。",
+    "这是他采纳了你的建议、或者自己努力的结果。",
+    "用你自然的风格，给一句真诚的、属于普瑞赛斯的肯定。不用长，一两句就够了。",
+    "如果只是偶然清零（比如关了文件），可以说 [[silent]]。",
+  ];
+  return lines.join("\n");
+}
+
+function buildTerminalPrompt(evt) {
+  const lines = [
+    buildProactivePrompt(),
+    "",
+    "博士刚才运行了终端命令。结果是：",
+    evt.detail,
+  ];
+  if (evt.kind === "build-error") {
+    lines.push("", "看起来构建/编译出错了。用你自然的风格轻声告知博士，可以帮他一起看看错误原因。如果你觉得只是暂时性问题，可以说 [[silent]]。");
+  } else if (evt.kind === "test-fail") {
+    lines.push("", "看起来测试没通过。用你自然的风格提醒博士，建议他看看失败的测试。如果你觉得只是暂时性问题，可以说 [[silent]]。");
+  }
+  return lines.join("\n");
 }
 
 function buildDiagnosticProactivePrompt(diag) {
@@ -3293,3 +3351,4 @@ module.exports = {
   consumeDirectives,
   stripDirectiveTags,
 };
+
