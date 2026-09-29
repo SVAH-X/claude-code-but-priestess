@@ -31,7 +31,7 @@
   "author": "",
   "license": "PolyForm-Noncommercial-1.0.0",
   "devDependencies": {
-    "electron": "^42.3.3",
+    "electron": "^42.10.0",
     "electron-builder": "^26.15.3"
   },
   "build": {
