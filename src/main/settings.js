@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { app } = require("electron");
-const { isClaudeReasoningEffort } = require("./claude-capabilities");
+const { isClaudeReasoningEffort, migrateClaudeModel } = require("./claude-capabilities");
 const { isReasoningEffort } = require("./codex-model-catalog");
 
 const DEFAULTS = Object.freeze({
@@ -136,6 +136,11 @@ function init() {
         parsed.vibeCodingMode = "agent";
       }
       delete parsed.agentMode;
+      // Migration: retired Claude model ids → CLI default; dated ids with a
+      // dateless alias for the same model → that alias.
+      if (typeof parsed.claudeModel === "string") {
+        parsed.claudeModel = migrateClaudeModel(parsed.claudeModel);
+      }
       cache = { ...DEFAULTS, ...parsed };
       // Don't persist the stale agentMode default — it's now a derived field.
       delete cache.agentMode;

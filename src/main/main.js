@@ -33,6 +33,7 @@ const {
   reasoningEffortsForModel,
   resolveCodexModel
 } = require("./codex-model-catalog");
+const { CLAUDE_MODEL_PRESETS } = require("./claude-capabilities");
 const wsServer = require("./ws-server");
 const {
   autoScreenshotMenuVisible,
@@ -1067,6 +1068,7 @@ const MENU_TEXT = {
       max: "Max · 最大",
       ultra: "Ultra · 极限"
     })[effort] || effort,
+    fableAlias: "Fable（最新别名）",
     opusAlias: "Opus（最新别名）",
     sonnetAlias: "Sonnet（最新别名）",
     haikuAlias: "Haiku（最新别名）",
@@ -1156,6 +1158,7 @@ const MENU_TEXT = {
       max: "Max",
       ultra: "Ultra"
     })[effort] || effort,
+    fableAlias: "Fable (latest alias)",
     opusAlias: "Opus (latest alias)",
     sonnetAlias: "Sonnet (latest alias)",
     haikuAlias: "Haiku (latest alias)",
@@ -1307,29 +1310,11 @@ function buildUsageBackendMenuItem() {
 }
 
 // Model presets per backend, passed to the CLI as `--model` (empty = the CLI's
-// own default). Claude accepts aliases plus full names; Codex exposes the
-// current account-visible model catalog via `codex debug models`.
+// own default). Claude's list lives in claude-capabilities.js (aliases plus
+// pinned ids); Codex exposes the current account-visible model catalog via
+// `codex debug models`, so only its default entry is static.
 const MODEL_PRESETS = {
-  claude: [
-    { labelKey: "defaultClaude", value: "" },
-    { labelKey: "opusAlias", value: "opus" },
-    { labelKey: "sonnetAlias", value: "sonnet" },
-    { labelKey: "haikuAlias", value: "haiku" },
-    { type: "separator" },
-    { label: "Fable 5", value: "claude-fable-5" },
-    { type: "separator" },
-    { label: "Opus 4.8", value: "claude-opus-4-8" },
-    { label: "Opus 4.7", value: "claude-opus-4-7" },
-    { label: "Opus 4.6", value: "claude-opus-4-6" },
-    { label: "Opus 4.5 (2025-11-01)", value: "claude-opus-4-5-20251101" },
-    { label: "Opus 4.1 (2025-08-05)", value: "claude-opus-4-1-20250805" },
-    { type: "separator" },
-    { label: "Sonnet 4.6", value: "claude-sonnet-4-6" },
-    { label: "Sonnet 4.5 (2025-09-29)", value: "claude-sonnet-4-5-20250929" },
-    { label: "Sonnet 4 (2025-05-14)", value: "claude-sonnet-4-20250514" },
-    { type: "separator" },
-    { label: "Haiku 4.5 (2025-10-01)", value: "claude-haiku-4-5-20251001" }
-  ],
+  claude: CLAUDE_MODEL_PRESETS,
   codex: [
     { labelKey: "defaultCodex", value: "" }
   ]

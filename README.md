@@ -171,8 +171,8 @@ npm run dist          # 为当前机器架构构建
 
 支持的本地 CLI：
 
-- Claude Code：`claude`（含最新 Claude 模型，如 Fable 5 / Opus 4.8，
-  可在托盘 Model 菜单中选择）
+- Claude Code：`claude`（含最新 Claude 模型，如 Fable 5.1 / Opus 5.5 /
+  Sonnet 5.5，可在托盘 Model 菜单中选择）
 - Codex CLI：`codex`
 
 内置后端（普瑞赛斯本体）：

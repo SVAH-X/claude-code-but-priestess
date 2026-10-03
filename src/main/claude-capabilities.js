@@ -88,10 +88,58 @@ function claudeModeToolArgs(mode, { needsRead = false, toolsFlag = true } = {}) 
   return args;
 }
 
+// Model presets for the tray's Claude model menu, passed to the CLI as
+// `--model` (empty = the CLI/account default). Aliases always follow the
+// newest model in a family; full ids pin one. The list keeps the current
+// release plus one previous version per family and drops retired or
+// deprecated ids. A saved value that is no longer listed still shows up as
+// the "current custom" entry, so pruning never silently switches anyone.
+const CLAUDE_MODEL_PRESETS = Object.freeze([
+  { labelKey: "defaultClaude", value: "" },
+  { labelKey: "fableAlias", value: "fable" },
+  { labelKey: "opusAlias", value: "opus" },
+  { labelKey: "sonnetAlias", value: "sonnet" },
+  { labelKey: "haikuAlias", value: "haiku" },
+  { type: "separator" },
+  { label: "Fable 5.1", value: "claude-fable-5-1" },
+  { label: "Fable 5", value: "claude-fable-5" },
+  { type: "separator" },
+  { label: "Opus 5.5", value: "claude-opus-5-5" },
+  { label: "Opus 5", value: "claude-opus-5" },
+  { label: "Opus 4.8", value: "claude-opus-4-8" },
+  { type: "separator" },
+  { label: "Sonnet 5.5", value: "claude-sonnet-5-5" },
+  { label: "Sonnet 5", value: "claude-sonnet-5" },
+  { label: "Sonnet 4.6", value: "claude-sonnet-4-6" },
+  { type: "separator" },
+  { label: "Haiku 4.5", value: "claude-haiku-4-5" }
+].map((preset) => Object.freeze(preset)));
+
+// Saved `claudeModel` values rewritten on settings load. Retired ids map to
+// "" (the CLI default), which is what chat.js's invalid-model self-heal would
+// do anyway, minus the failed first turn. Dated ids that now have a dateless
+// alias for the same model map to that alias so the menu shows them checked.
+const CLAUDE_MODEL_MIGRATIONS = Object.freeze({
+  "claude-opus-4-1-20250805": "",
+  "claude-opus-4-1": "",
+  "claude-3-haiku-20240307": "",
+  "claude-haiku-4-5-20251001": "claude-haiku-4-5"
+});
+
+function migrateClaudeModel(value) {
+  const model = String(value || "").trim();
+  return Object.prototype.hasOwnProperty.call(CLAUDE_MODEL_MIGRATIONS, model)
+    ? CLAUDE_MODEL_MIGRATIONS[model]
+    : model;
+}
+
 module.exports = {
+  CLAUDE_MODEL_MIGRATIONS,
+  CLAUDE_MODEL_PRESETS,
   CLAUDE_REASONING_EFFORTS,
   CLAUDE_BUILTIN_TOOLS,
   CLAUDE_MODE_TOOLS,
+  migrateClaudeModel,
   isClaudeReasoningEffort,
   parseClaudeEffortLevels,
   claudeHelpSupportsTools,

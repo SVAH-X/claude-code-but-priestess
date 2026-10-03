@@ -267,7 +267,7 @@ connection ("Priestess herself").
 Supported local CLIs:
 
 - Claude Code: `claude` (including the latest Claude models such as
-  Fable 5 / Opus 4.8, selectable from the tray Model menu)
+  Fable 5.1 / Opus 5.5 / Sonnet 5.5, selectable from the tray Model menu)
 - Codex CLI: `codex`
 
 Built-in backend (no CLI required):
