@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-test("main chat executes a remember directive only once per turn", (t) => {
+test("main chat executes a remember directive only once per turn", { skip: (() => { try { require.resolve("electron"); return false; } catch { return true; } })() }, (t) => {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "prts-directive-test-"));
   t.after(() => fs.rmSync(userData, { recursive: true, force: true }));
 

@@ -119,7 +119,11 @@ ${isChat
     onMood: function (fn) { return onEvent("chat:mood", fn); },
     onProactive: function (fn) { return onEvent("chat:proactive", fn); },
     onQueue: function (fn) { return onEvent("chat:queue", fn); },
-    onContextAttached: function (fn) { return onEvent("chat:context-attached", fn); }
+    onContextAttached: function (fn) { return onEvent("chat:context-attached", fn); },
+    applyFix: function (filePath, newCode, lineStart) {
+      vscode.postMessage({ type: "fix:apply", filePath: filePath, newCode: newCode, lineStart: lineStart || 0 });
+      return Promise.resolve({ ok: true });
+    }
   };
 `
   : `

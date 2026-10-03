@@ -27,6 +27,7 @@ let vscodeWorkspace = null;
 let latestDiagnostics = null;
 let latestContext = null;
 const recentActivities = []; // ring buffer, max 30
+let latestTerminalEvent = null; // most recent build/test result
 
 function generateToken() {
   return crypto.randomBytes(16).toString("hex");
@@ -119,6 +120,15 @@ function handleInbound(ws, raw) {
   const reqId = msg.reqId;
 
   switch (type) {
+    // Inline completion — lightweight, no history side effects.
+    case "chat:inline-complete":
+      vscodeChat.complete(msg.prefix, msg.file, msg.language).then((text) => {
+        if (reqId) sendTo(ws, { type: "chat:inline-complete:result", reqId, text });
+      }).catch(() => {
+        if (reqId) sendTo(ws, { type: "chat:inline-complete:result", reqId, text: null });
+      });
+      break;
+
     // VS Code chat — routed to vscode-chat.js (independent session)
     case "chat:send": {
       const result = vscodeChat.send(msg.text, msg.context || null);
@@ -160,6 +170,11 @@ function handleInbound(ws, raw) {
       if (msg.activity && typeof msg.activity.kind === "string") {
         recentActivities.push(msg.activity);
         if (recentActivities.length > 30) recentActivities.shift();
+      }
+      break;
+    case "vscode:terminal-event":
+      if (msg && msg.kind) {
+        latestTerminalEvent = msg;
       }
       break;
     case "chat:cancel":
@@ -383,4 +398,5 @@ module.exports = {
   getLatestDiagnostics: () => latestDiagnostics,
   getLatestContext: () => latestContext,
   getRecentActivities: () => recentActivities.slice(),
+  getLatestTerminalEvent: () => latestTerminalEvent,
 };

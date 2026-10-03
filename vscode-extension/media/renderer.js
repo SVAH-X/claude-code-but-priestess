@@ -1235,7 +1235,10 @@ function renderMarkdown(input) {
   src = src.replace(/\fCB(\d+)\f/g, (_, idx) => {
     const { lang, code } = codeBlocks[Number(idx)];
     const langClass = lang ? ` class="lang-${escapeHtml(lang)}"` : "";
-    return `<pre><code${langClass}>${escapeHtml(code)}</code></pre>`;
+    const applyBtn = lastAppliedFilePath
+      ? `<button class="apply-fix-btn" data-code="${escapeHtml(code)}" data-lang="${escapeHtml(lang || '')}">Apply</button>`
+      : "";
+    return `<div class="code-block-wrapper"><pre><code${langClass}>${escapeHtml(code)}</code></pre>${applyBtn}</div>`;
   });
   return src;
 }
@@ -1430,6 +1433,8 @@ function buildMsgEl(msg) {
       badge.textContent = label;
       badge.title = ctx.activeFile;
       el.append(badge);
+      // Track the active file for Apply buttons on assistant code blocks.
+      lastAppliedFilePath = ctx.activeFile;
     }
   } else if (msg.role === "assistant") {
     const isStreaming = chatRunning && msg.id === currentAssistantId;
@@ -1643,6 +1648,7 @@ function renderHistory(history) {
     empty.textContent = t("chat_empty_hint");
     chatStream.append(empty);
     currentAssistantId = null;
+    lastAppliedFilePath = null;
     checkAndUpdateHtmlPreview();
     return;
   }
@@ -1931,10 +1937,10 @@ window.addEventListener("dragleave", (event) => {
   if (event.relatedTarget === null) document.body.classList.remove("file-dragging");
 });
 window.addEventListener("drop", (event) => {
+  event.preventDefault();
   document.body.classList.remove("file-dragging");
   const dropped = event.dataTransfer?.files;
   if (!dropped || dropped.length === 0) return;
-  event.preventDefault();
   const paths = [];
   for (const file of dropped) {
     const p = window.chatApi?.getPathForFile?.(file);
@@ -2080,6 +2086,7 @@ const versionBadge = document.getElementById("versionBadge");
 
 let queueLength = 0;
 let lastSettingsPayload = null;
+let lastAppliedFilePath = null; // set from context badge for Apply button target
 
 function refreshComposerMeta() {
   const payload = lastSettingsPayload;
@@ -2174,6 +2181,16 @@ window.addEventListener("keydown", notePopoverActivity, { passive: true });
 // ============================================================
 stage.addEventListener("click", handleStageClick);
 
+// Apply fix button delegation — code blocks in assistant messages may have an Apply button.
+chatStream.addEventListener("click", (event) => {
+  const btn = event.target.closest?.(".apply-fix-btn");
+  if (!btn || !lastAppliedFilePath) return;
+  const code = btn.dataset.code;
+  if (code && window.chatApi?.applyFix) {
+    window.chatApi.applyFix(lastAppliedFilePath, code, 0);
+  }
+});
+
 // ============================================================
 //  HTML Preview Panel — divider drag + button handlers.
 // ============================================================
@@ -2237,8 +2254,10 @@ openInBrowserBtn.addEventListener("click", async () => {
 //  Boot
 // ============================================================
 window.addEventListener("resize", resizeCanvas);
+let stageResizeObserver = null;
 if (typeof ResizeObserver !== "undefined") {
-  new ResizeObserver(() => resizeCanvas()).observe(stage);
+  stageResizeObserver = new ResizeObserver(() => resizeCanvas());
+  stageResizeObserver.observe(stage);
 }
 
 // Settings decide which outfit to load, so fetch them before the first frame

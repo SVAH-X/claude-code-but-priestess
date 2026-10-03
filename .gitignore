@@ -6,6 +6,7 @@ dist/
 # Local archives (e.g. zipping the repo to move it to another machine).
 *.7z
 CLAUDE.md
+AGENTS.md
 
 # Built from the checked-in Windows UI Automation helper source.
 src/native/windows/NeteaseController.exe
@@ -14,5 +15,8 @@ src/native/windows/NeteaseController.pdb
 # VS Code extension build output
 vscode-extension/out/
 vscode-extension/.vscode-test/
+
+# VS Code extension test artifacts (downloaded VS Code instance)
+
 *.vsix
 GPT-SoVITS-v2pro-20250604/
