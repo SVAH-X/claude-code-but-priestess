@@ -44,6 +44,15 @@ jobs:
       - name: Check packaged assets
         run: node scripts/check-packaged-assets.js dist/win-unpacked/resources/app.asar
 
+      - name: Check NetEase helper is packaged
+        shell: bash
+        run: |
+          HELPER=dist/win-unpacked/resources/app.asar.unpacked/src/native/windows/NeteaseController.exe
+          if [ ! -f "$HELPER" ]; then
+            echo "NetEase helper missing from the packaged app: $HELPER"
+            exit 1
+          fi
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:

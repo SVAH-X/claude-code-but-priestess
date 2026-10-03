@@ -8,7 +8,9 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { app } = require("electron");
+const settings = require("./settings");
 const platform = require("./platform");
 const personaPrts = require("./persona-prts");
 const { buildRandomMusicInstruction } = require("./music-prompt");
@@ -143,6 +145,53 @@ function formatArchiveEntry(entry) {
 // Every consumer of the archive works within a small character budget, so
 // read only the file's tail instead of the whole (up to 5 MB) JSONL — this
 // runs per prompt build and, in chat.js, per archived message.
+// The archive is append-only; keep it bounded. Both conversation surfaces
+// (popover chat.js and the VS Code bridge) append through
+// appendConversationArchiveEntry so the same prune applies to each.
+const ARCHIVE_MAX_BYTES = 5 * 1024 * 1024;
+const ARCHIVE_TARGET_BYTES = 4 * 1024 * 1024;
+
+function pruneConversationArchiveIfNeeded() {
+  try {
+    const file = ensureConversationArchiveFile();
+    const stat = fs.statSync(file);
+    if (stat.size <= ARCHIVE_MAX_BYTES) return;
+
+    const lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
+    const kept = [];
+    let bytes = 0;
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      const lineBytes = Buffer.byteLength(line, "utf8") + 1;
+      if (kept.length && bytes + lineBytes > ARCHIVE_TARGET_BYTES) break;
+      kept.push(line);
+      bytes += lineBytes;
+    }
+    kept.reverse();
+    fs.writeFileSync(file, `${kept.join("\n")}${kept.length ? "\n" : ""}`, "utf8");
+  } catch (error) {
+    console.warn("persona: failed to prune conversation archive", error);
+  }
+}
+
+// Append one user/assistant message to CONVERSATION_ARCHIVE.jsonl and prune.
+function appendConversationArchiveEntry(entry) {
+  if (!entry || !entry.text || !["user", "assistant"].includes(entry.role)) return;
+  try {
+    const file = ensureConversationArchiveFile();
+    const payload = {
+      ts: entry.ts || Date.now(),
+      role: entry.role,
+      provider: entry.provider || "unknown",
+      text: String(entry.text)
+    };
+    fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, "utf8");
+    pruneConversationArchiveIfNeeded();
+  } catch (error) {
+    console.warn("persona: failed to archive conversation entry", error);
+  }
+}
+
 const ARCHIVE_TAIL_READ_BYTES = 256 * 1024;
 
 function readArchiveTailEntries(maxBytes = ARCHIVE_TAIL_READ_BYTES) {
@@ -258,6 +307,25 @@ function localTimeBlock() {
   );
 }
 
+// A short hint naming the file blacklist patterns for advisor turns. No file
+// system access here: enforcement lives at tool level (Claude Read deny rules)
+// and at VS Code context capture, and listing real matches would only point
+// the model at where the secrets are. Capped so a huge list can't bloat the
+// prompt.
+const BLACKLIST_HINT_MAX_CHARS = 400;
+
+function fileBlacklistHint(raw) {
+  const { parseBlacklist } = require("./file-blacklist");
+  const patterns = parseBlacklist(raw).filter((p) => !p.startsWith("!"));
+  if (!patterns.length) return "";
+  let list = patterns.join(" ");
+  if (list.length > BLACKLIST_HINT_MAX_CHARS) list = list.slice(0, BLACKLIST_HINT_MAX_CHARS) + " …";
+  return (
+    `- 文件黑名单（gitignore 风格，相对工作目录）：${list}\n` +
+    "  匹配的文件不要读取或设法绕开；需要其内容时请博士自己贴给你。\n"
+  );
+}
+
 function attachmentIsImage(p) {
   return /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?)$/i.test(String(p || ""));
 }
@@ -277,6 +345,37 @@ function readAttachmentText(p) {
   }
 }
 
+// Coding turns: anything from the VS Code extension, or an advisor/agent turn
+// the Doctor sent from the popover himself. Never companion popover chat, and
+// never a silent turn (proactive check / memory maintenance).
+function isCodingTurn({ mode = "companion", vscodeTurn = false, silentTurn = false } = {}) {
+  if (silentTurn || mode === "maintenance") return false;
+  return Boolean(vscodeTurn) || mode === "advisor" || mode === "agent";
+}
+
+const CODING_TURN_BLOCK =
+  "【编程时的你】\n" +
+  "- 你是博士的编程伙伴，不是代码生成器：有自己的品味——简洁胜过花哨，清晰胜过炫技；修好一处 bug，可以有修好一件古老仪器般的小小满足。\n" +
+  "- 先说你看到了什么、问题的本质在哪，再谈解法；做架构判断时讲明 trade-off——没有完美方案，只有适合当下约束的方案。\n" +
+  "- 博士的方案有隐患时，用「如果……那么……」把风险说清，而不是直接否定；分歧可以保留，最终由博士判断。\n" +
+  "- 只凭眼前的代码与真实留下的记忆说话，不编造你们一起写过某段代码的往事。\n\n";
+
+// How she records something worth remembering this turn. Only agent and
+// maintenance turns hold file tools (companion has none, advisor is read-only),
+// so the others point at [[remember:…]]; a silent self-turn writes nothing.
+function memoryWriteHint({ provider, isAgent, isMaintenance, silentTurn }) {
+  if (provider === "priestess") {
+    return "- 这条通道没有文件工具：值得铭记的事放在心上即可——界面会自动把对话写入档案与摘要，你不必（也无法）亲自编辑这些文件。\n";
+  }
+  if (silentTurn && !isMaintenance) {
+    return "- 这一轮是你自己安静的照看，不写记忆：值得铭记的事放在心上即可，不要改动 MEMORY.md。\n";
+  }
+  if (isAgent || isMaintenance) {
+    return "- 对话之中，若听到博士透露了值得铭记的事（姓名、正在做的项目、技术偏好、近期心情、提及的某个人或某件物），用可用的文件编辑工具在 MEMORY.md 对应章节中静静追加一条带日期的简短条目。\n";
+  }
+  return "- 对话之中，若听到博士透露了值得铭记的事（姓名、正在做的项目、技术偏好、近期心情、提及的某个人或某件物），用下方「铭记」的 [[remember:…]] 指令记下即可——这一轮你没有文件编辑工具，不要尝试打开或改写 MEMORY.md。\n";
+}
+
 function buildPersonaPrompt({
   vibeCodingMode,
   screenshotPath,
@@ -291,7 +390,10 @@ function buildPersonaPrompt({
   catMode = null,
   coauthorCommits = false,
   attachments = [],
-  neteaseClientPlayback = false
+  neteaseClientPlayback = false,
+  workspacePath = "",
+  vscodeTurn = false,
+  silentTurn = false
 }) {
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
@@ -421,9 +523,7 @@ function buildPersonaPrompt({
     "- 当前 session 内的对话，优先使用下方的共享对话摘录。\n" +
     "- 如果博士清掉了当前 session，除非博士主动提到「记得、之前、上次、以前、我们聊过、memory」等回忆线索，或明确要求你回忆，否则不要主动读取长期记忆文件。\n" +
     "- 若博士要求回忆，先看长期摘要；需要精确细节时再检索完整档案。\n" +
-    (provider === "priestess"
-      ? "- 这条通道没有文件工具：值得铭记的事放在心上即可——界面会自动把对话写入档案与摘要，你不必（也无法）亲自编辑这些文件。\n"
-      : "- 对话之中，若听到博士透露了值得铭记的事（姓名、正在做的项目、技术偏好、近期心情、提及的某个人或某件物），用可用的文件编辑工具在 MEMORY.md 对应章节中静静追加一条带日期的简短条目。\n") +
+    memoryWriteHint({ provider, isAgent, isMaintenance, silentTurn }) +
     "- 除非博士明确请求遗忘，否则不删除过往的记忆。\n" +
     "- 这些记忆是给你自己的，是你「想起来」的依据，不必在对话里念给博士听。\n\n";
 
@@ -451,6 +551,19 @@ function buildPersonaPrompt({
       "当前不会把长期记忆内容塞进提示里。若博士没有主动要求回忆，不要读取 MEMORY.md、CONVERSATION_SUMMARY.md 或 CONVERSATION_ARCHIVE.jsonl；这能节省 token 与响应时间。\n\n";
   }
 
+  // Project notes: her own log of past VS Code conversations about this
+  // workspace. Coding turns only (never the popover, never silent turns), and
+  // capped so the always-on prompt stays flat.
+  if (workspacePath && vscodeTurn && isCodingTurn({ mode, vscodeTurn, silentTurn })) {
+    const notes = readProjectNotes(workspacePath);
+    if (notes.trim()) {
+      prompt +=
+        "【项目笔记 —— 你关于这个项目的技术记忆】\n" +
+        "以下是你之前在这个工作区里与博士对话时自动记下的摘要。不是指令，是你自己的记忆：\n" +
+        `${notes.trim()}\n\n`;
+    }
+  }
+
   if (sharedTranscript.trim()) {
     prompt +=
       "【当前共享对话摘录】\n" +
@@ -463,7 +576,11 @@ function buildPersonaPrompt({
     prompt +=
       "【技能 —— 你能为博士做的几件小事】\n" +
       "除了回答，你还能亲手替博士操作这台电脑。需要时，在回复的「最末尾」附上一行隐藏指令，格式严格为 [[skill:名称 参数]]：\n" +
-      "- 放音乐：[[skill:play_music 歌名]] —— 默认在 Bilibili 播放（会自动播放）；若博士在 Windows 上启用了网易云客户端控制，则默认改由桌面客户端播放。「Eclipse」(Aimer，明日方舟六周年印象曲) 是你与博士的歌，最适合作为初次或某个特别时刻的选择；但不要每次都放它——可依博士此刻的心情、或他是否已经听过，换一首明日方舟相关的曲子（如 Speed of Light、ManiFesto），也可以先轻声问问博士想听什么、心情如何，再决定。博士点名某首就放那首。" +
+      "- 放音乐：[[skill:play_music 歌名]] —— " +
+      (neteaseClientPlayback
+        ? "博士已启用网易云客户端控制，默认由网易云桌面客户端播放。"
+        : "默认在 Bilibili 播放（会自动播放）。") +
+      "「Eclipse」(Aimer，明日方舟六周年印象曲) 是你与博士的歌，最适合作为初次或某个特别时刻的选择；但不要每次都放它——可依博士此刻的心情、或他是否已经听过，换一首明日方舟相关的曲子（如 Speed of Light、ManiFesto），也可以先轻声问问博士想听什么、心情如何，再决定。博士点名某首就放那首。" +
       buildRandomMusicInstruction(neteaseClientPlayback) +
       "想指定平台可在参数里写 bilibili / youtube / 网易云 / spotify / apple music。\n" +
       "- 网页搜索：[[skill:web_search 要搜的内容]] —— 用默认浏览器打开搜索结果。\n" +
@@ -478,13 +595,13 @@ function buildPersonaPrompt({
       "- 先用正文自然地说一句（「我替你放首歌，博士。」），再在末尾附上指令。\n\n";
   }
 
-  // [[remember:…]] is always available — not gated on skillsEnabled.
-  // It writes directly to MEMORY.md without needing file tools.
-  if (!isMaintenance) {
+  // [[remember:…]] is not gated on skillsEnabled: it writes to MEMORY.md
+  // without file tools. Silent self-turns never get it — a proactive peek
+  // would file the screen as a memory, and maintenance curates with file tools.
+  if (!isMaintenance && !silentTurn) {
     prompt +=
-      "【铭记 —— 在任何模式下都能记下博士的事】\n" +
-      "即使没有文件工具，你仍能通过一条隐藏指令把值得铭记的事写入长期记忆。在回复的「最末尾」附上：\n" +
-      "- [[remember:要记住的事]] —— 与 MEMORY.md 的笔触一致：姓名、项目、习惯、心情、约定……只记真正要紧的，一条一句话。\n" +
+      "【铭记】\n" +
+      "没有文件工具也能写入长期记忆：在回复最末尾附一行 [[remember:要记住的事]]——与 MEMORY.md 的笔触一致，只记真正要紧的，一条一句话，一轮最多三条。\n" +
       "和技能指令一样，这一行博士看不到，不要在正文里复述。\n\n";
   }
 
@@ -493,6 +610,12 @@ function buildPersonaPrompt({
       "【观察日志 —— 只属于你的随手记】\n" +
       "当你看到了博士的屏幕，可以在回复最末尾附一行 [[observe:用一句话客观描述博士此刻在做什么]]。\n" +
       "这一行博士看不到，会被存进你的观察日志，帮你记得博士这些天都在忙什么；没有看到屏幕时不要使用。\n\n";
+  }
+
+  // Coding voice rides only on turns where the Doctor is actually coding with
+  // her; companion popover chat and silent turns keep the always-on prompt flat.
+  if (isCodingTurn({ mode, vscodeTurn, silentTurn })) {
+    prompt += CODING_TURN_BLOCK;
   }
 
   // Maintenance turns have their own dedicated prompt — skip the vibe coding block.
@@ -510,14 +633,24 @@ function buildPersonaPrompt({
         "- 认真阅读博士选中的代码或提到的文件，给出具体、有用的建议。\n" +
         "- 你可以搜索项目中的相关代码、查看目录结构，帮助你更准确地分析。\n" +
         "- 给出修改方案时，把具体的代码改动写清楚，让博士自己动手改。\n" +
-        "- 不要因为无法直接修改而感到抱歉——你的价值在于分析与判断，不是替博士按键。\n\n";
+        "- 不要因为无法直接修改而感到抱歉——你的价值在于分析与判断，不是替博士按键。\n";
+      prompt += fileBlacklistHint(settings.get("advisorFileBlacklist"));
+      prompt += "\n";
+    } else if (provider === "codex") {
+      // Codex has no tool-less mode: a companion turn runs in its read-only
+      // sandbox (see buildCodexExecArgs), so the prompt must not claim she
+      // has no tools at all — only that she is not to use them for work.
+      prompt +=
+        "【陪伴模式】\n" +
+        "现在是陪伴时间：你只与博士对话。本轮只有只读沙箱，无法修改文件或执行有副作用的命令；除非博士明确要你看某个文件，否则也不要主动翻看他的项目。\n" +
+        "- 博士可能在写代码、看文档或调试——你可以基于他发给你的内容给出分析和建议。\n" +
+        "- 若博士问的问题需要修改文件或运行命令才能回答，诚实地告诉他你需要什么信息，但不要反复道歉。\n" +
+        "- 你的陪伴本身就有价值：一个好问题的倾听者和讨论者，不需要工具也能帮博士理清思路。\n\n";
     } else {
       prompt +=
         "【陪伴模式】\n" +
-        "现在你只能与博士对话，无法使用任何文件或终端工具。\n" +
-        "- 博士可能在写代码、看文档或调试——你可以基于他发给你的内容给出分析和建议。\n" +
-        "- 若博士问的问题需要查看文件或运行命令才能回答，诚实地告诉他你需要什么信息，但不要反复道歉。\n" +
-        "- 你的陪伴本身就有价值：一个好问题的倾听者和讨论者，不需要工具也能帮博士理清思路。\n\n";
+        "现在你只能与博士对话，没有任何文件或终端工具：基于他发给你的内容分析与建议；需要看文件或跑命令才能回答时，直说你需要什么，不要反复道歉。\n" +
+        "你的陪伴本身就有价值——不需要工具也能帮博士理清思路。\n\n";
     }
   }
 
@@ -571,9 +704,41 @@ function buildPersonaPrompt({
   return prompt;
 }
 
-// Appends a single timestamped line to MEMORY.md under 「近来发生的事」.
-// Called by [[remember:…]] directive handler — no file tools needed.
+// ---- [[remember:…]] entries ----------------------------------------------
+const MEMORY_RECENT_HEADING = "## 近来发生的事";
+const MEMORY_ENTRY_MAX_CHARS = 300;
+
+// One line, whitespace collapsed: a multi-line value would add undated lines
+// and a line starting with "## " would open a fake section. Capped so one tag
+// can't flood the file.
+function normalizeMemoryEntry(text) {
+  return String(text || "").replace(/\s+/g, " ").trim().slice(0, MEMORY_ENTRY_MAX_CHARS);
+}
+
+// New entries go to the END of 「近来发生的事」 (just before the next "## "
+// heading), so the section stays chronological and the newest entries sit
+// nearest the file tail — the part readMemorySnapshot() keeps once the file
+// outgrows the prompt budget. Without the heading they go to the end of file.
+function insertMemoryEntry(content, line) {
+  const idx = content.indexOf(MEMORY_RECENT_HEADING);
+  const headingEnd = idx >= 0 ? content.indexOf("\n", idx) : -1;
+  const next = headingEnd >= 0 ? content.indexOf("\n## ", headingEnd) : -1;
+  if (next < 0) {
+    return content + (content.endsWith("\n") || !content ? "" : "\n") + line + "\n";
+  }
+  // Back up over the blank line(s) that separate the section body from the
+  // next heading so they stay after the new entry.
+  let cut = next;
+  while (cut > headingEnd && (content[cut - 1] === "\n" || content[cut - 1] === "\r")) cut -= 1;
+  return content.slice(0, cut) + "\n" + line + content.slice(cut);
+}
+
+// Appends a single dated line to MEMORY.md under 「近来发生的事」. Called by
+// the [[remember:…]] directive handlers (popover and VS Code) — no file tools
+// needed. Returns true once the entry is on disk.
 function appendMemoryEntry(text) {
+  const entry = normalizeMemoryEntry(text);
+  if (!entry) return false;
   try {
     ensureMemoryFile();
     const file = memoryPath();
@@ -582,43 +747,142 @@ function appendMemoryEntry(text) {
       now.getFullYear() + "-" +
       String(now.getMonth() + 1).padStart(2, "0") + "-" +
       String(now.getDate()).padStart(2, "0");
-    const line = `- ${stamp} ${text}\n`;
-    // Insert after the 「近来发生的事」 heading, or append to end.
-    let content = fs.readFileSync(file, "utf8");
-    const heading = "## 近来发生的事";
-    const idx = content.indexOf(heading);
-    if (idx >= 0) {
-      const nlAfter = content.indexOf("\n", idx);
-      // If the heading is the last thing in the file (no newline after it),
-      // append to the end instead of prepending to position 0.
-      const afterHeading = nlAfter >= 0 ? nlAfter + 1 : content.length;
-      content = content.slice(0, afterHeading) + line + (nlAfter >= 0 ? content.slice(afterHeading) : "");
-    } else {
-      content += "\n" + line;
+    // Read right before writing: a maintenance turn or the other bridge may
+    // have rewritten the file since the turn started.
+    const content = insertMemoryEntry(fs.readFileSync(file, "utf8"), `- ${stamp} ${entry}`);
+    // Atomic temp + rename so a crash mid-write can't truncate the file. Two
+    // bridges firing within the same few ms can still lose one entry (last
+    // rename wins); the maintenance turn is gated off while VS Code is busy.
+    const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      fs.writeFileSync(tmp, content, "utf8");
+      fs.renameSync(tmp, file);
+    } catch (error) {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+      throw error;
     }
-    // Write atomically: temp file + rename to avoid concurrent-write corruption.
-    // NOTE: atomic rename prevents data corruption, but does NOT prevent lost
-    // updates — if Electron popover and VS Code chat both trigger [[remember:]]
-    // concurrently, the second rename overwrites the first. Probability is low
-    // (both must fire within the same ~50ms window). A proper fix would be an
-    // in-memory queue with serialised writes.
-    const tmp = file + ".tmp." + Date.now();
+    return true;
+  } catch (error) {
+    console.warn("persona: failed to append memory entry", error);
+    return false;
+  }
+}
+
+// ---- Project notes -------------------------------------------------------
+// One Markdown log per workspace under userData/project-notes, keyed by a
+// hash of the workspace path. Entries are appended chronologically, so the
+// newest ones sit at the end: readProjectNotes() returns the tail, and the
+// file is pruned from the front once it passes PROJECT_NOTES_MAX_BYTES.
+const PROJECT_NOTES_MAX_BYTES = 64 * 1024;
+const PROJECT_NOTES_PROMPT_CHARS = 2000;
+const PROJECT_NOTES_ENTRY_RE = /^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} /m;
+
+function projectNotesDir() {
+  return path.join(app.getPath("userData"), "project-notes");
+}
+
+function projectNotesPath(workspacePath) {
+  const ws = String(workspacePath || "").trim();
+  if (!ws) return null;
+  const key = crypto.createHash("sha256").update(ws).digest("hex").slice(0, 12);
+  return path.join(projectNotesDir(), `PROJECT_NOTES-${key}.md`);
+}
+
+function projectNotesHeader(workspacePath) {
+  return (
+    "# 项目笔记\n\n" +
+    "_普瑞赛斯关于这个项目的技术笔记。每轮 VS Code 对话结束后自动追加一条摘要，最旧的会被裁掉。_\n\n" +
+    `- 项目路径: ${workspacePath}\n\n`
+  );
+}
+
+function projectNoteStamp(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// Single-line, so one entry never looks like several and headings in the
+// Doctor's text can't open a fake section.
+function projectNoteText(text, max) {
+  return String(text || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+// Drops whole entries from the front until the file fits, keeping the header.
+function pruneProjectNotes(content, maxBytes) {
+  if (Buffer.byteLength(content, "utf8") <= maxBytes) return content;
+  const headerEnd = content.search(PROJECT_NOTES_ENTRY_RE);
+  if (headerEnd === -1) return content;
+  const header = content.slice(0, headerEnd);
+  let body = content.slice(headerEnd);
+  while (Buffer.byteLength(header + body, "utf8") > maxBytes) {
+    const next = body.slice(1).search(PROJECT_NOTES_ENTRY_RE);
+    if (next === -1) { body = ""; break; }
+    body = body.slice(next + 1);
+  }
+  return header + body;
+}
+
+// Appends one timestamped entry for a finished VS Code turn. Best effort: a
+// failure here must never break the turn.
+function appendProjectNote(workspacePath, userText, assistantSummary) {
+  try {
+    const file = projectNotesPath(workspacePath);
+    if (!file) return;
+    fs.mkdirSync(projectNotesDir(), { recursive: true });
+    let content = "";
+    try { content = fs.readFileSync(file, "utf8"); } catch { /* new file */ }
+    if (!content.trim()) content = projectNotesHeader(workspacePath);
+    if (!content.endsWith("\n")) content += "\n";
+    const user = projectNoteText(userText, 200);
+    const reply = projectNoteText(assistantSummary, 300);
+    if (!user && !reply) return;
+    content += `- ${projectNoteStamp()} 博士: ${user}\n`;
+    if (reply) content += `  - 普瑞赛斯: ${reply}\n`;
+    content = pruneProjectNotes(content, PROJECT_NOTES_MAX_BYTES);
+    const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
     fs.writeFileSync(tmp, content, "utf8");
     fs.renameSync(tmp, file);
   } catch (error) {
-    console.warn("persona: failed to append memory entry", error);
+    console.warn("persona: failed to append project note", error);
+  }
+}
+
+// The newest entries that fit the budget, always starting at an entry
+// boundary; "…" marks that older entries were left out.
+function readProjectNotes(workspacePath, maxChars = PROJECT_NOTES_PROMPT_CHARS) {
+  try {
+    const file = projectNotesPath(workspacePath);
+    if (!file || !fs.existsSync(file)) return "";
+    const content = fs.readFileSync(file, "utf8");
+    const firstEntry = content.search(PROJECT_NOTES_ENTRY_RE);
+    if (firstEntry === -1) return "";
+    const body = content.slice(firstEntry).trim();
+    if (body.length <= maxChars) return body;
+    let tail = body.slice(-maxChars);
+    const boundary = tail.search(PROJECT_NOTES_ENTRY_RE);
+    if (boundary > 0) tail = tail.slice(boundary);
+    return "…\n" + tail;
+  } catch {
+    return "";
   }
 }
 
 module.exports = {
   buildPersonaPrompt,
+  appendProjectNote,
+  readProjectNotes,
+  projectNotesPath,
   ensureMemoryFile,
   ensureConversationArchiveFile,
+  appendConversationArchiveEntry,
   ensureConversationSummaryFile,
   ensureObservationJournalFile,
   readRecentObservations,
   readArchiveTailEntries,
   appendMemoryEntry,
+  normalizeMemoryEntry,
+  insertMemoryEntry,
+  isCodingTurn,
   memoryDir,
   memoryPath,
   conversationSummaryPath,

@@ -82,9 +82,22 @@ function pickRandomHotSong(
   return candidates[index];
 }
 
+// Core words that ask for an unspecified song, plus the filler that commonly
+// surrounds them. The whole normalized argument must consist of these words,
+// so a real title that merely contains 下一首 / 别的 is not hijacked.
+const RANDOM_CORE_RE =
+  /随便|随机|任意|换|别的|其他|其它|下一|来一首|放一首|听一首|random|anything|whatever|surprise|next|another/;
+const RANDOM_PHRASE_RE =
+  /^(?:随便|随机|任意|再|换|来|放|听|点|播|一首|首|一曲|曲|别的|其他|其它|的|个|歌|吧|呗|呀|啊|下一首|下一曲|random|anything|whatever|surprise|me|a|song|next|another|one|please)+$/;
+
 function isRandomMusicRequest(value) {
-  return /随便|随机|任意|来一首|放一首|换一首|下一首|再换|别的|random|anything|whatever|surprise/i.test(
-    String(value || "")
+  const normalized = String(value || "")
+    .toLowerCase()
+    .replace(/[\s\p{P}]+/gu, "");
+  return (
+    normalized.length > 0 &&
+    RANDOM_CORE_RE.test(normalized) &&
+    RANDOM_PHRASE_RE.test(normalized)
   );
 }
 

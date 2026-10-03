@@ -8,7 +8,7 @@
     "build:win-helper": "node scripts/build-windows-helper.js",
     "dev": "npm run build:win-helper && node scripts/run-electron.js",
     "start": "npm run build:win-helper && node scripts/run-electron.js",
-    "test": "node --test test/*.test.js",
+    "test": "node scripts/run-tests.js",
     "pack": "npm run build:win-helper && electron-builder --dir",
     "dist": "npm run build:win-helper && electron-builder",
     "dist:mac": "electron-builder --mac",

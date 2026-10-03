@@ -1,0 +1,88 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: CI
+
+# The maintainer develops on macOS; this matrix is how Windows (and Linux)
+# behaviour gets exercised on every push and pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # Let every OS finish so a Windows-only failure is not hidden behind
+      # a cancelled job.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: [20, 22]
+    defaults:
+      run:
+        # Git Bash on Windows. `npm test` itself still runs its script through
+        # cmd.exe there, exactly as on a Windows developer machine.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            vscode-extension/package-lock.json
+
+      # --ignore-scripts: the tests only need electron to be resolvable (they
+      # stub it), not its ~100MB binary download or any other install step.
+      - name: Install dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund --prefix vscode-extension
+
+      - name: Syntax check (JavaScript)
+        run: |
+          for f in src/main/*.js src/renderer/renderer.js scripts/*.js; do
+            node --check "$f" || { echo "FAIL: $f"; exit 1; }
+          done
+          echo "All JS syntax checks passed"
+
+      - name: Tests (node --test)
+        run: npm test
+
+      - name: VS Code extension typecheck + unit tests
+        working-directory: vscode-extension
+        run: npm run test:unit
+
+      # Launches a real VS Code instance headlessly (xvfb) and downloads VS Code
+      # on first run, so it runs once rather than on every matrix cell.
+      - name: VS Code extension integration tests
+        if: runner.os == 'Linux' && matrix.node-version == 22
+        working-directory: vscode-extension
+        run: xvfb-run -a npm run test:integration
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check required asset files
+        run: node scripts/check-assets.js

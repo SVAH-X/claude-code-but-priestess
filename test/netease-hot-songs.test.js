@@ -81,8 +81,14 @@ test("detects explicit random music requests without treating an empty arg as ra
   assert.equal(isRandomMusicRequest("再换一首"), true);
   assert.equal(isRandomMusicRequest("下一首别的"), true);
   assert.equal(isRandomMusicRequest("surprise me"), true);
+  assert.equal(isRandomMusicRequest("来首别的"), true);
+  assert.equal(isRandomMusicRequest("随机"), true);
   assert.equal(isRandomMusicRequest("Eclipse"), false);
   assert.equal(isRandomMusicRequest(""), false);
+  // Titles that merely contain a random-request word must not be hijacked.
+  assert.equal(isRandomMusicRequest("下一首天亮"), false);
+  assert.equal(isRandomMusicRequest("别的爱情故事"), false);
+  assert.equal(isRandomMusicRequest("Whatever It Takes"), false);
 });
 
 test("Monster Siren searches are constrained to the correct NetEase artist", () => {

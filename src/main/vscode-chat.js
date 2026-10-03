@@ -19,8 +19,8 @@ const chat = require("./chat");
 const persona = require("./persona");
 const settings = require("./settings");
 const skills = require("./skills");
-const { spawnCli } = require("./cli-spawn");
-const { normalizeCwd } = require("./chat-runtime");
+const { spawnCli, killProcessTree } = require("./cli-spawn");
+const { normalizeCwd, buildCodexExecArgs, codexSessionIdFromEvent } = require("./chat-runtime");
 const { cleanDirectiveText, consumeDirectiveChunk } = require("./directive-stream");
 const {
   classifyCodexRejection,
@@ -35,6 +35,7 @@ const {
 let history = [];
 let subscribers = [];
 let currentProcess = null;
+let currentInvocation = null;
 let currentProvider = null;
 let messageIdCounter = 0;
 let midTurn = false;
@@ -75,6 +76,11 @@ function saveConversation() {
 }
 
 function loadConversation() {
+  // A restore mid-turn would swap the history array out from under the running
+  // reply (finalizeAssistant looks its entry up by id there), so the answer
+  // would be lost for good. The running turn keeps its history; the client
+  // already gets the current one back.
+  if (midTurn || currentProcess) return false;
   try {
     const raw = fs.readFileSync(conversationPath(), "utf8");
     const data = JSON.parse(raw);
@@ -122,12 +128,9 @@ function pushUser(text, context) {
   history.push(entry);
   emit({ kind: "history", history: history.slice() });
   saveConversation();
-  // Archive to shared memory so the doctor's words aren't lost.
-  try {
-    persona.ensureConversationArchiveFile();
-    const line = JSON.stringify({ role: "user", text, ts: Date.now(), provider: currentProvider });
-    fs.appendFileSync(persona.conversationArchivePath(), line + "\n", "utf8");
-  } catch (_) { /* best effort */ }
+  // Archive to shared memory so the doctor's words aren't lost (same append
+  // + size prune as the popover).
+  persona.appendConversationArchiveEntry({ role: "user", text, ts: entry.ts, provider: currentProvider });
   return entry;
 }
 
@@ -153,6 +156,9 @@ function beginAssistant() {
     text: "",
     ts: Date.now(),
   });
+  // The webview only applies chunks to a message it already has: publish the
+  // placeholder before the first chunk (mirrors chat.js emitHistory()).
+  emit({ kind: "history", history: history.slice() });
 }
 
 function appendAssistant(raw) {
@@ -174,6 +180,8 @@ function appendAssistant(raw) {
 const skillExecutedThisTurn = new Set();
 let lastEmittedMood = null;
 const rememberedThisTurn = new Set();
+// Same per-turn cap as the popover (chat.js REMEMBER_MAX_PER_TURN).
+const REMEMBER_MAX_PER_TURN = 3;
 
 // Simple mood aliases matching chat.js normalizeMood behaviour.
 function normalizeMood(raw) {
@@ -196,7 +204,7 @@ function handleVscodeDirective(directive) {
 
   if (directive.type === "remember") {
     const text = String(directive.value || "").trim();
-    if (text && !rememberedThisTurn.has(text)) {
+    if (text && rememberedThisTurn.size < REMEMBER_MAX_PER_TURN && !rememberedThisTurn.has(text)) {
       rememberedThisTurn.add(text);
       persona.appendMemoryEntry(text);
     }
@@ -239,15 +247,19 @@ function finalizeAssistant() {
 
   // Archive to shared memory
   if (clean) {
+    persona.appendConversationArchiveEntry({
+      role: "assistant",
+      text: clean,
+      ts: Date.now(),
+      provider: currentProvider || "unknown",
+    });
+    // Project notes: what this workspace's conversations were about.
     try {
-      persona.ensureConversationArchiveFile();
-      const line = JSON.stringify({
-        role: "assistant",
-        text: clean,
-        ts: Date.now(),
-        provider: currentProvider || "unknown",
-      });
-      fs.appendFileSync(persona.conversationArchivePath(), line + "\n", "utf8");
+      const ws = wsServer.getVscodeWorkspace();
+      if (ws) {
+        const userEntry = [...history].reverse().find((item) => item.role === "user");
+        persona.appendProjectNote(ws, userEntry?.text || "", clean);
+      }
     } catch (_) { /* best effort */ }
   }
 
@@ -361,17 +373,6 @@ function handleClaudeLine(line) {
   }
 }
 
-function codexThreadId(event) {
-  // Priority matches chat.js codexSessionIdFromEvent:
-  // session_id > sessionId > thread_id > threadId > conversation_id > conversationId > id
-  return (
-    event.session_id || event.sessionId ||
-    event.thread_id || event.threadId ||
-    event.conversation_id || event.conversationId ||
-    event.id
-  );
-}
-
 function handleCodexLine(line) {
   let event;
   try { event = JSON.parse(line); } catch { return; }
@@ -381,7 +382,7 @@ function handleCodexLine(line) {
   // with thread_id; also handle legacy "session" events.
   const type = typeof event.type === "string" ? event.type : "";
   if (type === "thread.started" || type === "session" || type.includes("session")) {
-    const id = codexThreadId(event);
+    const id = codexSessionIdFromEvent(event);
     if (id) {
       vscodeSessionIds.codex = id;
       saveConversation();
@@ -412,15 +413,9 @@ function handleCodexLine(line) {
     return;
   }
 
-  const delta =
-    event.delta !== undefined ? String(event.delta) :
-    event.text !== undefined ? String(event.text) :
-    event.item?.delta !== undefined ? String(event.item.delta) :
-    event.item?.text !== undefined ? String(event.item.text) :
-    "";
-
-  if (delta) {
-    appendAssistant(delta);
+  const visibleText = codexVisibleText(event, type, itemType);
+  if (visibleText) {
+    appendAssistant(visibleText);
   }
 
   if (event.type === "tool_use" || event.type === "tool_start") {
@@ -443,9 +438,79 @@ function handleCodexLine(line) {
   }
 }
 
+// The text of a Codex event that belongs in the visible reply: output
+// (agent_message) deltas and completed agent messages. Reasoning summaries
+// stream as their own items/deltas and are never part of the reply, so they
+// are neither shown nor archived.
+function codexVisibleText(event, type, itemType) {
+  if (itemType === "reasoning" || type.includes("reasoning")) return "";
+  const item = event.item || event.event?.item || null;
+  const role = String(item?.role || event.role || "");
+  const isAssistantItem =
+    itemType === "agent_message" ||
+    itemType === "assistant_message" ||
+    itemType === "final_answer" ||
+    (itemType === "message" && (!role || role === "assistant"));
+  if (type.includes("delta") || type.includes("chunk")) {
+    if (item && !isAssistantItem) return "";
+    const delta = event.delta !== undefined ? event.delta : item?.delta;
+    return typeof delta === "string" ? delta : "";
+  }
+  if (item) {
+    // Items arrive as started/updated/completed; only the completed one
+    // carries the final text, and taking it once keeps the reply from doubling.
+    if (!isAssistantItem || !type.endsWith("completed")) return "";
+    return typeof item.text === "string" ? item.text : "";
+  }
+  if (type.includes("message") || type.includes("answer") || type === "result" || role === "assistant") {
+    const text = event.text !== undefined ? event.text : event.message;
+    return typeof text === "string" ? text : "";
+  }
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // Context augmentation — inject editor context into user message
 // ---------------------------------------------------------------------------
+
+// The selection commands put the selected code in the message itself; the
+// context block would otherwise send it a second time, and the history entry
+// would store it twice. Drop the selection from the context in that case.
+function withoutInlinedSelection(context, text) {
+  const selected = context?.selection?.text;
+  if (typeof selected !== "string" || !selected.trim()) return context;
+  if (!String(text || "").includes(selected.trim())) return context;
+  const { selection, ...rest } = context;
+  return rest;
+}
+
+// Bounded transcript of this bridge's own history for the first turn of a
+// fresh CLI session (budget matches chat.js SHARED_TRANSCRIPT_MAX_CHARS).
+const SHARED_TRANSCRIPT_MAX_CHARS = 9000;
+
+function buildSharedTranscript(currentUserEntry) {
+  const lines = [];
+  let chars = 0;
+  for (let i = history.length - 1; i >= 0 && chars < SHARED_TRANSCRIPT_MAX_CHARS; i--) {
+    const m = history[i];
+    if (m.id === currentUserEntry?.id) continue;
+    if (m.role === "user" || m.role === "assistant") {
+      const line = `${m.role === "user" ? "博士" : "普瑞赛斯"}: ${(m.text || "").slice(0, 200)}`;
+      lines.unshift(line);
+      chars += line.length + 1;
+    }
+  }
+  return lines.join("\n");
+}
+
+// The blacklist pattern covering `filePath` (relative to the VS Code workspace),
+// or null. Guards what reaches the model without the Doctor asking for it.
+function blacklistPatternFor(filePath, root) {
+  const { parseBlacklist, matchBlacklist } = require("./file-blacklist");
+  const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
+  if (!patterns.length || !filePath) return null;
+  return matchBlacklist(String(filePath), patterns, { root: root || "" });
+}
 
 function buildContextAugmentedMessage(userText, context) {
   if (!context || !context.activeFile) return userText;
@@ -506,27 +571,39 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
     return;
   }
 
-  // Inject editor context into the user message so the CLI sees it
-  const messageWithContext = buildContextAugmentedMessage(trimmed, context);
+  // Inject editor context into the user message so the CLI sees it.
+  // Automatic editor context from a blacklisted file (name, cursor, selection)
+  // is dropped, and the Doctor is told so. Text he explicitly sends (the
+  // selection commands put it in the message itself) is his own choice and
+  // passes untouched. Matching is relative to the VS Code workspace, the same
+  // root the CLI runs in below.
+  context = withoutInlinedSelection(context, trimmed);
+  const blacklistHit = context?.activeFile
+    ? blacklistPatternFor(context.activeFile, require("./ws-server").getVscodeWorkspace() || settings.get("chatCwd") || "")
+    : null;
+  const filteredContext = blacklistHit ? null : context;
+  const messageWithContext = buildContextAugmentedMessage(trimmed, filteredContext);
 
   const currentUserEntry = userAlreadyShown
     ? latestMatchingUser(trimmed)
     : pushUser(trimmed, context);
-
-  // Build a shared transcript from our own history for context continuity.
-  const SHARED_MAX = 9000; // matches chat.js SHARED_TRANSCRIPT_MAX_CHARS
-  const sharedLines = [];
-  let sharedChars = 0;
-  for (let i = history.length - 1; i >= 0 && sharedChars < SHARED_MAX; i--) {
-    const m = history[i];
-    if (m.id === currentUserEntry?.id) continue;
-    if (m.role === "user" || m.role === "assistant") {
-      const line = `${m.role === "user" ? "博士" : "普瑞赛斯"}: ${(m.text || "").slice(0, 200)}`;
-      sharedLines.unshift(line);
-      sharedChars += line.length + 1;
-    }
+  if (blacklistHit && !userAlreadyShown) {
+    const name = String(context.activeFile).split(/[\\/]/).pop();
+    history.push({
+      id: nextId(),
+      role: "system",
+      text: `当前文件 ${name} 命中文件黑名单（${blacklistHit}），本轮没有自动附带它的编辑器上下文（文件名、光标、选区）。`,
+      ts: Date.now()
+    });
   }
-  const sharedTranscript = sharedLines.join("\n");
+
+  // A resumed CLI session already holds everything it was told; replaying
+  // the transcript every turn only costs ~9k chars of prompt. It goes out on
+  // the first turn of a session only (a stale-session retry clears the id and
+  // sends it again), like the popover path does.
+  const resumeId = vscodeSessionIds[provider];
+  const resuming = typeof resumeId === "string" && Boolean(resumeId.trim());
+  const sharedTranscript = resuming ? "" : buildSharedTranscript(currentUserEntry);
 
   const rawMode = settings.get("vibeCodingMode") || "companion";
   // VS Code extension never gets full agent — cap at advisor.
@@ -536,21 +613,32 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
     history.push({ id: nextId(), role: "system", text: "VS Code 扩展不支持代理模式，已切换至顾问模式（只读工具）。", ts: Date.now() });
   }
 
-  beginAssistant();
-
   const wsServer = require("./ws-server");
   const vscodeWs = wsServer.getVscodeWorkspace();
   const cwd = normalizeCwd(vscodeWs || settings.get("chatCwd"));
-  const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, sharedTranscript, null, vscodeSessionIds);
+  // Built before the assistant placeholder so a validator notice (model /
+  // effort fallback) lands in this history ahead of the reply. The popover's
+  // attachments, cat mode and silent-turn state are never part of a VS Code
+  // turn: this bridge hands over its own (empty) inputs explicitly.
+  const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, sharedTranscript, null, vscodeSessionIds, {
+    vscodeTurn: true,
+    workspacePath: vscodeWs || "",
+    attachments: [],
+    catMode: null,
+    silent: false,
+    onNotice: pushSystem
+  });
 
   if (!invocation) {
     const errMsg = "No CLI provider available";
     history.push({ id: nextId(), role: "system", text: errMsg, ts: Date.now() });
     emit({ kind: "status", status: "idle", error: errMsg });
+    emit({ kind: "history", history: history.slice() });
     midTurn = false;
-    discardAssistant();
     return;
   }
+
+  beginAssistant();
 
   emit({
     kind: "status",
@@ -566,6 +654,7 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
       env: { ...process.env },
     });
   } catch (error) {
+    chat.cleanupInvocation(invocation);
     midTurn = false;
     discardAssistant();
     emit({
@@ -578,6 +667,7 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
     return;
   }
   currentProcess = proc;
+  currentInvocation = invocation;
 
   if (invocation.stdin) {
     // Same as chat.js: a CLI that exits before draining stdin turns the rest of
@@ -606,9 +696,16 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
   proc.on("close", (code) => {
     if (currentProcess !== proc) return;
     currentProcess = null;
+    currentInvocation = null;
     midTurn = false;
+    // Every exit path below (the retries included) starts here: the temp dir
+    // holding the persona system prompt must not outlive the turn.
+    chat.cleanupInvocation(invocation);
 
     // Self-heal: drop stale session on "not found" errors and retry once.
+    // Covers Claude ("No conversation found"), Codex ("no rollout found",
+    // "thread ... not found"), and provider-level structured error text
+    // captured during streaming. errorText also feeds the Codex fallbacks below.
     const errorText = `${stderr}\n${providerErrorText}`;
     const sessionLost = /no conversation found|no rollout found|(?:session|thread|conversation|rollout).*not found|invalid.*(?:session|thread|conversation)/i.test(errorText);
     if (sessionLost && !staleRetryInFlight) {
@@ -669,7 +766,7 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
         provider,
       });
     } else {
-      staleRetryInFlight = false; // retry succeeded — clear the guard
+      staleRetryInFlight = false;
       emit({ kind: "status", status: "idle", provider });
     }
 
@@ -681,7 +778,9 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
   proc.on("error", (err) => {
     if (currentProcess !== proc) return;
     currentProcess = null;
+    currentInvocation = null;
     midTurn = false;
+    chat.cleanupInvocation(invocation);
     staleRetryInFlight = false;
     codexModelFallbackInFlight = false;
     codexReasoningFallbackInFlight = false;
@@ -718,18 +817,25 @@ function send(text, context) {
   return { ok: true };
 }
 
-function cancel() {
+// `sync` is for the quit/restart paths (see chat.cancel): the Windows taskkill
+// must finish before app.exit().
+function cancel({ sync = false } = {}) {
   directiveTurnToken += 1;
   codexModelFallbackInFlight = false;
   codexReasoningFallbackInFlight = false;
+  // Clear / New Conversation call this while idle too; then there is nothing
+  // to report — a "cancelled" status would just flash in the webview.
+  const wasBusy = Boolean(currentProcess || midTurn || outboundQueue.length || currentAssistantId);
   if (currentProcess) {
     const proc = currentProcess;
     currentProcess = null;
-    try { proc.kill("SIGTERM"); } catch (_) { /* ignore */ }
-    // Force-kill after 3s if SIGTERM was ignored (matches chat.js pattern).
-    setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch (_) { /* ignore */ }
-    }, 3000).unref();
+    // The close handler ignores the dead process (identity guard above), so
+    // this is the only place that ends the turn and releases its temp dir
+    // (the CLI read the prompt file at startup). Whole tree: a .cmd shim's
+    // cmd.exe would otherwise leave the real CLI streaming as an orphan.
+    chat.cleanupInvocation(currentInvocation);
+    currentInvocation = null;
+    killProcessTree(proc, { sync });
   }
   outboundQueue.length = 0;
   midTurn = false;
@@ -737,6 +843,7 @@ function cancel() {
     if (pendingAssistantText) finalizeAssistant();
     else discardAssistant();
   }
+  if (!wasBusy) return;
   emit({ kind: "tool", active: false });
   emit({ kind: "status", status: "idle", cancelled: true });
 }
@@ -800,8 +907,168 @@ function hasPreviousConversation() {
   }
 }
 
+// Lightweight inline completion — spawns a one-shot CLI subprocess per request.
+// Uses chat.getProviderAvailability() for resolved paths and cli-spawn.js for
+// cross-platform spawning. Does NOT touch history, archive, or any shared turn state.
+//
+// The VS Code extension only asks when the Doctor opted in
+// (prts.inlineCompletion.enabled); the gates below are the backend's own floor
+// because any authenticated bridge client can send chat:inline-complete.
+const COMPLETION_TIMEOUT_MS = 10000;
+// The extension sends ~6 lines before the cursor; one minified line can still
+// be huge, so keep only the tail that matters for the completion.
+const COMPLETION_MAX_PREFIX_CHARS = 4000;
+
+let completionInFlight = false;
+
+// Companion mode is chat-only: editor contents are never sent to a model
+// unasked. Advisor and agent both allow completion; the completion process
+// itself never gets tools in either (see the Claude args below).
+function completionAllowedByMode() {
+  const mode = String(settings.get("vibeCodingMode") || "companion");
+  return mode === "advisor" || mode === "agent";
+}
+
+// Never send sensitive or blacklisted files to the model. Checks both the full
+// path (for directory patterns) and the bare file name the prompt shows.
+// Matching is relative to the VS Code workspace, the same root dispatchSend()
+// uses; a file outside it is judged by its name only (see file-blacklist.js).
+function completionFileBlocked(file, filePath) {
+  const { parseBlacklist, isBlacklisted, SENSITIVE_FILE_PATTERNS } = require("./file-blacklist");
+  const patterns = [...SENSITIVE_FILE_PATTERNS, ...parseBlacklist(settings.get("advisorFileBlacklist"))];
+  let root = "";
+  try { root = require("./ws-server").getVscodeWorkspace() || ""; } catch (_) { /* bridge not loaded */ }
+  if (!root) root = settings.get("chatCwd") || "";
+  return [filePath, file].some((p) => typeof p === "string" && p && isBlacklisted(p, patterns, { root }));
+}
+
+async function complete(prefix, file, language, filePath) {
+  if (typeof prefix !== "string" || !prefix.trim()) return null;
+
+  // Reject completion while a chat turn is streaming - the CLI is busy and
+  // spawning a second process would only pile up load.
+  if (midTurn) return null;
+
+  // Reject completion while another completion is already running. Every
+  // completion request spawns a fresh CLI subprocess, and the VS Code inline
+  // provider fires after every ~300ms pause while the user types. Without
+  // this guard a short burst of typing could fork several CLI processes at
+  // once. Dropping the redundant ones keeps the system cheap; the next pause
+  // triggers a fresh completion.
+  if (completionInFlight) return null;
+
+  if (!completionAllowedByMode()) return null;
+  if (completionFileBlocked(file, filePath)) return null;
+
+  const availability = chat.getProviderAvailability({ refresh: false });
+  const provider = availability.activeProvider;
+  if (!provider || provider === "priestess") return null;
+  const info = availability.providers[provider];
+  if (!info?.available || !info.command) return null;
+
+  // The prompt always goes through stdin, never argv: on Windows a .cmd shim
+  // runs through `cmd /d /s /c`, which drops everything after the first
+  // newline of the command line and expands %VAR% even inside quotes.
+  const prompt =
+    `Complete this code. Only output the completion text, no markdown, no explanation.\n` +
+    `File: ${file || "unknown"} (${language || ""})\n\n` +
+    prefix.slice(-COMPLETION_MAX_PREFIX_CHARS);
+
+  let args;
+  let effectiveCwd = settings.get("chatCwd") || "";
+  if (provider === "codex") {
+    // `codex exec` has no `-p` prompt flag: -p is `--profile`. Match the main
+    // chat path (buildCodexExecArgs): prompt on stdin (`-`) with the read-only
+    // sandbox, the advisor-level cap (codex has no switch that removes its
+    // tools entirely). --json is dropped: complete() parses plain text.
+    const built = buildCodexExecArgs({ cwd: effectiveCwd, mode: "companion", memoryDir: persona.memoryDir() });
+    args = built.args.filter((a) => a !== "--json");
+    effectiveCwd = built.cwd;
+  } else {
+    args = [
+      "-p",
+      "--output-format",
+      "text",
+      // A completion never needs tools: remove the built-in set, skip the
+      // Doctor's MCP servers, and pin the permission mode so a
+      // `defaultMode: "bypassPermissions"` in ~/.claude/settings.json cannot
+      // apply to this extension-triggered process.
+      "--tools",
+      "",
+      "--strict-mcp-config",
+      "--permission-mode",
+      "default",
+      // One-shot request: do not leave a saved session on disk per pause.
+      "--no-session-persistence"
+    ];
+    const claudeModel = String(settings.get("claudeModel") || "").trim();
+    if (claudeModel) args.push("--model", claudeModel);
+  }
+
+  completionInFlight = true;
+  return new Promise((resolve) => {
+    let settled = false;
+    // Every exit path must go through finish() so completionInFlight is
+    // released exactly once - a double release would let a second process
+    // start while the first is still running, defeating the guard above.
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      completionInFlight = false;
+      resolve(value);
+    };
+
+    let proc;
+    try {
+      proc = spawnCli(info.command, args, {
+        cwd: effectiveCwd || undefined,
+        env: { ...process.env },
+        // Completion fires on every typing pause; never flash a console window.
+        windowsHide: true
+      });
+    } catch (_) {
+      finish(null);
+      return;
+    }
+
+    // A CLI that exits before draining stdin turns the write into an async
+    // EPIPE; without a listener that stream error would crash the main process.
+    proc.stdin.on("error", () => {});
+    try { proc.stdin.end(prompt); } catch (_) { /* process already exited */ }
+    // Drain stderr so a chatty CLI cannot block on a full pipe.
+    proc.stderr?.resume();
+
+    let stdout = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killProcessTree(proc);
+      finish(null);
+    }, COMPLETION_TIMEOUT_MS);
+    timer.unref();
+
+    proc.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    proc.on("close", () => {
+      clearTimeout(timer);
+      if (timedOut) return; // finish() already ran via the timeout path
+      const text = (stdout || "").trim();
+      const cleaned = text
+        .replace(/^```[\w]*\n?/i, "")
+        .replace(/\n?```$/i, "")
+        .trim();
+      if (cleaned && cleaned.length < 2000 && !/^(I|here|sure|certainly|this is)/i.test(cleaned)) {
+        finish(cleaned);
+      } else {
+        finish(null);
+      }
+    });
+    proc.on("error", () => { clearTimeout(timer); finish(null); });
+  });
+}
+
 module.exports = {
   send,
+  complete,
   cancel,
   clear,
   getHistory,

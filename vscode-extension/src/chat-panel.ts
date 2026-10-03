@@ -1,12 +1,45 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs";
+import * as os from "os";
 import { generateApiShim } from "./api-shim";
 import { ContextCapture } from "./context-capture";
+import { isPathInside } from "./path-guard";
+
+/**
+ * Resolves symlinks / junctions (and, on Windows, subst drives and 8.3 short
+ * names). realpathSync.native is preferred; it fails on some Windows virtual
+ * drives (e.g. RAM disks), where the JS implementation still resolves links.
+ */
+function realpath(p: string): string {
+  try {
+    return fs.realpathSync.native(p);
+  } catch (_) {
+    return fs.realpathSync(p);
+  }
+}
+
+/**
+ * Overlays what vscode-chat.js actually uses for a VS Code turn onto a tray
+ * settings snapshot: the workspace folder as cwd (when one is open) and
+ * agent mode capped at advisor. Pure; exported for tests.
+ */
+export function vscodeEffectiveState(state: unknown, workspaceCwd: string | null): unknown {
+  if (!state || typeof state !== "object") return state;
+  const next: Record<string, unknown> = { ...(state as Record<string, unknown>) };
+  if (workspaceCwd) next.chatCwd = workspaceCwd;
+  if (next.vibeCodingMode === "agent") next.vibeCodingMode = "advisor";
+  return next;
+}
 
 export class ChatPanelProvider implements vscode.WebviewViewProvider {
-  private view: vscode.WebviewView | null = null;
   private wsUnsubs: (() => void)[] = [];
   private themeUnsub: vscode.Disposable | null = null;
+  /**
+   * Temp directories created for fix-diff / HTML preview files. Cleaned up
+   * in dispose() so previews do not leak one directory each.
+   */
+  private tempDirs: string[] = [];
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -24,7 +57,6 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     this.wsUnsubs.length = 0;
     if (this.themeUnsub) { this.themeUnsub.dispose(); this.themeUnsub = null; }
 
-    this.view = webviewView;
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -204,6 +236,20 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     }
     #sendBtn:hover { background: var(--vscode-button-hoverBackground); }
     #sendBtn:disabled { opacity: 0.5; cursor: default; }
+    /* Stop: renderer.js enables it while a reply runs (setRunning) and
+       disables it when idle, so visibility simply follows that state. The
+       click posts chat:cancel through the shim. */
+    #cancelBtn {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border: none;
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    #cancelBtn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    #cancelBtn[disabled] { display: none; }
     .cwd-line {
       font-size: 0.75em;
       color: var(--vscode-descriptionForeground);
@@ -229,9 +275,60 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
       max-width: 100%;
       opacity: 0.75;
     }
-    /* HTML preview panel */
-    .preview-divider { display: none; }
-    .html-preview { display: none; }
+    /* Apply fix button on code blocks */
+    .apply-fix-btn {
+      display: block;
+      margin-top: 4px;
+      padding: 2px 10px;
+      font-size: 0.75em;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      float: right;
+    }
+    .apply-fix-btn:hover { background: var(--vscode-button-hoverBackground); }
+    .code-block-wrapper { overflow: hidden; }
+
+    /* HTML preview panel. Opening is opt-in (the shim turns the renderer's
+       auto-open into a no-op; the message's preview button opens it) and the
+       header's close button closes it. The sidebar is too narrow for the
+       Electron popover's side-by-side split, so the panel stacks under the
+       chat stream (main-area is a column); renderer.js still drives the
+       flex ratio. The divider only separates: its drag logic is horizontal. */
+    .preview-divider {
+      flex: 0 0 4px;
+      cursor: default;
+      pointer-events: none;
+      background: var(--vscode-sideBar-border, var(--vscode-panel-border));
+    }
+    .html-preview {
+      border-left: none;
+      border-top: 1px solid var(--vscode-sideBar-border, var(--vscode-panel-border));
+      background: var(--vscode-sideBar-background);
+    }
+    .html-preview.open { min-width: 0; min-height: 160px; }
+    .preview-header {
+      background: var(--vscode-sideBarSectionHeader-background);
+      color: var(--vscode-sideBarSectionHeader-foreground);
+      border-bottom: 1px solid var(--vscode-sideBar-border, var(--vscode-panel-border));
+    }
+    .preview-title { color: var(--vscode-descriptionForeground); }
+    .preview-btn {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .preview-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .msg-preview-btn {
+      border-color: var(--vscode-button-border, var(--vscode-panel-border));
+      color: var(--vscode-textLink-foreground);
+    }
+    .msg-preview-btn:hover,
+    .msg-preview-btn.active { background: var(--vscode-list-hoverBackground); }
   </style>
 </head>
 <body>
@@ -243,7 +340,6 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="bar-actions" id="barActions">
       <button type="button" id="clearBtn" hidden>Clear</button>
-      <button type="button" id="cancelBtn" hidden>Stop</button>
       <button type="button" id="closeBtn" hidden>&times;</button>
     </div>
   </header>
@@ -271,6 +367,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     <form id="composer" autocomplete="off">
       <textarea id="composerInput" rows="1" placeholder="说点什么…" enterkeyhint="send"></textarea>
       <button type="submit" id="sendBtn" disabled>&#x27A4;</button>
+      <button type="button" id="cancelBtn" disabled>停止</button>
     </form>
     <p class="cwd-line" id="cwdLine"></p>
   </footer>
@@ -278,6 +375,28 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
   <script src="${rendererUri}"></script>
 </body>
 </html>`;
+  }
+
+  /**
+   * Sends an error envelope back to the webview. Every request handler
+   * below routes failures through this helper: a ws request rejects when
+   * the tray app is closed or times out, and without a .catch() the
+   * rejection would become an unhandled promise rejection in the extension
+   * host while the chat panel silently waits. The webview shim resolves
+   * __prts_request() with this envelope, so the renderer can surface the
+   * failure to the user instead of hanging.
+   */
+  private replyWithError(webview: vscode.Webview, resultType: string, reqId: unknown, error: unknown) {
+    try {
+      webview.postMessage({
+        type: resultType,
+        reqId,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } catch (_) {
+      // The webview may have been disposed while the request was in flight.
+    }
   }
 
   private handleWebviewMessage(msg: any, webview: vscode.Webview) {
@@ -288,60 +407,100 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     switch (type) {
       case "chat:send":
         this.wsClient
-          .send("chat:send", {
+          .request("chat:send", {
             text: msg.text,
             context: this.contextCapture?.getCurrentContext() || null,
           })
           .then((res: any) => {
+            // res is the raw WS envelope and carries the ws-client's own
+            // reqId/type: spread it first so the webview's reqId wins, or
+            // the shim never matches the reply to its pending promise.
             webview.postMessage({
+              ...res,
               type: "chat:send:result",
               reqId: msg.reqId,
-              ...res,
             });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "chat:send:result", msg.reqId, err);
           });
         break;
       case "chat:cancel":
-        this.wsClient.send("chat:cancel");
+        // chat:cancel is a fire-and-forget notification - the server never
+        // replies, so there is nothing to resolve or reject here.
+        this.wsClient.notify("chat:cancel");
         break;
       case "chat:clear":
-        this.wsClient.send("chat:clear").then((res: any) => {
-          webview.postMessage({ type: "chat:clear:result", reqId: msg.reqId });
-        });
+        this.wsClient
+          .request("chat:clear")
+          .then(() => {
+            webview.postMessage({ type: "chat:clear:result", reqId: msg.reqId });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "chat:clear:result", msg.reqId, err);
+          });
         break;
       case "chat:get-history":
-        this.wsClient.send("chat:get-history").then((res: any) => {
-          webview.postMessage({
-            type: "chat:get-history:result",
-            reqId: msg.reqId,
-            history: res.history,
+        this.wsClient
+          .request("chat:get-history")
+          .then((res: any) => {
+            webview.postMessage({
+              type: "chat:get-history:result",
+              reqId: msg.reqId,
+              history: res.history,
+            });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "chat:get-history:result", msg.reqId, err);
           });
-        });
         break;
       case "settings:get":
-        this.wsClient.send("settings:get").then((res: any) => {
-          webview.postMessage({
-            type: "settings:get:result",
-            reqId: msg.reqId,
-            state: res.state,
+        this.wsClient
+          .request("settings:get")
+          .then((res: any) => {
+            webview.postMessage({
+              type: "settings:get:result",
+              reqId: msg.reqId,
+              state: this.effectiveState(res.state),
+            });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "settings:get:result", msg.reqId, err);
           });
-        });
         break;
       case "settings:set":
-        this.wsClient.send("settings:set", { patch: msg.patch });
+        this.wsClient
+          .request("settings:set", { patch: msg.patch })
+          .catch((err: any) => {
+            this.replyWithError(webview, "settings:set:result", msg.reqId, err);
+          });
         break;
       case "desktop-pet:cat-mode-get":
-        this.wsClient.send("desktop-pet:cat-mode-get").then((res: any) => {
-          webview.postMessage({
-            type: "desktop-pet:cat-mode-get:result",
-            reqId: msg.reqId,
-            ...res,
+        this.wsClient
+          .request("desktop-pet:cat-mode-get")
+          .then((res: any) => {
+            webview.postMessage({
+              ...res,
+              type: "desktop-pet:cat-mode-get:result",
+              reqId: msg.reqId,
+            });
+          })
+          .catch((err: any) => {
+            this.replyWithError(webview, "desktop-pet:cat-mode-get:result", msg.reqId, err);
           });
-        });
+        break;
+      case "fix:apply":
+        // Open a diff view comparing the suggested fix against the original file.
+        this.applyFix(msg.filePath, msg.newCode);
+        break;
+      case "html:open-in-browser":
+        // Open the generated HTML in the built-in Simple Browser (sandboxed)
+        // rather than the system browser - see openHtmlInBrowser().
+        this.openHtmlInBrowser(msg.html);
         break;
       case "preview:open":
       case "preview:close":
-      case "html:open-in-browser":
-        // These are local to the webview — no server round-trip needed
+        // These are local to the webview - no server round-trip needed
         break;
       default:
         break;
@@ -366,11 +525,28 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
 
     for (const evt of events) {
       const handler = (data: any) => {
-        if (this.wsClient) webview.postMessage(data);
+        if (!this.wsClient) return;
+        if (evt === "settings:state" && data && typeof data === "object") {
+          webview.postMessage({ ...data, state: this.effectiveState(data.state) });
+          return;
+        }
+        webview.postMessage(data);
       };
       this.wsClient.on(evt, handler);
       this.wsUnsubs.push(() => { try { (this.wsClient as any)?.removeListener?.(evt, handler); } catch (_) { /* ignore */ } });
     }
+  }
+
+  /**
+   * The tray's settings describe the Electron chat; the status line in the
+   * sidebar must describe the VS Code chat instead (see vscode-chat.js send):
+   * the turn runs in the first workspace folder, not the tray's chatCwd, and
+   * agent mode is capped at advisor on this side.
+   */
+  private effectiveState(state: unknown): unknown {
+    const folders = vscode.workspace.workspaceFolders;
+    const cwd = folders && folders.length ? folders[0].uri?.fsPath || null : null;
+    return vscodeEffectiveState(state, cwd);
   }
 
   private themeScheme(): "dark" | "light" {
@@ -382,5 +558,104 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
 
   private syncTheme(webview: vscode.Webview) {
     webview.postMessage({ type: "theme", scheme: this.themeScheme() });
+  }
+
+  /**
+   * Opens assistant-generated HTML in the VS Code Simple Browser (built-in,
+   * sandboxed) instead of the system browser: the content comes from the
+   * model and may contain scripts, so keeping it inside VS Code avoids
+   * exposing it to the user's default browser with full local privileges.
+   * The temp file is tracked for cleanup on dispose(), same as fix diffs.
+   */
+  private openHtmlInBrowser(html: string) {
+    if (typeof html !== "string" || !html.trim()) {
+      vscode.window.showErrorMessage("PRTS: 没有可预览的 HTML 内容。");
+      return;
+    }
+    try {
+      const tmpDir = this.createTempDir("prts-preview-");
+      const tmpFile = path.join(tmpDir, "preview.html");
+      fs.writeFileSync(tmpFile, html, "utf8");
+      vscode.commands.executeCommand("vscode.openWith", vscode.Uri.file(tmpFile), "simpleBrowser");
+    } catch (err) {
+      vscode.window.showErrorMessage("PRTS: 打开预览失败 — " + (err as Error).message);
+    }
+  }
+
+  /**
+   * Creates a temp directory and tracks it for cleanup on dispose(). Diff and
+   * HTML preview files would otherwise leak one directory per preview.
+   */
+  private createTempDir(prefix: string): string {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    this.tempDirs.push(tmpDir);
+    return tmpDir;
+  }
+
+  /**
+   * Opens a diff of a suggested code block against a workspace file. The path
+   * comes from the webview (the editor context stored with the chat history),
+   * so it is checked before anything touches the disk:
+   *  - it must be an absolute path; "." / ".." segments are resolved first,
+   *    because getWorkspaceFolder() matches URI path segments lexically and
+   *    would count "<ws>/../secret" as inside the workspace;
+   *  - getWorkspaceFolder() then applies VS Code's own path-casing rules
+   *    (case-insensitive on Windows / macOS, drive letters included);
+   *  - the real paths (symlinks / junctions resolved) must still be contained,
+   *    so a link inside the workspace cannot point the diff at a file outside.
+   */
+  private applyFix(filePath: unknown, newCode: unknown) {
+    if (typeof filePath !== "string" || !filePath || !path.isAbsolute(filePath) ||
+        typeof newCode !== "string") {
+      vscode.window.showErrorMessage("PRTS: 无效的对比请求。");
+      return;
+    }
+    const target = path.resolve(filePath);
+    const uri = vscode.Uri.file(target);
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    if (!folder?.uri?.fsPath) {
+      vscode.window.showErrorMessage("PRTS: 只能对比当前工作区内的文件：" + target);
+      return;
+    }
+    try {
+      let realTarget: string;
+      try {
+        realTarget = realpath(target);
+      } catch (_) {
+        vscode.window.showErrorMessage("PRTS: 找不到文件：" + target);
+        return;
+      }
+      if (!isPathInside(realTarget, realpath(folder.uri.fsPath))) {
+        vscode.window.showErrorMessage("PRTS: 只能对比当前工作区内的文件：" + target);
+        return;
+      }
+      if (!fs.statSync(realTarget).isFile()) {
+        vscode.window.showErrorMessage("PRTS: 目标不是文件：" + target);
+        return;
+      }
+      const tmpDir = this.createTempDir("prts-suggestion-");
+      const tmpFile = path.join(tmpDir, path.basename(target));
+      fs.writeFileSync(tmpFile, newCode, "utf8");
+      const tmpUri = vscode.Uri.file(tmpFile);
+      vscode.commands.executeCommand("vscode.diff", uri, tmpUri,
+        `PRTS 建议 — ${path.basename(target)}`);
+    } catch (err) {
+      vscode.window.showErrorMessage("PRTS: 创建对比视图失败 — " + (err as Error).message);
+    }
+  }
+
+  /**
+   * Cleans up temp files created for fix diffs / HTML previews and
+   * unsubscribes WS relays. Called from extension deactivate(); VS Code
+   * disposes the provider's own registered subscriptions separately.
+   */
+  dispose(): void {
+    for (const dir of this.tempDirs) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+    }
+    this.tempDirs.length = 0;
+    for (const unsub of this.wsUnsubs) { try { unsub(); } catch (_) { /* ignore */ } }
+    this.wsUnsubs.length = 0;
+    if (this.themeUnsub) { this.themeUnsub.dispose(); this.themeUnsub = null; }
   }
 }

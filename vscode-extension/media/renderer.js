@@ -73,7 +73,15 @@ const RENDERER_TEXT = {
     preview_open_title: "在默认浏览器中打开",
     preview_close_title: "关闭预览",
     preview_browser_opened: "已在浏览器中打开。",
-    preview_browser_failed: "打开浏览器失败。"
+    preview_browser_failed: "打开浏览器失败。",
+    msg_too_long: (n) => `消息太长了（上限 ${n} 字），请精简后再发送。`,
+    vibe_companion: "陪伴",
+    vibe_advisor: "顾问",
+    vibe_agent: "代理",
+    badge_agent: "⚡ 代理模式",
+    ctx_selection: (a, b) => `已选中 L${a}-${b}`,
+    apply_fix: "对比",
+    apply_fix_title: (f) => `在对比视图中查看这段代码与 ${f} 的差异（不会直接改动文件）`
   },
   en: {
     chat_empty_hint: "Say something to her.",
@@ -102,7 +110,15 @@ const RENDERER_TEXT = {
     preview_open_title: "Open in default browser",
     preview_close_title: "Close preview",
     preview_browser_opened: "Opened in browser.",
-    preview_browser_failed: "Failed to open browser."
+    preview_browser_failed: "Failed to open browser.",
+    msg_too_long: (n) => `Message too long (limit ${n} characters) — please shorten it.`,
+    vibe_companion: "companion",
+    vibe_advisor: "advisor",
+    vibe_agent: "agent",
+    badge_agent: "⚡ agent",
+    ctx_selection: (a, b) => `selected L${a}-${b}`,
+    apply_fix: "Diff",
+    apply_fix_title: (f) => `Review this code against ${f} in a diff view (the file is not changed)`
   }
 };
 
@@ -126,6 +142,7 @@ function applyL10n() {
   if (closeBtn) closeBtn.title = t("btn_close_title");
   if (openInBrowserBtn) { openInBrowserBtn.textContent = t("preview_open"); openInBrowserBtn.title = t("preview_open_title"); }
   if (closePreviewBtn) closePreviewBtn.title = t("preview_close_title");
+  for (const btn of chatStream?.querySelectorAll(".apply-fix-btn") || []) labelApplyButton(btn);
 }
 
 // ============================================================
@@ -1235,7 +1252,7 @@ function renderMarkdown(input) {
   src = src.replace(/\fCB(\d+)\f/g, (_, idx) => {
     const { lang, code } = codeBlocks[Number(idx)];
     const langClass = lang ? ` class="lang-${escapeHtml(lang)}"` : "";
-    return `<pre><code${langClass}>${escapeHtml(code)}</code></pre>`;
+    return `<div class="code-block-wrapper"><pre><code${langClass}>${escapeHtml(code)}</code></pre></div>`;
   });
   return src;
 }
@@ -1252,6 +1269,51 @@ function renderMarkdownCached(msg) {
   const html = renderMarkdown(msg.text || "");
   mdCache.set(msg.id, { text: msg.text, html });
   return html;
+}
+
+// Apply-fix buttons on assistant code blocks. Only the VS Code webview shim
+// exposes chatApi.applyFix (it opens a diff against the editor file); the tray
+// preload has no editor to diff against, so the tray never renders the button
+// rather than showing a dead control.
+function canApplyFix() {
+  return typeof window.chatApi?.applyFix === "function";
+}
+
+// Binds each assistant reply to the file that was active when the Doctor
+// asked: the editor context of the nearest preceding user message. A reply to
+// a message sent with no open editor, or with an unsaved "Untitled-1" buffer
+// (not an absolute path: /…, C:\…, \\server\…), gets no target and no
+// button, so an older answer is never diffed against a newer message's file.
+function applyTargetsFor(history) {
+  const targets = new Map(); // assistant messageId -> file path
+  if (!canApplyFix()) return targets;
+  let turnFile = null;
+  for (const m of history) {
+    if (m?.role === "user") {
+      const file = m.context?.activeFile;
+      turnFile = typeof file === "string" && /^(?:\/|[a-zA-Z]:[\\/]|\\\\)/.test(file) ? file : null;
+    } else if (m?.role === "assistant" && turnFile) {
+      targets.set(m.id, turnFile);
+    }
+  }
+  return targets;
+}
+
+function labelApplyButton(btn) {
+  const file = btn.dataset.file || "";
+  btn.textContent = t("apply_fix");
+  btn.title = t("apply_fix_title", file.split(/[\\/]/).pop() || file);
+}
+
+function attachApplyButtons(el, filePath) {
+  for (const wrapper of el.querySelectorAll(".code-block-wrapper")) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "apply-fix-btn";
+    btn.dataset.file = filePath;
+    labelApplyButton(btn);
+    wrapper.append(btn);
+  }
 }
 
 let moodResetTimer = null;
@@ -1362,7 +1424,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-function buildMsgEl(msg) {
+function buildMsgEl(msg, applyTarget = null) {
   const el = document.createElement("div");
   el.dataset.id = msg.id;
   if (msg.role === "tool") {
@@ -1416,6 +1478,9 @@ function buildMsgEl(msg) {
   el.className = `msg ${msg.role}${msg.queued ? " queued" : ""}`;
   if (msg.role === "user") {
     el.textContent = msg.text || "";
+    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+      el.appendChild(renderAttachmentList(msg.attachments));
+    }
     appendBubbleTime(el, msg);
     // Context badge — show active file, cursor, selection info
     if (msg.context && msg.context.activeFile) {
@@ -1426,7 +1491,7 @@ function buildMsgEl(msg) {
       let label = `📄 ${file}`;
       if (ctx.activeFileLanguage) label += ` · ${ctx.activeFileLanguage}`;
       if (ctx.cursorLine) label += ` · L${ctx.cursorLine}`;
-      if (ctx.selection) label += ` · 已选中 L${ctx.selection.startLine}-${ctx.selection.endLine}`;
+      if (ctx.selection) label += ` · ${t("ctx_selection", ctx.selection.startLine, ctx.selection.endLine)}`;
       badge.textContent = label;
       badge.title = ctx.activeFile;
       el.append(badge);
@@ -1455,6 +1520,7 @@ function buildMsgEl(msg) {
       el.append(cur);
     } else {
       el.innerHTML = renderMarkdownCached(msg);
+      if (applyTarget) attachApplyButtons(el, applyTarget);
       appendBubbleTime(el, msg);
     }
   } else {
@@ -1648,8 +1714,9 @@ function renderHistory(history) {
   }
   const assistants = lastHistory.filter((m) => m.role === "assistant");
   currentAssistantId = assistants.length ? assistants[assistants.length - 1].id : null;
+  const applyTargets = applyTargetsFor(lastHistory);
   for (const msg of lastHistory) {
-    chatStream.append(buildMsgEl(msg));
+    chatStream.append(buildMsgEl(msg, applyTargets.get(msg.id)));
   }
   const last = lastHistory[lastHistory.length - 1];
   const sentNewMessage = Boolean(last && last.role === "user" && !prevIds.has(last.id));
@@ -1920,9 +1987,15 @@ attachBtn?.addEventListener("click", async () => {
   composerInput.focus();
 });
 
+// Whether a drag carries OS files, as opposed to text or a URL being dragged
+// into the composer.
+function dragHasFiles(dataTransfer) {
+  return Array.from(dataTransfer?.types || []).includes("Files");
+}
+
 // Drag a file anywhere onto the chat window → attach it (never navigate).
 window.addEventListener("dragover", (event) => {
-  if (Array.from(event.dataTransfer?.types || []).includes("Files")) {
+  if (dragHasFiles(event.dataTransfer)) {
     event.preventDefault();
     document.body.classList.add("file-dragging");
   }
@@ -1932,9 +2005,14 @@ window.addEventListener("dragleave", (event) => {
 });
 window.addEventListener("drop", (event) => {
   document.body.classList.remove("file-dragging");
+  // Only file drops are ours. The dragover above leaves non-file drags to the
+  // browser, which accepts them on editable targets alone, so a text drop can
+  // only land on the composer — and preventDefault here would cancel the
+  // insert that the Doctor dragged it there for.
+  if (!dragHasFiles(event.dataTransfer)) return;
+  event.preventDefault();
   const dropped = event.dataTransfer?.files;
   if (!dropped || dropped.length === 0) return;
-  event.preventDefault();
   const paths = [];
   for (const file of dropped) {
     const p = window.chatApi?.getPathForFile?.(file);
@@ -1943,11 +2021,26 @@ window.addEventListener("drop", (event) => {
   addAttachments(paths);
 });
 
+// Mirrors MAX_USER_MESSAGE_CHARS in src/main/chat.js: the main process refuses
+// longer messages, so the composer checks first and keeps the draft instead of
+// clearing it and only then learning that it was refused.
+const MAX_USER_MESSAGE_CHARS = 100_000;
+
+function checkComposerDraft(text, fileCount) {
+  if (!text && fileCount === 0) return { ok: false, reason: "empty" };
+  if (text.length > MAX_USER_MESSAGE_CHARS) return { ok: false, reason: "too-long" };
+  return { ok: true };
+}
+
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = composerInput.value.trim();
   const files = pendingAttachments.map((a) => a.path);
-  if (!text && files.length === 0) return;
+  const draft = checkComposerDraft(text, files.length);
+  if (!draft.ok) {
+    if (draft.reason === "too-long") showBubble(t("msg_too_long", MAX_USER_MESSAGE_CHARS), 3000);
+    return;
+  }
   composerInput.value = "";
   autosizeInput();
   clearAttachments();
@@ -2081,6 +2174,13 @@ const versionBadge = document.getElementById("versionBadge");
 let queueLength = 0;
 let lastSettingsPayload = null;
 
+// Label for the vibe-coding mode shown in the cwd line.
+function vibeModeLabel(mode) {
+  if (mode === "agent") return t("vibe_agent");
+  if (mode === "advisor") return t("vibe_advisor");
+  return t("vibe_companion");
+}
+
 function refreshComposerMeta() {
   const payload = lastSettingsPayload;
   const availability = payload?.providerAvailability;
@@ -2095,7 +2195,7 @@ function refreshComposerMeta() {
   const queueSuffix = queueLength > 0 ? ` · ${t("cwd_queue", queueLength)}` : "";
   const runningSuffix = chatRunning ? ` · ${t("cwd_running")}` : "";
   const mode = payload?.vibeCodingMode || "companion";
-  const modeLabel = mode === "agent" ? "agent" : mode === "advisor" ? "advisor" : "陪伴";
+  const modeLabel = vibeModeLabel(mode);
   if (cwd) {
     const truncated = cwd.length > 42 ? "…" + cwd.slice(-41) : cwd;
     cwdLine.textContent = `${provider} · ${truncated}${queueSuffix}${runningSuffix} · ${modeLabel}`;
@@ -2106,19 +2206,13 @@ function refreshComposerMeta() {
   }
   if (providerBadge) providerBadge.textContent = provider;
   if (versionBadge && payload?.appVersion) versionBadge.textContent = `v${payload.appVersion}`;
-  // Vibe coding mode badge
+  // The amber badge is a warning that she can now edit files and run
+  // commands. Advisor and companion are read-only / chat-only and earn none;
+  // the cwd line still names the mode. Its colour comes from the .agent-badge
+  // rule, not an inline override.
   if (agentBadge) {
-    agentBadge.hidden = false;
-    if (mode === "agent") {
-      agentBadge.textContent = "⚡ agent";
-      agentBadge.style.color = "var(--vscode-charts-orange)";
-    } else if (mode === "advisor") {
-      agentBadge.textContent = "👁 advisor";
-      agentBadge.style.color = "var(--vscode-charts-blue)";
-    } else {
-      agentBadge.textContent = "💬 companion";
-      agentBadge.style.color = "var(--vscode-descriptionForeground)";
-    }
+    agentBadge.hidden = mode !== "agent";
+    agentBadge.textContent = t("badge_agent");
   }
   if (sendBtn) sendBtn.disabled = !backendReady;
   composerInput.placeholder = backendReady
@@ -2173,6 +2267,16 @@ window.addEventListener("keydown", notePopoverActivity, { passive: true });
 //  Click on the character — angry / threat / wake-up reactions.
 // ============================================================
 stage.addEventListener("click", handleStageClick);
+
+// Apply-fix delegation: each button carries the file bound to its own reply
+// (see applyTargetsFor) and diffs the text of its own code block.
+chatStream.addEventListener("click", (event) => {
+  const btn = event.target.closest?.(".apply-fix-btn");
+  if (!btn || !canApplyFix()) return;
+  const filePath = btn.dataset.file;
+  const code = btn.closest(".code-block-wrapper")?.querySelector("pre > code")?.textContent;
+  if (filePath && code) window.chatApi.applyFix(filePath, code, 0);
+});
 
 // ============================================================
 //  HTML Preview Panel — divider drag + button handlers.
@@ -2237,8 +2341,10 @@ openInBrowserBtn.addEventListener("click", async () => {
 //  Boot
 // ============================================================
 window.addEventListener("resize", resizeCanvas);
+let stageResizeObserver = null;
 if (typeof ResizeObserver !== "undefined") {
-  new ResizeObserver(() => resizeCanvas()).observe(stage);
+  stageResizeObserver = new ResizeObserver(() => resizeCanvas());
+  stageResizeObserver.observe(stage);
 }
 
 // Settings decide which outfit to load, so fetch them before the first frame

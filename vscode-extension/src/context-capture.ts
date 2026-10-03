@@ -5,6 +5,7 @@
  */
 
 import * as vscode from "vscode";
+import * as path from "path";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,10 +43,150 @@ export interface DiagnosticDetail {
 }
 
 export interface ActivityEvent {
-  kind: "save" | "task-start" | "task-end" | "task-error" | "git-commit" | "git-branch-switch" | "file-open";
+  kind: "save" | "task-start" | "task-end" | "task-error" | "git-commit" | "git-branch-switch" | "file-open" | "terminal-output";
   detail: string;
   timestamp: number;
   file: string;
+}
+
+/**
+ * A build/test command that failed in the integrated terminal. Deliberately
+ * structured: `command` is a canonical label ("npm test", "cargo build"),
+ * never the typed command line or its output, because the event can end up
+ * in a silent proactive prompt on the Electron side.
+ */
+export interface TerminalEvent {
+  kind: "build-error" | "test-fail";
+  command: string;
+  exitCode: number;
+  timestamp: number;
+}
+
+export interface ShellCommandMatch {
+  kind: "build" | "test";
+  label: string;
+}
+
+/**
+ * Upper bound for selection text attached to chat context. The selection is
+ * sent over the WS bridge (server maxPayload is 4MB) and included in every
+ * prompt; a full-file selection on a huge file would blow both. Truncate
+ * with a marker so the model knows the selection was cut off.
+ */
+const MAX_SELECTION_CHARS = 20_000;
+
+const SEVERITY_RANK: Record<DiagnosticDetail["severity"], number> = {
+  error: 0, warning: 1, info: 2, hint: 3,
+};
+
+// ---------------------------------------------------------------------------
+// Terminal command classification (pure; exported for tests)
+// ---------------------------------------------------------------------------
+
+const TEST_RUNNERS = new Set(["jest", "mocha", "vitest", "pytest", "ava", "jasmine"]);
+const BUILD_TOOLS = new Set(["tsc", "webpack", "rollup", "esbuild", "msbuild"]);
+const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+const PACKAGE_EXECUTORS = new Set(["npx", "pnpx", "bunx"]);
+const TEST_SCRIPTS = new Set(["test", "tests", "t", "tst"]);
+const BUILD_SCRIPTS = new Set(["build", "compile", "typecheck", "tsc"]);
+/** Tools whose subcommand/target says whether it is a build or a test. */
+const SUBCOMMAND_TOOLS: Record<string, { test: string[]; build: string[] }> = {
+  cargo: { test: ["test", "nextest"], build: ["build", "check"] },
+  go: { test: ["test"], build: ["build"] },
+  dotnet: { test: ["test"], build: ["build"] },
+  swift: { test: ["test"], build: ["build"] },
+  make: { test: ["test", "check"], build: ["build", "all"] },
+  gradle: { test: ["test", "check"], build: ["build", "assemble"] },
+  gradlew: { test: ["test", "check"], build: ["build", "assemble"] },
+  mvn: { test: ["test", "verify"], build: ["compile", "package", "install"] },
+  mvnw: { test: ["test", "verify"], build: ["compile", "package", "install"] },
+};
+/** Prefix tokens that don't name the command itself. */
+const PREFIX_TOKENS = new Set(["&", "time", "sudo", "env", "cross-env"]);
+
+/**
+ * Normalizes a program token across platforms: strips quotes and the
+ * directory (either separator), lowercases (Windows is case-insensitive) and
+ * drops Windows launcher extensions, so `& "C:\Program Files\nodejs\npm.cmd"`
+ * and `./node_modules/.bin/jest` both resolve to the bare tool name.
+ */
+function programName(token: string): string {
+  const unquoted = token.replace(/^["']+|["']+$/g, "");
+  const base = unquoted.split(/[\\/]/).pop() || "";
+  return base.toLowerCase().replace(/\.(cmd|exe|bat|ps1)$/, "");
+}
+
+function classifyTokens(tokens: string[]): ShellCommandMatch | null {
+  let i = 0;
+  while (i < tokens.length && (PREFIX_TOKENS.has(tokens[i]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]))) i++;
+  if (i >= tokens.length) return null;
+  const prog = programName(tokens[i]);
+  const args = tokens.slice(i + 1).map((t) => t.replace(/^["']+|["']+$/g, ""));
+  const positional = args.filter((a) => !a.startsWith("-"));
+
+  if (TEST_RUNNERS.has(prog)) return { kind: "test", label: prog };
+  if (BUILD_TOOLS.has(prog)) return { kind: "build", label: prog };
+  if (PACKAGE_EXECUTORS.has(prog)) return classifyTokens(args);
+  if ((prog === "python" || prog === "python3" || prog === "py") && args[0] === "-m") {
+    const mod = (args[1] || "").toLowerCase();
+    if (mod === "pytest" || mod === "unittest") return { kind: "test", label: `python -m ${mod}` };
+    return null;
+  }
+  if (SCRIPT_RUNNERS.has(prog)) {
+    const sub = (positional[0] || "").toLowerCase();
+    if (!sub) return null;
+    if (sub === "exec" || sub === "dlx" || sub === "x") return classifyTokens(args.slice(args.indexOf(positional[0]) + 1));
+    const isRun = sub === "run" || sub === "run-script";
+    const script = (isRun ? positional[1] || "" : sub).toLowerCase();
+    // "test:unit" / "build:prod" count as their base script.
+    const base = script.split(":")[0];
+    if (TEST_SCRIPTS.has(base)) return { kind: "test", label: `${prog} ${isRun ? "run " : ""}test` };
+    if (BUILD_SCRIPTS.has(base)) return { kind: "build", label: `${prog} run ${base}` };
+    // `yarn jest`, `pnpm tsc`: package managers also run binaries directly.
+    if (!isRun && (TEST_RUNNERS.has(base) || BUILD_TOOLS.has(base))) {
+      return { kind: TEST_RUNNERS.has(base) ? "test" : "build", label: base };
+    }
+    return null;
+  }
+  const rules = SUBCOMMAND_TOOLS[prog];
+  if (rules) {
+    // Gradle task paths like ":app:test" count as their last segment.
+    const targets = positional.map((a) => a.toLowerCase().split(":").pop() || "");
+    const test = targets.find((t) => rules.test.includes(t));
+    if (test) return { kind: "test", label: `${prog} ${test}` };
+    const build = targets.find((t) => rules.build.includes(t));
+    if (build) return { kind: "build", label: `${prog} ${build}` };
+    if (prog === "make" && targets.length === 0) return { kind: "build", label: "make" };
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Recognizes a build or test command in a terminal command line and returns
+ * its kind plus a canonical label, or null for anything else. Chains
+ * (`&&`, `||`, `;`, `|`) report their first recognized command. Handles
+ * POSIX shells, PowerShell (`&` call operator, quoted paths, `.cmd`/`.exe`
+ * shims) and Windows path separators.
+ */
+export function classifyShellCommand(commandLine: string): ShellCommandMatch | null {
+  const segments = String(commandLine || "").split(/&&|\|\||[;|\r\n]/);
+  for (const segment of segments) {
+    const tokens = segment.match(/"[^"]*"|'[^']*'|\S+/g);
+    if (!tokens) continue;
+    const match = classifyTokens(tokens);
+    if (match) return match;
+  }
+  return null;
+}
+
+/**
+ * Exit codes that mean the Doctor interrupted the command (Ctrl+C), not that
+ * it failed: 130/143 are SIGINT/SIGTERM in POSIX shells; -1073741510 and
+ * 3221225786 are STATUS_CONTROL_C_EXIT (0xC000013A) as reported on Windows.
+ */
+function isInterruptExitCode(code: number): boolean {
+  return code === 130 || code === 143 || code === -1073741510 || code === 3221225786;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,20 +200,34 @@ export class ContextCapture {
   private contextDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private diagnosticsSnapshot: DiagnosticsSnapshot | null = null;
   private disposables: vscode.Disposable[] = [];
-  private gitWatcher: vscode.Disposable | null = null;
+  private gitWatchers: vscode.Disposable[] = [];
+  /**
+   * Last observed HEAD per repository root (fsPath -> { name, hash }). Used
+   * to classify git state changes into branch switches vs new commits.
+   */
+  private gitHeadState = new Map<string, { name: string | null; hash: string | null }>();
 
   // -----------------------------------------------------------------------
   // Construction
   // -----------------------------------------------------------------------
 
-  constructor(wsClient: any, context: vscode.ExtensionContext) {
+  constructor(wsClient: any) {
     this.wsClient = wsClient;
     this.currentContext = this.emptyContext();
 
-    // Send workspace paths on connect
+    // Each VS Code window runs its own extension host, so every connection
+    // reports its own workspace and focus state; the tray aggregates them
+    // (any window focused, the last focused window's workspace as cwd).
     this.wsClient.on("connected", () => {
       this.sendWorkspace();
+      this.sendFocus();
     });
+
+    this.disposables.push(
+      vscode.window.onDidChangeWindowState(() => {
+        this.sendFocus();
+      })
+    );
 
     // ---- Editor context listeners ----
 
@@ -144,10 +299,16 @@ export class ContextCapture {
         })
       );
       this.disposables.push(
-        vscode.tasks.onDidEndTask((e) => {
+        // onDidEndTask gives a TaskEndEvent with no process outcome at all;
+        // the old code tried to read exitCode from the task *definition*, but
+        // that is static JSON from tasks.json and never carries a runtime
+        // exit code - so every task end was misreported as "failed".
+        // onDidEndTaskProcess exposes the real process exit code, so success
+        // (0) and failure (non-zero) are now reported accurately.
+        vscode.tasks.onDidEndTaskProcess((e) => {
           this.sendActivity({
-            kind: e.execution.task.definition?.exitCode === 0 ? "task-end" : "task-error",
-            detail: `Task ${e.execution.task.name} ${e.execution.task.definition?.exitCode === 0 ? "completed" : "failed"}`,
+            kind: e.exitCode === 0 ? "task-end" : "task-error",
+            detail: `Task ${e.execution.task.name} ${e.exitCode === 0 ? "completed" : "failed"}`,
             timestamp: Date.now(),
             file: e.execution.task.definition?.program || "",
           });
@@ -158,7 +319,26 @@ export class ContextCapture {
     }
 
     // ---- Git (optional, best-effort) ----
-    this.tryWatchGit(context);
+    this.tryWatchGit();
+
+    // ---- Terminal build/test results (shell integration) ----
+    // window.onDidWriteTerminalData is a *proposed* API: without
+    // enabledApiProposals it throws in stable VS Code, and proposals can't
+    // ship on the Marketplace. onDidEndTerminalShellExecution is stable since
+    // VS Code 1.93 and reports the command line with its real exit code
+    // whenever shell integration is active (bash/zsh/fish/pwsh, Git Bash on
+    // Windows; not cmd.exe). Older hosts (engines allows 1.85) either lack it
+    // or still gate it behind its proposal, which throws and is caught here.
+    const shellEvents = vscode.window as any;
+    if (typeof shellEvents.onDidEndTerminalShellExecution === "function") {
+      try {
+        this.disposables.push(
+          shellEvents.onDidEndTerminalShellExecution((e: any) => this.handleShellExecutionEnd(e))
+        );
+      } catch {
+        // shell-integration events unavailable in this host
+      }
+    }
 
     // Send initial context
     this.refreshContext(vscode.window.activeTextEditor);
@@ -182,7 +362,7 @@ export class ContextCapture {
   /** Forces an immediate context flush to the Electron backend. */
   flushContext(): void {
     if (!this.wsClient?.isConnected()) return;
-    this.wsClient.send("vscode:context", { context: this.currentContext });
+    this.wsClient.notify("vscode:context", { context: this.currentContext });
   }
 
   dispose(): void {
@@ -190,10 +370,11 @@ export class ContextCapture {
       try { d.dispose(); } catch (_) { /* ignore */ }
     }
     this.disposables.length = 0;
-    if (this.gitWatcher) {
-      try { this.gitWatcher.dispose(); } catch (_) { /* ignore */ }
-      this.gitWatcher = null;
+    for (const w of this.gitWatchers) {
+      try { w.dispose(); } catch (_) { /* ignore */ }
     }
+    this.gitWatchers.length = 0;
+    this.gitHeadState.clear();
     if (this.diagnosticsDebounceTimer) {
       clearTimeout(this.diagnosticsDebounceTimer);
       this.diagnosticsDebounceTimer = null;
@@ -225,9 +406,14 @@ export class ContextCapture {
     }
     const doc = editor.document;
     const sel = editor.selection;
-    const selectionText = sel.isEmpty
+    let selectionText = sel.isEmpty
       ? null
       : doc.getText(sel);
+    // Cap oversized selections (see MAX_SELECTION_CHARS) so a huge
+    // selection cannot blow the WS payload or inflate every prompt.
+    if (selectionText && selectionText.length > MAX_SELECTION_CHARS) {
+      selectionText = selectionText.slice(0, MAX_SELECTION_CHARS) + "\n…(选中内容过长已截断)";
+    }
 
     this.currentContext = {
       activeFile: doc.fileName,
@@ -287,6 +473,11 @@ export class ContextCapture {
       }
     }
 
+    // Errors first (stable, so order within a severity is kept): the cap
+    // below would otherwise crowd them out behind warnings and hints from
+    // whichever files happen to be enumerated earlier.
+    details.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
+
     // Cap details at 50 entries to avoid blowing up WS payload (large projects
     // can produce thousands of diagnostics, potentially exceeding maxPayload).
     const MAX_DETAILS = 50;
@@ -308,7 +499,7 @@ export class ContextCapture {
       this.diagnosticsDebounceTimer = null;
       this.diagnosticsSnapshot = this.captureDiagnostics();
       if (!this.wsClient?.isConnected()) return;
-      this.wsClient.send("vscode:diagnostics", {
+      this.wsClient.notify("vscode:diagnostics", {
         diagnostics: this.diagnosticsSnapshot,
       });
     }, 2000); // 2s debounce — diagnostics can fire in bursts
@@ -321,10 +512,16 @@ export class ContextCapture {
   private sendWorkspace(): void {
     if (!this.wsClient?.isConnected()) return;
     const folders = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
-    this.wsClient.send("vscode:workspace", {
+    this.wsClient.notify("vscode:workspace", {
       workspaceFolders: folders,
       primaryWorkspace: folders[0] || null,
     });
+  }
+
+  private sendFocus(): void {
+    if (!this.wsClient?.isConnected()) return;
+    const state = vscode.window.state;
+    this.wsClient.notify("vscode:focus", { focused: state ? state.focused === true : true });
   }
 
   // -----------------------------------------------------------------------
@@ -337,7 +534,7 @@ export class ContextCapture {
     if (activity.kind === "save") {
       this.sendActivityImpl("vscode:activity", { activity });
     } else {
-      this.wsClient.send("vscode:activity", { activity });
+      this.wsClient.notify("vscode:activity", { activity });
     }
   }
 
@@ -348,35 +545,108 @@ export class ContextCapture {
       if (now - this.lastSaveTs < 3000) return;
       this.lastSaveTs = now;
     }
-    this.wsClient.send(type, payload);
+    this.wsClient.notify(type, payload);
+  }
+
+  // -----------------------------------------------------------------------
+  // Internals — terminal build/test results
+  // -----------------------------------------------------------------------
+
+  /**
+   * Forwards a failed build/test command as a structured event. Successful,
+   * interrupted or unknown-outcome commands and anything that isn't a
+   * recognized build/test are ignored, as are low-confidence command lines
+   * (scraped from the terminal buffer, may be wrong). Nothing is buffered
+   * while disconnected: a stale failure isn't worth mentioning later.
+   */
+  private handleShellExecutionEnd(e: any): void {
+    const exitCode = e?.exitCode;
+    if (typeof exitCode !== "number" || !Number.isInteger(exitCode) || exitCode === 0) return;
+    if (isInterruptExitCode(exitCode)) return;
+    const commandLine = e?.execution?.commandLine;
+    // TerminalShellExecutionCommandLineConfidence.Low === 0
+    if (!commandLine || typeof commandLine.value !== "string" || commandLine.confidence === 0) return;
+    const match = classifyShellCommand(commandLine.value);
+    if (!match || !this.wsClient?.isConnected()) return;
+    const evt: TerminalEvent = {
+      kind: match.kind === "test" ? "test-fail" : "build-error",
+      command: match.label,
+      exitCode,
+      timestamp: Date.now(),
+    };
+    this.wsClient.notify("vscode:terminal-event", evt);
   }
 
   // -----------------------------------------------------------------------
   // Internals — git (best-effort)
   // -----------------------------------------------------------------------
 
-  private tryWatchGit(context: vscode.ExtensionContext): void {
+  private tryWatchGit(): void {
     try {
-      // The git extension API is not directly importable — detect at runtime
+      // The git extension API is not directly importable - detect at runtime
       const gitExt = vscode.extensions.getExtension("vscode.git");
       if (!gitExt) return;
-      Promise.resolve(gitExt.activate()).then((api: any) => {
-        if (!api || !api.repositories) return;
-        for (const repo of api.repositories) {
-          this.gitWatcher = repo.state.onDidChange(() => {
-            // Heuristic: detect new commits by monitoring HEAD changes
-            this.sendActivity({
-              kind: "git-branch-switch",
-              detail: `HEAD changed in ${repo.rootUri?.fsPath || "repo"}`,
-              timestamp: Date.now(),
-              file: repo.rootUri?.fsPath || "",
-            });
-          });
-          break; // watch first repo only
+      Promise.resolve(gitExt.activate()).then((exports: any) => {
+        // activate() resolves to the extension's exports, { enabled, getAPI };
+        // the repository list lives on the versioned API object.
+        const api = exports && typeof exports.getAPI === "function" ? exports.getAPI(1) : null;
+        if (!api) return;
+        for (const repo of api.repositories || []) this.watchRepository(repo);
+        // Repositories are discovered asynchronously after activation, so the
+        // list is usually still empty here: watch the ones that open later.
+        if (typeof api.onDidOpenRepository === "function") {
+          this.gitWatchers.push(api.onDidOpenRepository((repo: any) => this.watchRepository(repo)));
         }
       }, () => { /* git not available */ });
     } catch {
-      // Git extension not available — silently ignore
+      // Git extension not available - silently ignore
     }
+  }
+
+  private watchRepository(repo: any): void {
+    if (!repo?.state || typeof repo.state.onDidChange !== "function") return;
+    const root = repo.rootUri?.fsPath || "";
+    // Remember the current HEAD so state changes can be classified.
+    // repo.state fires on ANY change (file status, index, HEAD...), so
+    // comparing the HEAD reference lets us report real branch switches
+    // and new commits instead of "HEAD changed" for every refresh.
+    const snapshot = this.snapshotGitHead(repo);
+    if (snapshot) this.gitHeadState.set(root, snapshot);
+    this.gitWatchers.push(
+      repo.state.onDidChange(() => {
+        const next = this.snapshotGitHead(repo);
+        if (!next) return;
+        const prev = this.gitHeadState.get(root);
+        this.gitHeadState.set(root, next);
+        if (prev && next.name && prev.name !== next.name) {
+          // The branch pointer moved - a real branch switch.
+          this.sendActivity({
+            kind: "git-branch-switch",
+            detail: `Branch switched to ${next.name} in ${path.basename(root) || "repo"}`,
+            timestamp: Date.now(),
+            file: root,
+          });
+        } else if (prev && next.hash && prev.hash !== next.hash) {
+          // Same branch, new commit.
+          this.sendActivity({
+            kind: "git-commit",
+            detail: `New commit ${next.hash.slice(0, 7)} in ${path.basename(root) || "repo"}`,
+            timestamp: Date.now(),
+            file: root,
+          });
+        }
+        // Otherwise: a plain working-tree/index change - nothing to report.
+      })
+    );
+  }
+
+  /**
+   * Reads the current HEAD reference (name + commit hash). Returns null when
+   * the repository has no HEAD yet (empty repo / detached with no commit).
+   */
+  private snapshotGitHead(repo: any): { name: string | null; hash: string | null } | null {
+    const head = repo.state?.HEAD;
+    if (!head) return null;
+    return { name: head.name ?? null, hash: head.commit?.hash ?? null };
   }
 }

@@ -136,6 +136,26 @@ function codexHomeDir() {
   return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 }
 
+// Codex's own model cache (`$CODEX_HOME/models_cache.json`), which the CLI
+// refreshes whenever it runs. A cheap synchronous read, so the send path can
+// validate a pinned model without spawning anything. Returns null when the
+// file is missing, unreadable, or written by a different CLI version.
+function readCodexModelCatalogFile(expectedVersion = "") {
+  try {
+    const file = path.join(codexHomeDir(), "models_cache.json");
+    if (!fs.existsSync(file)) return null;
+    const raw = fs.readFileSync(file, "utf8");
+    const parsed = JSON.parse(raw);
+    const cachedVersion = normalizeCodexVersion(parsed.client_version);
+    if (expectedVersion && cachedVersion && !codexVersionsMatch(cachedVersion, expectedVersion)) {
+      return null;
+    }
+    return parseCodexModelCatalog(raw);
+  } catch {
+    return null;
+  }
+}
+
 function readCodexConfigValue(key) {
   try {
     const config = fs.readFileSync(path.join(codexHomeDir(), "config.toml"), "utf8");
@@ -181,6 +201,7 @@ module.exports = {
   parseCodexModelCatalog,
   parseTopLevelTomlString,
   readCodexConfigValue,
+  readCodexModelCatalogFile,
   reasoningEffortsForModel,
   resolveCodexModel
 };

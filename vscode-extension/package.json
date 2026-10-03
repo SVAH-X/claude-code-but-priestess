@@ -13,8 +13,13 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Chat", "Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -47,6 +52,31 @@
         "command": "prts.showContextInfo",
         "title": "PRTS: Show Editor Context Info",
         "icon": "$(info)"
+      },
+      {
+        "command": "prts.suggestFix",
+        "title": "PRTS: Suggest Fix for Selected Code",
+        "icon": "$(lightbulb)"
+      },
+      {
+        "command": "prts.explainError",
+        "title": "PRTS: Explain Error at Cursor",
+        "icon": "$(question)"
+      },
+      {
+        "command": "prts.reviewFile",
+        "title": "PRTS: Review Current File",
+        "icon": "$(search)"
+      },
+      {
+        "command": "prts.summarizeChanges",
+        "title": "PRTS: Summarize Recent Git Changes",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "prts.generateTests",
+        "title": "PRTS: Generate Tests for Selected Code",
+        "icon": "$(beaker)"
       }
     ],
     "viewsContainers": {
@@ -106,6 +136,21 @@
         {
           "command": "prts.toggleVibeCoding",
           "group": "3_mode@1"
+        },
+        {
+          "command": "prts.suggestFix",
+          "when": "editorTextFocus",
+          "group": "4_fix@1"
+        },
+        {
+          "command": "prts.explainError",
+          "when": "editorTextFocus",
+          "group": "4_fix@2"
+        },
+        {
+          "command": "prts.reviewFile",
+          "when": "editorTextFocus",
+          "group": "4_fix@3"
         }
       ],
       "commandPalette": [
@@ -129,6 +174,26 @@
         "command": "prts.toggleVibeCoding",
         "key": "ctrl+shift+alt+v",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "prts.explainError",
+        "key": "ctrl+shift+alt+e",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "prts.reviewFile",
+        "key": "ctrl+shift+alt+r",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "prts.summarizeChanges",
+        "key": "ctrl+shift+alt+g",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "prts.generateTests",
+        "key": "ctrl+shift+alt+t",
+        "when": "editorTextFocus"
       }
     ],
     "configuration": {
@@ -138,6 +203,18 @@
           "type": "number",
           "default": 0,
           "description": "WebSocket port of the PRTS Electron app. Auto-detected from ws-port.json at startup; set manually only if auto-detection fails."
+        },
+        "prts.inlineCompletion.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "启用行内代码补全（灰色提示文本）。每次输入停顿都会调用一次本地 Claude Code / Codex CLI（消耗用量），并把光标前约 6 行代码发送给模型。陪伴模式下不生效；.env*、*.pem、*.key、id_* 等敏感文件以及匹配 prts.advisorFileBlacklist 的文件永远不会发送。补全进程不带任何工具。"
+        },
+        "prts.advisorFileBlacklist": {
+          "type": "string",
+          "default": ".env\n.env.*\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa*\nid_ed25519*\nid_ecdsa*\n.npmrc\n.netrc\n.pgpass\n.git-credentials\nsecrets/",
+          "scope": "application",
+          "editPresentation": "multilineText",
+          "description": "普瑞赛斯在陪伴/顾问模式下不会自行读取的文件（gitignore 风格，每行一个，相对工作区根目录）。Claude Code 以 Read 拒绝规则强制执行；Codex 没有对应的拦截机制，仅在顾问模式下收到文字提示。匹配文件的编辑器上下文（活动文件、选区、诊断）也不会自动发送。代理模式下不生效，也从不拦截你亲手附上的文件。只有你在 VS Code 用户设置里显式设置的值才会同步到 PRTS 托盘；保持未设置则以托盘 settings.json 中的列表为准。"
         }
       }
     }
@@ -148,15 +225,25 @@
     "vscode:package": "vsce package",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:compile": "tsc -p ./",
+    "test:unit": "tsc -p ./ && mocha \"out/src/test/unit/**/*.test.js\" --require ./out/src/test/unit/helpers/vscode-stub.js --ui bdd --timeout 20000",
+    "test:integration": "tsc -p ./ && node ./out/src/test/runTest.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.10",
-    "typescript": "^5.3.0",
-    "@vscode/vsce": "^3.9.2"
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.2",
+    "mocha": "^11.7.6",
+    "typescript": "^5.3.0"
+  },
+  "overrides": {
+    "diff": "^5.2.0"
   }
 }

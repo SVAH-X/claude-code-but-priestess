@@ -6,7 +6,9 @@
 //
 //  - Proactive check: when enabled and every gate passes, run a silent chat
 //    turn that screenshots the screen and lets the model decide whether to
-//    speak ([[silent]] = stay quiet; see chat.sendProactive).
+//    speak ([[silent]] = stay quiet; see chat.sendProactive). The screenshot
+//    needs 老婆模式 consent: a VS Code diagnostic/activity check without it
+//    sends the editor text context only (chat.js).
 //  - Memory curation: at most ~weekly, when MEMORY.md has grown big and the
 //    chat has been idle a while, run a silent turn asking her to tidy it.
 // ============================================================
@@ -31,6 +33,7 @@ let lastProactiveAttemptAt = 0;
 let lastMaintenanceAttemptAt = 0;
 let lastDiagnosticAttemptAt = 0;
 let lastActivityAttemptAt = 0;
+let lastDiagErrorCount = -1; // tracks previous diagnostic error count for improvement detection
 // Daily cap state is in-memory on purpose: a tray app stays up for days, and
 // a restart at worst resets the day's budget once.
 let daily = { day: "", count: 0 };
@@ -63,6 +66,14 @@ function inQuietHours(date = new Date()) {
   return start < end ? now >= start && now < end : now >= start || now < end;
 }
 
+// A new day only refills the daily budget. Intervals and cooldowns are
+// independent of the calendar: zeroing the attempt stamps here used to let
+// the day rollover bypass the proactive interval and the boot delay.
+function resetDailyBudgetIfNewDay() {
+  const day = localDayKey();
+  if (daily.day !== day) daily = { day, count: 0 };
+}
+
 function intervalMs() {
   return clampNumber(settings.get("proactiveIntervalMin"), 5, 24 * 60, 20) * 60 * 1000;
 }
@@ -93,23 +104,56 @@ function activityCooldownMs() {
   return clampNumber(settings.get("activityCheckCooldownMin"), 1, 60, 3) * 60 * 1000;
 }
 
+// Gating is independent of vibeCodingMode on purpose. 老婆模式 is a
+// companionship feature, not a coding permission, so it runs in every mode.
+// The coding checks each need their own explicit opt-in (settings.json):
+//   vibeCodingDiagnostics        → editor errors (and the "fixed it" praise)
+//   vibeCodingActivityNarration  → save/git/task activity + terminal build/test failures
+// Turns that carry editor context are capped at advisor permissions in
+// chat.js (see chat-runtime silentTurnVibeMode).
+
+// A terminal build/test failure is only worth mentioning right after it
+// happened; one that waited out quiet hours or a busy turn is dropped.
+const TERMINAL_EVENT_FRESH_MS = 2 * 60 * 1000;
+
 function shouldRunDiagnosticCheck(now) {
   if (!getWsServer().isVscodeActive()) return false;
-  if (settings.get("vibeCodingDiagnostics") !== true) return false;
+  if (settings.get("vibeCodingDiagnostics") !== true) return false; // explicit user opt-in
   if (now - lastDiagnosticAttemptAt < diagnosticCooldownMs()) return false;
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
-  const day = localDayKey();
-  if (daily.day !== day) {
-    daily = { day, count: 0 };
-    lastDiagnosticAttemptAt = 0;
-    lastActivityAttemptAt = 0;
-    lastProactiveAttemptAt = 0;
-  }
+  resetDailyBudgetIfNewDay();
   if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
   const diag = getWsServer().getLatestDiagnostics();
-  if (!diag || diag.errors === 0) return false;
+  if (!diag) return false;
+  // Detect improvement: errors dropped from previous snapshot → positive feedback.
+  if (lastDiagErrorCount > 0 && diag.errors < lastDiagErrorCount && diag.errors === 0) {
+    lastDiagErrorCount = diag.errors;
+    return "improvement";
+  }
+  lastDiagErrorCount = diag.errors;
+  if (diag.errors === 0) return false;
+  const lastTs = chat.getLastConversationTs();
+  if (lastTs && now - lastTs < cooldownMs()) return false;
+  return true;
+}
+
+function shouldRunTerminalCheck(now) {
+  if (!getWsServer().isVscodeActive()) return false;
+  // Build/test results are activity: same opt-in and cooldown as narration.
+  if (settings.get("vibeCodingActivityNarration") !== true) return false;
+  if (now - lastActivityAttemptAt < activityCooldownMs()) return false;
+  if (chat.isBusy()) return false;
+  if (inQuietHours()) return false;
+  resetDailyBudgetIfNewDay();
+  if (daily.count >= dailyCap()) return false;
+  if (!hasCliProvider()) return false;
+  const evt = getWsServer().getLatestTerminalEvent();
+  if (!evt) return false;
+  // Only trigger on build errors or test failures (not test passes).
+  if (evt.kind !== "build-error" && evt.kind !== "test-fail") return false;
+  if (!(now - Number(evt.at) < TERMINAL_EVENT_FRESH_MS)) return false;
   const lastTs = chat.getLastConversationTs();
   if (lastTs && now - lastTs < cooldownMs()) return false;
   return true;
@@ -117,17 +161,11 @@ function shouldRunDiagnosticCheck(now) {
 
 function shouldRunActivityCheck(now) {
   if (!getWsServer().isVscodeActive()) return false;
-  if (settings.get("vibeCodingActivityNarration") !== true) return false;
+  if (settings.get("vibeCodingActivityNarration") !== true) return false; // explicit user opt-in
   if (now - lastActivityAttemptAt < activityCooldownMs()) return false;
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
-  const day = localDayKey();
-  if (daily.day !== day) {
-    daily = { day, count: 0 };
-    lastDiagnosticAttemptAt = 0;
-    lastActivityAttemptAt = 0;
-    lastProactiveAttemptAt = 0;
-  }
+  resetDailyBudgetIfNewDay();
   if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
   const activities = getWsServer().getRecentActivities();
@@ -144,13 +182,7 @@ function shouldRunProactive(now) {
   if (settings.get("waifuMode") !== true) return false;
   if (now - lastProactiveAttemptAt < intervalMs()) return false;
   if (inQuietHours()) return false;
-  const day = localDayKey();
-  if (daily.day !== day) {
-    daily = { day, count: 0 };
-    lastDiagnosticAttemptAt = 0;
-    lastActivityAttemptAt = 0;
-    lastProactiveAttemptAt = 0;
-  }
+  resetDailyBudgetIfNewDay();
   if (daily.count >= dailyCap()) return false;
   if (chat.isBusy()) return false;
   if (!hasCliProvider()) return false;
@@ -180,13 +212,30 @@ function shouldRunMaintenance(now) {
 function tick() {
   const now = Date.now();
   try {
-    // Priority: diagnostics > activity > generic proactive > maintenance
+    // Priority: diagnostics > terminal > activity > generic proactive > maintenance
     // Each tick fires at most one self-turn to avoid flooding the model.
 
-    if (shouldRunDiagnosticCheck(now)) {
+    const diagResult = shouldRunDiagnosticCheck(now);
+    if (diagResult) {
       lastDiagnosticAttemptAt = now;
       const diag = getWsServer().getLatestDiagnostics();
-      if (chat.sendProactive({ diagnosticContext: diag })?.ok) {
+      if (diagResult === "improvement") {
+        // Positive feedback: errors went from N to 0 — she noticed.
+        if (chat.sendProactive({ diagnosticImprovement: diag })?.ok) {
+          daily.count += 1;
+        }
+      } else if (chat.sendProactive({ diagnosticContext: diag })?.ok) {
+        daily.count += 1;
+      }
+      return;
+    }
+
+    if (shouldRunTerminalCheck(now)) {
+      lastActivityAttemptAt = now;
+      // Consume the event: one failure is mentioned at most once, instead of
+      // re-triggering every cooldown until the daily cap.
+      const evt = getWsServer().takeTerminalEvent();
+      if (evt && chat.sendProactive({ terminalEvent: evt })?.ok) {
         daily.count += 1;
       }
       return;
@@ -211,8 +260,12 @@ function tick() {
     }
 
     if (shouldRunMaintenance(now)) {
-      lastMaintenanceAttemptAt = now;
-      if (chat.sendMaintenance()?.ok) {
+      const result = chat.sendMaintenance();
+      // A VS Code turn in flight is as transient as a busy popover (which
+      // shouldRunMaintenance waits out above): try again next tick instead of
+      // burning the retry window.
+      if (result?.reason !== "vscode-busy") lastMaintenanceAttemptAt = now;
+      if (result?.ok) {
         settings.set({ memoryCuratedAt: now });
       }
     }
@@ -232,4 +285,5 @@ function start() {
   tickTimer.unref?.();
 }
 
-module.exports = { start };
+// tick is exported for tests; the app only calls start().
+module.exports = { start, tick };

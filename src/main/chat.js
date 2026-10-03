@@ -11,20 +11,27 @@ const settings = require("./settings");
 const persona = require("./persona");
 const skills = require("./skills");
 const priestessProvider = require("./priestess-provider");
-const { spawnCli, spawnCliSync } = require("./cli-spawn");
+const { killProcessTree, spawnCli, spawnCliSync } = require("./cli-spawn");
 const {
   attachmentTempName,
   buildCodexExecArgs,
-  resolveResumeSessionId
+  codexSessionIdFromEvent,
+  createBackoffRetry,
+  resolveResumeSessionId,
+  silentTurnVibeMode,
+  silentTurnWantsScreenshot
 } = require("./chat-runtime");
-const { parseClaudeEffortLevels } = require("./claude-capabilities");
+const { parseClaudeEffortLevels, claudeHelpSupportsTools, claudeModeToolArgs } = require("./claude-capabilities");
 const {
   compatibleReasoningEffort,
   findCatalogModel,
+  normalizeCodexVersion,
   parseCodexModelCatalog,
+  readCodexModelCatalogFile,
   reasoningEffortsForModel,
   resolveCodexModel
 } = require("./codex-model-catalog");
+const { claudeReadDenyRules, matchBlacklist, matchClaudeReadDeny, parseBlacklist } = require("./file-blacklist");
 const {
   classifyCodexRejection,
   codexEventErrorText,
@@ -44,8 +51,6 @@ const MAX_USER_MESSAGE_CHARS = 100_000;
 const RECENT_TRANSCRIPT_MESSAGE_LIMIT = 24;
 const SUMMARY_MAX_CHARS = 14000;
 const SUMMARY_MESSAGE_MAX_CHARS = 720;
-const ARCHIVE_MAX_BYTES = 5 * 1024 * 1024;
-const ARCHIVE_TARGET_BYTES = 4 * 1024 * 1024;
 // Codex persists every resumed turn (including our persona and transcript) in
 // its own JSONL rollout. Once that file grows large, adding an image can turn a
 // normal request into repeated transport reconnects. PRTS already owns bounded
@@ -61,6 +66,12 @@ let pendingAssistantId = null;
 let pendingAssistantText = "";
 let quitPending = false;
 let cancelRequested = false;
+// Bumped on every launch. Each turn's stream/close/error callbacks capture the
+// value at launch and bail out when it no longer matches, so a cancelled or
+// dying turn (its process may linger after Stop) can never finish, pollute or
+// double-finish the turn that replaced it. cancel() leaves the token alone:
+// the cancelled turn still owns the idle(cancelled) status, exactly once.
+let turnToken = 0;
 let turnLaunching = false;
 const outboundQueue = [];
 let sessionIds = { [PROVIDERS.CLAUDE]: null, [PROVIDERS.CODEX]: null };
@@ -99,11 +110,22 @@ let codexReasoningFallbackInFlight = false;
 let codexErrorText = "";
 let codexErrorSurfaced = false;
 const MAX_TOOL_OUTPUT_CHARS = 4000;
-let codexModelCatalogCache = { command: null, ts: 0, catalog: null };
+// Live Codex model catalog, see loadCodexModelCatalog(). `ts` is when
+// `catalog` was obtained, `failedAt` when the last background probe failed.
+const CODEX_CATALOG_TTL_MS = 5 * 60 * 1000;
+const CODEX_CATALOG_RETRY_MS = 60 * 1000;
+let codexModelCatalogCache = {
+  command: null,
+  version: "",
+  ts: 0,
+  catalog: null,
+  failedAt: 0,
+  refreshing: false
+};
 let lastInvalidCodexModelNotice = "";
 let lastInvalidCodexReasoningNotice = "";
 let lastInvalidClaudeReasoningNotice = "";
-let claudeEffortProbeCache = { command: null, version: "", levels: null };
+let claudeHelpProbeCache = { command: null, version: "", levels: null, toolsFlag: true };
 const codexSessionFileCache = new Map();
 
 // Hidden directive tags — she begins each reply with [[mood:X]] and may emit
@@ -135,6 +157,7 @@ const DIRECTIVE_PREFIXES = ["[[mood:", "[[skill:", "[[observe:", "[[remember:", 
 // Generous because [[observe:…]] carries a free-form sentence.
 const DIRECTIVE_PARTIAL_MAX = 240;
 const OBSERVATION_MAX_PER_TURN = 3;
+const REMEMBER_MAX_PER_TURN = 3;
 let directiveTailBuffer = "";
 let skillExecutedThisTurn = new Set();
 let observedThisTurn = new Set();
@@ -147,6 +170,13 @@ let sawSilentDirective = false;
 // no tool pills, no streaming. A proactive reply only surfaces if she chose
 // to speak (no [[silent]] and real text). null | "proactive" | "maintenance".
 let silentTurnKind = null;
+// Whether the current proactive turn carries VS Code editor context; such
+// turns are capped at advisor permissions. Set by sendProactive, and kept
+// across the self-heal retries (which replay silentTurnKind the same way).
+let proactiveEditorContext = false;
+// Whether the current proactive turn may look at the screen: only with 老婆模式
+// consent. An editor-context check without it runs on VS Code text alone.
+let proactiveWantsScreenshot = false;
 // Mirrors the chat window's current 普猫猫 visual state (set by main.js when the
 // pet→chat transition rolls it). Kept here so the persona prompt can match what
 // the Doctor sees. Ephemeral; never persisted.
@@ -244,9 +274,9 @@ function providerSessionPlan(provider) {
 
 // Codex gets images as -i image input. Non-image files are inlined into the
 // prompt by persona.js (no --add-dir: `codex exec resume` rejects that flag).
-function codexAttachmentArgs() {
+function codexAttachmentArgs(attachments) {
   const args = [];
-  for (const p of pendingAttachments) {
+  for (const p of attachments) {
     if (isImagePath(p)) args.push("-i", p);
   }
   return args;
@@ -256,44 +286,144 @@ function codexAttachmentArgs() {
 // outside agent mode is sandboxed to the cwd. Grant each image's parent dir so
 // Read can reach images dropped from elsewhere (Desktop etc.); without this,
 // non-agent turns answer "no photo". Text files are inlined, so only images.
-function attachmentDirArgs() {
+function attachmentDirArgs(images, screenshotPath) {
   const dirs = new Set();
-  for (const p of pendingAttachments) if (isImagePath(p)) dirs.add(path.dirname(p));
+  for (const p of images) dirs.add(path.dirname(p));
+  if (screenshotPath) dirs.add(path.dirname(screenshotPath));
   const args = [];
   for (const d of dirs) args.push("--add-dir", d);
   return args;
+}
+
+// The file blacklist guards what she reads on her own inside the working
+// directory. Files the Doctor attached himself are his explicit choice: they are
+// always delivered, and one from inside the working directory that matches the
+// list only earns a one-line heads-up in the modes where the list applies.
+function blacklistActiveForMode(mode) {
+  return mode === "companion" || mode === "advisor";
+}
+
+function noteBlacklistedAttachments(files) {
+  if (!Array.isArray(files) || !files.length) return;
+  if (!blacklistActiveForMode(String(settings.get("vibeCodingMode") || "companion"))) return;
+  const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
+  if (!patterns.length) return;
+  const root = resolveCwd();
+  const hits = [];
+  for (const p of files) {
+    const pattern = matchBlacklist(p, patterns, { root, outsideRoot: "ignore" });
+    if (pattern) hits.push(`${path.basename(p)}（${pattern}）`);
+  }
+  if (!hits.length) return;
+  pushSystem(`提示：附件 ${hits.join("、")} 命中了文件黑名单。这是你亲手附上的，已照常发送。`);
+}
+
+// Claude enforcement of the blacklist: companion/advisor turns carry Read deny
+// rules (Claude applies Read rules to Grep/Glob too) in a --settings file. A file
+// keeps globs, spaces and JSON quotes out of argv, which matters on Windows,
+// where a .cmd shim routes every argument through cmd.exe.
+// Returns { args, cleanupDir }: cleanupDir is set when a temp dir of its own
+// had to be created (it goes away with the turn like the prompt file's).
+function claudeReadDenyArgs(mode, promptFile) {
+  const none = { args: [], cleanupDir: null };
+  if (!blacklistActiveForMode(mode)) return none;
+  const rules = claudeReadDenyRules(parseBlacklist(settings.get("advisorFileBlacklist")));
+  if (!rules.length) return none;
+  const json = JSON.stringify({ permissions: { deny: rules } });
+  if (promptFile) {
+    try {
+      const file = path.join(promptFile.dir, "read-deny-settings.json");
+      fs.writeFileSync(file, json, "utf8");
+      return { args: ["--settings", file], cleanupDir: null };
+    } catch (error) {
+      console.warn("chat: failed to write read-deny settings", error);
+    }
+  }
+  const own = createInvocationTempFile("prts-claude-", "read-deny-settings.json", json);
+  if (own) return { args: ["--settings", own.file], cleanupDir: own.dir };
+  // No temp dir at all. Inline JSON is fine for a real executable, but cmd.exe
+  // would mangle its quotes, so on Windows this turn goes unenforced (advisor
+  // turns still carry the persona prompt hint).
+  if (process.platform === "win32") {
+    console.warn("chat: file blacklist not enforced this turn (no temp dir)");
+    return none;
+  }
+  return { args: ["--settings", json], cleanupDir: null };
+}
+
+// An attached image is always delivered. When the file (or the downscaled copy
+// that would stand in for it) sits where this turn's Claude Read deny rules
+// reach, Claude gets a neutrally named temp copy instead, so the Doctor's own
+// attachment stays readable while the deny rules keep guarding the workspace.
+function claudeAttachmentGuard(provider, mode) {
+  if (provider !== PROVIDERS.CLAUDE || !blacklistActiveForMode(mode)) return null;
+  const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
+  if (!patterns.length) return null;
+  // Compare both spellings of each path: the CLI may resolve symlinks (macOS
+  // /tmp -> /private/tmp) or 8.3 names before applying its rules. A file that
+  // does not exist yet is resolved through its folder.
+  const real = (p) => {
+    try { return fs.realpathSync.native(p); } catch { /* not there yet */ }
+    try { return path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p)); } catch { return p; }
+  };
+  const cwd = resolveCwd();
+  const roots = [...new Set([cwd, real(cwd)])];
+  // Outside the cwd Claude's relative rules deny nothing (seen on macOS). That
+  // is unverified on Windows, so there a name match outside the cwd also gets
+  // a neutral copy: a needless rename beats an image she cannot open.
+  const outsideRoot = process.platform === "win32" ? "basename" : "ignore";
+  return (file) => {
+    const files = [...new Set([file, real(file)])];
+    return roots.some((root) => files.some((f) => matchClaudeReadDeny(f, patterns, { root, outsideRoot }) !== null));
+  };
+}
+
+function neutralAttachmentName(index, ext) {
+  return `${String(index).padStart(2, "0")}-attachment${ext || ".png"}`;
 }
 
 // Vision cost + latency scale with pixels, so cap oversized images before they
 // go to a backend (a huge screenshot/photo is mostly wasted detail). The Doctor
 // still sees the full original in their own bubble; only the backend copy
 // shrinks. Returns paths with large images swapped for downscaled temp copies.
+// `denied` (from claudeAttachmentGuard) marks paths Claude may not Read.
 const ATTACHMENT_MAX_DIM = 1280;
 
-function resolveAttachmentsForBackend(paths) {
+function resolveAttachmentsForBackend(paths, denied = null) {
   if (!paths.some(isImagePath)) return paths;
   let dir = null;
-  let img = null;
+  const tempDir = () => {
+    if (!dir) {
+      dir = path.join(os.tmpdir(), "prts-attach");
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return dir;
+  };
   return paths.map((p, index) => {
     if (!isImagePath(p)) return p;
     try {
       const { nativeImage } = require("electron");
-      img = nativeImage.createFromPath(p);
-      if (img.isEmpty()) return p;
-      const { width, height } = img.getSize();
-      if (Math.max(width, height) <= ATTACHMENT_MAX_DIM) return p;
-      const resized =
-        width >= height
-          ? img.resize({ width: ATTACHMENT_MAX_DIM, quality: "good" })
-          : img.resize({ height: ATTACHMENT_MAX_DIM, quality: "good" });
-      if (!dir) {
-        dir = path.join(os.tmpdir(), "prts-attach");
-        fs.rmSync(dir, { recursive: true, force: true });
-        fs.mkdirSync(dir, { recursive: true });
+      const img = nativeImage.createFromPath(p);
+      const size = img.isEmpty() ? null : img.getSize();
+      if (size && Math.max(size.width, size.height) > ATTACHMENT_MAX_DIM) {
+        const resized =
+          size.width >= size.height
+            ? img.resize({ width: ATTACHMENT_MAX_DIM, quality: "good" })
+            : img.resize({ height: ATTACHMENT_MAX_DIM, quality: "good" });
+        let out = path.join(tempDir(), attachmentTempName(p, index));
+        // The copy keeps the original's name, and os.tmpdir() can sit inside
+        // the cwd (Windows: %LOCALAPPDATA%\Temp under a home-dir cwd).
+        if (denied && (denied(p) || denied(out))) out = path.join(tempDir(), neutralAttachmentName(index, ".png"));
+        fs.writeFileSync(out, resized.toPNG());
+        return out;
       }
-      const out = path.join(dir, attachmentTempName(p, index));
-      fs.writeFileSync(out, resized.toPNG());
-      return out;
+      if (denied && denied(p)) {
+        const out = path.join(tempDir(), neutralAttachmentName(index, path.extname(p).toLowerCase()));
+        fs.copyFileSync(p, out);
+        return out;
+      }
+      return p;
     } catch {
       return p;
     }
@@ -560,15 +690,25 @@ function probeExecutable(candidate) {
   }
 }
 
-function probeClaudeEffortLevels(command, version) {
+// Reads `claude --help` once per CLI: the effort levels it exposes and whether
+// it has the --tools allowlist (see claudeModeToolArgs). `levels` is a
+// definite answer when it is an array (an empty one means an older CLI
+// without `--effort`) and is then cached per command + version. null means
+// the probe itself failed — it timed out or could not run — so the CLI's
+// support is simply unknown: nothing is cached (the next scan asks again) and
+// callers must not treat it as "no levels". One 5s stall used to be cached as
+// [] and silently wiped the saved claudeReasoningEffort setting. For the
+// --tools flag an unreadable help is treated as a current CLI.
+function probeClaudeHelp(command, version) {
   if (
-    claudeEffortProbeCache.command === command &&
-    claudeEffortProbeCache.version === version &&
-    claudeEffortProbeCache.levels
+    claudeHelpProbeCache.command === command &&
+    claudeHelpProbeCache.version === version &&
+    Array.isArray(claudeHelpProbeCache.levels)
   ) {
-    return claudeEffortProbeCache.levels;
+    return claudeHelpProbeCache;
   }
-  let levels = [];
+  let levels = null;
+  let toolsFlag = true;
   try {
     const result = spawnCliSync(command, ["--help"], {
       encoding: "utf8",
@@ -577,13 +717,16 @@ function probeClaudeEffortLevels(command, version) {
       maxBuffer: 1024 * 1024
     });
     if (!result.error && result.status === 0) {
-      levels = parseClaudeEffortLevels(`${result.stdout || ""}\n${result.stderr || ""}`);
+      const help = `${result.stdout || ""}\n${result.stderr || ""}`;
+      levels = parseClaudeEffortLevels(help);
+      toolsFlag = claudeHelpSupportsTools(help);
     }
   } catch {
-    /* Older Claude CLIs simply keep the effort menu hidden. */
+    levels = null;
   }
-  claudeEffortProbeCache = { command, version, levels };
-  return levels;
+  const probed = { command, version, levels, toolsFlag };
+  if (Array.isArray(levels)) claudeHelpProbeCache = probed;
+  return probed;
 }
 
 function detectProvider(provider, previous = null) {
@@ -599,6 +742,7 @@ function detectProvider(provider, previous = null) {
             (probe.version ? ` (${probe.version})` : "")
           );
         }
+        const help = normalized === PROVIDERS.CLAUDE ? probeClaudeHelp(candidate, probe.version) : null;
         return {
           provider: normalized,
           label: providerLabel(normalized),
@@ -606,9 +750,8 @@ function detectProvider(provider, previous = null) {
           available: true,
           command: candidate,
           version: probe.version,
-          effortLevels: normalized === PROVIDERS.CLAUDE
-            ? probeClaudeEffortLevels(candidate, probe.version)
-            : []
+          effortLevels: help ? help.levels : [],
+          toolsFlag: help ? help.toolsFlag : true
         };
       }
     } catch {
@@ -778,33 +921,80 @@ function cleanupInvocation(invocation) {
   }
 }
 
+// The model catalog of the active Codex CLI, for validating a pinned model or
+// effort before a turn. Never blocks: `codex debug models` used to run
+// synchronously here (3s ceiling, twice per turn, and on every turn once it
+// had failed), freezing the main process. A turn now only reads the cache,
+// seeded from Codex's own models_cache.json and refreshed by a background
+// probe at most once per TTL — or once a minute after a failure. A missing
+// catalog is not an error: the CLI stays the final authority and the close
+// handler heals a rejected pin reactively.
 function loadCodexModelCatalog() {
-  const command = resolveExecutable(PROVIDERS.CODEX);
+  const info = ensureProviderAvailability()[PROVIDERS.CODEX];
+  const command = info?.command;
   if (!command) return null;
+  const version = normalizeCodexVersion(info.version);
   const now = Date.now();
-  if (
-    codexModelCatalogCache.command === command &&
-    codexModelCatalogCache.catalog &&
-    now - codexModelCatalogCache.ts < 5 * 60 * 1000
-  ) {
-    return codexModelCatalogCache.catalog;
+  if (codexModelCatalogCache.command !== command || codexModelCatalogCache.version !== version) {
+    const seeded = readCodexModelCatalogFile(version);
+    codexModelCatalogCache = {
+      command,
+      version,
+      ts: seeded?.length ? now : 0,
+      catalog: seeded?.length ? seeded : null,
+      failedAt: 0,
+      refreshing: false
+    };
   }
-  try {
-    const result = spawnCliSync(command, ["debug", "models"], {
-      encoding: "utf8",
-      env: { ...process.env, NO_COLOR: "1" },
-      timeout: 3000,
-      maxBuffer: 8 * 1024 * 1024
-    });
-    const catalog = result.status === 0 ? parseCodexModelCatalog(result.stdout) : null;
+  const cache = codexModelCatalogCache;
+  const stale = !cache.catalog || now - cache.ts >= CODEX_CATALOG_TTL_MS;
+  const retryDue = now - cache.failedAt >= CODEX_CATALOG_RETRY_MS;
+  if (stale && retryDue && !cache.refreshing) refreshCodexModelCatalogInBackground(cache);
+  return cache.catalog;
+}
+
+function refreshCodexModelCatalogInBackground(cache) {
+  cache.refreshing = true;
+  let stdout = "";
+  let killed = false;
+  let settled = false;
+  const settle = (catalog) => {
+    if (settled) return;
+    settled = true;
+    cache.refreshing = false;
     if (catalog?.length) {
-      codexModelCatalogCache = { command, ts: now, catalog };
-      return catalog;
+      cache.catalog = catalog;
+      cache.ts = Date.now();
+      cache.failedAt = 0;
+    } else {
+      cache.failedAt = Date.now();
     }
+  };
+  try {
+    const proc = spawnCli(cache.command, ["debug", "models"], {
+      env: { ...process.env, NO_COLOR: "1" },
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true
+    });
+    const timer = setTimeout(() => {
+      killed = true;
+      killProcessTree(proc);
+    }, 8000);
+    if (typeof timer.unref === "function") timer.unref();
+    proc.stdout.on("data", (chunk) => {
+      if (stdout.length < 8 * 1024 * 1024) stdout += chunk.toString("utf8");
+    });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      settle(code === 0 && !killed ? parseCodexModelCatalog(stdout) : null);
+    });
+    proc.on("error", () => {
+      clearTimeout(timer);
+      settle(null);
+    });
   } catch {
-    /* If catalog probing fails, leave the user's CLI default alone. */
+    settle(null);
   }
-  return null;
 }
 
 function validatedCodexModel() {
@@ -863,8 +1053,10 @@ function validatedCodexReasoningEffort() {
 function validatedClaudeReasoningEffort() {
   const selected = String(settings.get("claudeReasoningEffort") || "").trim();
   if (!selected) return "";
-  const supported = ensureProviderAvailability()[PROVIDERS.CLAUDE]?.effortLevels || [];
-  if (supported.includes(selected)) return selected;
+  const supported = ensureProviderAvailability()[PROVIDERS.CLAUDE]?.effortLevels;
+  // null: the help probe failed, so support is unknown. Pass the setting
+  // through and let the CLI decide; only a definite "unsupported" clears it.
+  if (!Array.isArray(supported) || supported.includes(selected)) return selected;
   settings.set({ claudeReasoningEffort: "" });
   if (lastInvalidClaudeReasoningNotice !== selected) {
     lastInvalidClaudeReasoningNotice = selected;
@@ -935,6 +1127,15 @@ function emitQueueState() {
   notify({ kind: "queue", length: outboundQueue.length });
 }
 
+// Every launch starts with a clean cancel flag — a Stop that landed on the
+// previous turn must not end this one as "cancelled" (which would also skip
+// the resume self-heal and the model fallbacks).
+function beginTurnToken() {
+  cancelRequested = false;
+  turnToken += 1;
+  return turnToken;
+}
+
 function finishTurn(extra = {}) {
   if (!quitPending && outboundQueue.length > 0) {
     emitStatus("running", { chained: true, pending: true });
@@ -943,6 +1144,12 @@ function finishTurn(extra = {}) {
   }
   emitStatus("idle", extra);
 }
+
+// A queued message whose CLI vanished mid-turn (e.g. a self-update swapping the
+// binary) is retried on a short backoff: 5s, 10s, 20s, 40s. Each attempt
+// rescans the CLIs with synchronous `--version` probes on the main thread, so
+// the retry is bounded instead of polling forever.
+const outboundRetry = createBackoffRetry({ baseMs: 5000, maxMs: 40000, maxAttempts: 4 });
 
 function drainOutboundQueue() {
   if (quitPending || currentProcess || outboundQueue.length === 0) return;
@@ -955,12 +1162,33 @@ function drainOutboundQueue() {
     attachments: next.attachments || []
   });
   if (result?.ok) {
+    outboundRetry.reset();
     outboundQueue.shift();
     emitQueueState();
+    return;
   }
+  if (result?.reason === "busy" || result?.reason === "quitting") return;
+  const scheduled = outboundRetry.schedule(() => {
+    if (!quitPending && !currentProcess) drainOutboundQueue();
+  });
+  if (!scheduled) abandonOutboundQueue(result?.reason || "missing-cli");
+}
+
+// Out of retries: drop the queue so the renderer (which ignores "idle" while
+// anything is queued) leaves the thinking state, and say what happened. The
+// unsent bubbles stay greyed out as queued, so their text can be copied.
+function abandonOutboundQueue(reason) {
+  const count = outboundQueue.length;
+  clearOutboundQueue();
+  pushSystem(
+    `找不到可用的 Claude Code 或 Codex CLI，排队中的 ${count} 条消息没有发出。` +
+      "请确认 CLI 已安装并登录，然后重新发送。"
+  );
+  emitStatus("idle", { error: reason });
 }
 
 function clearOutboundQueue() {
+  outboundRetry.reset();
   if (!outboundQueue.length) return;
   outboundQueue.length = 0;
   emitQueueState();
@@ -1122,9 +1350,17 @@ function handleDirective(full, mood, skillName, skillArg, observe, remember) {
     // Maintenance turns have no screen — ignore any observation they invent.
     if (silentTurnKind !== "maintenance") recordObservation(observe);
   } else if (remember !== undefined) {
-    // [[remember:…]] writes to MEMORY.md — works in any mode, no file tools needed.
+    // [[remember:…]] writes to MEMORY.md — any mode, no file tools needed.
+    // Never on a silent self-turn (the tag is stripped but nothing is written:
+    // a proactive peek must not file the screen as a memory), and capped per
+    // turn like observations so one reply can't flood the file.
     const text = (remember || "").trim();
-    if (text && !rememberedThisTurn.has(text)) {
+    if (
+      text &&
+      !silentTurnKind &&
+      rememberedThisTurn.size < REMEMBER_MAX_PER_TURN &&
+      !rememberedThisTurn.has(text)
+    ) {
       rememberedThisTurn.add(text);
       persona.appendMemoryEntry(text);
     }
@@ -1331,7 +1567,16 @@ function attachCodexToolResult(item) {
   });
 }
 
+// While a VS Code turn's invocation is being built (buildProviderInvocation
+// with turnOptions.onNotice), validator notices go to that bridge's own
+// history instead of the popover's.
+let systemNoticeSink = null;
+
 function pushSystem(text) {
+  if (systemNoticeSink) {
+    systemNoticeSink(text);
+    return;
+  }
   const entry = {
     id: `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     role: "system",
@@ -1462,44 +1707,16 @@ function shouldUseDeepPersona(text) {
   return /放歌|点歌|放首|点首|来首|来一首|放一首|点一首|放音乐|放点音乐|听首|听歌|play.*song|put on.*song/.test(value);
 }
 
-function pruneConversationArchiveIfNeeded() {
-  try {
-    const file = persona.ensureConversationArchiveFile();
-    const stat = fs.statSync(file);
-    if (stat.size <= ARCHIVE_MAX_BYTES) return;
-
-    const lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
-    const kept = [];
-    let bytes = 0;
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      const line = lines[i];
-      const lineBytes = Buffer.byteLength(line, "utf8") + 1;
-      if (kept.length && bytes + lineBytes > ARCHIVE_TARGET_BYTES) break;
-      kept.push(line);
-      bytes += lineBytes;
-    }
-    kept.reverse();
-    fs.writeFileSync(file, `${kept.join("\n")}${kept.length ? "\n" : ""}`, "utf8");
-  } catch (error) {
-    console.warn("chat: failed to prune conversation archive", error);
-  }
-}
-
+// Append + size prune live in persona.js so the VS Code bridge's archive
+// writes go through the same prune as the popover's.
 function archiveConversationEntry(entry) {
   if (!entry || !entry.text || !["user", "assistant"].includes(entry.role)) return;
-  try {
-    const file = persona.ensureConversationArchiveFile();
-    const payload = {
-      ts: entry.ts || Date.now(),
-      role: entry.role,
-      provider: normalizeProvider(entry.provider),
-      text: String(entry.text)
-    };
-    fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, "utf8");
-    pruneConversationArchiveIfNeeded();
-  } catch (error) {
-    console.warn("chat: failed to archive conversation entry", error);
-  }
+  persona.appendConversationArchiveEntry({
+    ts: entry.ts || Date.now(),
+    role: entry.role,
+    provider: normalizeProvider(entry.provider),
+    text: String(entry.text)
+  });
 }
 
 function backfillArchiveFromHistoryIfEmpty() {
@@ -1769,7 +1986,7 @@ function finishSilentTurn(finalText) {
   const stayedSilent = sawSilentDirective || !text;
   sawSilentDirective = false;
   if (kind !== "proactive" || stayedSilent) {
-    notify({ kind: "proactive", spoke: false, turnKind: kind });
+    notify({ kind: "proactive", spoke: false, turnKind: kind, editorContext: proactiveEditorContext });
     return;
   }
   const entry = {
@@ -1790,22 +2007,34 @@ function finishSilentTurn(finalText) {
   });
   emitHistory();
   updateConversationSummary();
-  notify({ kind: "proactive", spoke: true, text });
+  notify({ kind: "proactive", spoke: true, text, editorContext: proactiveEditorContext });
 }
 
-function finalizeAssistant(finalText) {
+function finalizeAssistant(finalText, opts) {
   // Anything the stream redactor was still holding is, by construction, an
   // incomplete directive prefix (never prose) — drop it.
+  const hadError = opts?.hadError === true;
+  // The turn is about to be replayed (stale session, rejected model/effort):
+  // close its bubble without deciding anything on its behalf. No auto-
+  // continuation, no tool-only summary, no proactive notification — the
+  // retry finalizes again with the real result. Requesting a continuation
+  // here used to leave codexContinuationPending set, and the retried turn
+  // then ran an extra nudge turn after it had already answered.
+  const retrying = opts?.retrying === true;
   directiveTailBuffer = "";
   if (typeof finalText === "string" && finalText) {
     finalText = stripDirectiveTags(finalText);
   }
   if (silentTurnKind) {
-    finishSilentTurn(finalText);
+    // When called from a self-heal retry path, suppress the proactive
+    // notification — the retry will finalize again with the real result.
+    if (!opts?.suppressProactiveNotify && !retrying) {
+      finishSilentTurn(finalText);
+    }
     return;
   }
   if (!pendingAssistantId) {
-    if (!finalText && shouldContinueCodexTurn(finalText, null)) {
+    if (!finalText && !retrying && shouldContinueCodexTurn(finalText, null)) {
       requestCodexContinuation(null);
       return;
     }
@@ -1814,8 +2043,11 @@ function finalizeAssistant(finalText) {
       appendAssistant(finalText);
     } else {
       // No bubble was opened and no text arrived — if tools ran this turn,
-      // speak a short summary of them instead of leaving her silent.
-      emitToolOnlyFallback();
+      // speak a short summary of them instead of leaving her silent. Skip
+      // when the turn errored — a cheerful summary after a crash is misleading.
+      if (!hadError && !retrying) {
+        emitToolOnlyFallback();
+      }
       return;
     }
   }
@@ -1824,7 +2056,7 @@ function finalizeAssistant(finalText) {
   if (entry && finalText && finalText !== entry.text) {
     entry.text = finalText;
   }
-  if (shouldContinueCodexTurn(finalText, entry)) {
+  if (!retrying && shouldContinueCodexTurn(finalText, entry)) {
     requestCodexContinuation(entry);
     return;
   }
@@ -1836,7 +2068,7 @@ function finalizeAssistant(finalText) {
     if (idx !== -1) history.splice(idx, 1);
     pendingAssistantId = null;
     pendingAssistantText = "";
-    if (emitToolOnlyFallback()) return;
+    if (!retrying && emitToolOnlyFallback()) return;
     emitHistory();
     return;
   }
@@ -1950,7 +2182,8 @@ function handleClaudeStreamEvent(event) {
     for (const block of blocks) {
       if (block?.type === "tool_use") {
         const summary = summarizeToolInput(block.name, block.input);
-        emitTool(true, block.name, summary);
+        // Don't re-emit the tool indicator — the stream_event path already
+        // handled it. Just record the tool entry with summary in history.
         pushTool(block.name, summary, {
           toolUseId: block.id,
           command: toolCommandDetail(block.name, block.input)
@@ -2036,18 +2269,6 @@ function isCodexAssistantEvent(event, type) {
     itemType === "final_answer" ||
     (itemType === "message" && (!role || role === "assistant")) ||
     role === "assistant"
-  );
-}
-
-function codexSessionIdFromEvent(event) {
-  return (
-    event.session_id ||
-    event.sessionId ||
-    event.thread_id ||
-    event.threadId ||
-    event.conversation_id ||
-    event.conversationId ||
-    event.id
   );
 }
 
@@ -2289,11 +2510,37 @@ async function takeScreenshot() {
   return null;
 }
 
-function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
+// What a turn feeds the persona prompt beyond its text. A popover turn reads
+// the module state (pending attachments, cat mode, silent-turn kind). A VS
+// Code turn (vscode-chat.js, turnOptions.vscodeTurn) owns a separate history,
+// so it passes these explicitly and popover state never leaks into it.
+function resolveTurnInputs(turnOptions = {}) {
+  if (turnOptions.vscodeTurn) {
+    const silentTurn = Boolean(turnOptions.silent);
+    return {
+      vscodeTurn: true,
+      workspacePath: String(turnOptions.workspacePath || ""),
+      attachments: Array.isArray(turnOptions.attachments) ? turnOptions.attachments : [],
+      catMode: turnOptions.catMode && turnOptions.catMode.cat ? turnOptions.catMode : null,
+      silentTurn,
+      coauthorCommits: !silentTurn && settings.get("coauthorCommits") !== false
+    };
+  }
+  const silentTurn = Boolean(silentTurnKind);
+  return {
+    vscodeTurn: false,
+    workspacePath: "",
+    attachments: silentTurn ? [] : pendingAttachments,
+    catMode: silentTurn ? null : chatCatMode,
+    silentTurn,
+    coauthorCommits: !silentTurn && settings.get("coauthorCommits") !== false
+  };
+}
+
+function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds, turnOptions = {}) {
+  const turn = resolveTurnInputs(turnOptions);
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
-  const isAdvisor = mode === "advisor";
-  const isMaintenance = mode === "maintenance";
   const resumeSessionId = resolveResumeSessionId(
     PROVIDERS.CLAUDE,
     sessionPlan,
@@ -2313,10 +2560,13 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     observeEnabled:
       settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
     personaNotes: settings.get("personaNotes") || "",
-    catMode: silentTurnKind ? null : chatCatMode,
-    coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
-    attachments: silentTurnKind ? [] : pendingAttachments,
-    neteaseClientPlayback: neteaseClientPlaybackEnabled()
+    catMode: turn.catMode,
+    coauthorCommits: turn.coauthorCommits,
+    attachments: turn.attachments,
+    neteaseClientPlayback: neteaseClientPlaybackEnabled(),
+    workspacePath: turn.workspacePath,
+    vscodeTurn: turn.vscodeTurn,
+    silentTurn: turn.silentTurn
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -2343,20 +2593,25 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     args.push("--effort", claudeReasoningEffort);
   }
 
+  // Images this turn hands to Claude: the Doctor's attachments (silent turns
+  // carry none, matching the persona prompt above) and a screen capture.
+  const images = turn.attachments.filter(isImagePath);
   if (isAgent) {
     args.push("--dangerously-skip-permissions");
-  } else if (isAdvisor) {
-    // Read-only tools: she can read, search, and browse but not edit or execute.
-    args.push("--allowedTools", "Read,Grep,Glob,LS");
-  } else if (isMaintenance) {
-    // Memory maintenance: needs file r/w but not Bash/network.
-    args.push("--allowedTools", "Read,Edit,Write,Glob,Grep,LS");
   } else {
-    // Companion mode: chat only, no tools at all.
-    args.push("--allowedTools", "");
+    // Companion: no tools (Read only for an image); advisor: read-only
+    // (Read/Grep/Glob); maintenance: file r/w, no Bash or network. The CLI
+    // enforces each (see claudeModeToolArgs): the Doctor's settings.json
+    // defaultMode and allow rules cannot widen a non-agent turn.
+    args.push(...claudeModeToolArgs(mode, {
+      needsRead: images.length > 0 || Boolean(screenshotPath),
+      toolsFlag: ensureProviderAvailability()[PROVIDERS.CLAUDE]?.toolsFlag !== false
+    }));
   }
-  // Let Read reach attachments dropped from outside the project dir.
-  args.push(...attachmentDirArgs());
+  const readDeny = claudeReadDenyArgs(mode, promptFile);
+  args.push(...readDeny.args);
+  // Let Read reach images outside the project dir (attachments, screenshots).
+  args.push(...attachmentDirArgs(images, screenshotPath));
 
   if (resumeSessionId) {
     args.push("--resume", resumeSessionId);
@@ -2366,12 +2621,13 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     command: resolveExecutable("claude"),
     args,
     stdin: `${trimmed}\n`,
-    cleanupDirs: promptFile ? [promptFile.dir] : [],
+    cleanupDirs: [promptFile && promptFile.dir, readDeny.cleanupDir].filter(Boolean),
     resumed: Boolean(resumeSessionId)
   };
 }
 
-function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscript) {
+function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, turnOptions = {}) {
+  const turn = resolveTurnInputs(turnOptions);
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
@@ -2389,24 +2645,27 @@ function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscr
       observeEnabled:
         settings.get("waifuMode") === true && (Boolean(screenshotPath) || isAgent),
       personaNotes: settings.get("personaNotes") || "",
-      catMode: silentTurnKind ? null : chatCatMode,
-      coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
-      attachments: silentTurnKind ? [] : pendingAttachments,
-      neteaseClientPlayback: neteaseClientPlaybackEnabled()
+      catMode: turn.catMode,
+      coauthorCommits: turn.coauthorCommits,
+      attachments: turn.attachments,
+      neteaseClientPlayback: neteaseClientPlaybackEnabled(),
+      workspacePath: turn.workspacePath,
+      vscodeTurn: turn.vscodeTurn,
+      silentTurn: turn.silentTurn
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
   );
 }
 
-function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
+function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds, turnOptions = {}) {
   const mode = vibeCodingMode || "companion";
   const resumeSessionId = resolveResumeSessionId(
     PROVIDERS.CODEX,
     sessionPlan,
     customSessionIds
   );
-  const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript);
+  const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript, turnOptions);
   const codexModel = validatedCodexModel();
   const codexReasoningEffort = validatedCodexReasoningEffort();
   const invocation = buildCodexExecArgs({
@@ -2416,7 +2675,7 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
     model: codexModel,
     reasoningEffort: codexReasoningEffort,
     screenshotPath,
-    attachmentArgs: codexAttachmentArgs(),
+    attachmentArgs: codexAttachmentArgs(resolveTurnInputs(turnOptions).attachments),
     memoryDir: persona.memoryDir()
   });
 
@@ -2428,19 +2687,37 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
   };
 }
 
-function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
-  if (provider === PROVIDERS.CODEX) {
-    return buildCodexInvocation(
-      trimmed,
-      cwd,
-      vibeCodingMode,
-      screenshotPath,
-      sharedTranscript,
-      sessionPlan,
-      customSessionIds
-    );
+// turnOptions.vscodeTurn marks a turn from the VS Code extension (vscode-chat.js):
+// it always gets the coding voice and never reads popover state. Such a turn
+// passes its own `attachments`, `catMode` and `silent` (see resolveTurnInputs)
+// and an `onNotice(text)` that receives the model/effort validator notices
+// raised while building, so they land in the VS Code history.
+function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds, turnOptions) {
+  turnOptions = turnOptions || {};
+  // vscode-chat.js already caps the extension at advisor; enforced again here
+  // so no caller can hand a VS Code turn the agent flags.
+  if (turnOptions.vscodeTurn && vibeCodingMode === "agent") vibeCodingMode = "advisor";
+  const previousSink = systemNoticeSink;
+  if (turnOptions.vscodeTurn && typeof turnOptions.onNotice === "function") {
+    systemNoticeSink = turnOptions.onNotice;
   }
-  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds);
+  try {
+    if (provider === PROVIDERS.CODEX) {
+      return buildCodexInvocation(
+        trimmed,
+        cwd,
+        vibeCodingMode,
+        screenshotPath,
+        sharedTranscript,
+        sessionPlan,
+        customSessionIds,
+        turnOptions
+      );
+    }
+    return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds, turnOptions);
+  } finally {
+    systemNoticeSink = previousSink;
+  }
 }
 
 function send(text, attachments) {
@@ -2466,6 +2743,7 @@ function send(text, attachments) {
   if (currentProcess || turnLaunching) {
     outboundQueue.push({ text: trimmed, attachments: files });
     pushUser(trimmed, provider, { queued: true, attachments: files });
+    noteBlacklistedAttachments(files);
     emitQueueState();
     return { ok: true, queued: true, queueLength: outboundQueue.length };
   }
@@ -2499,7 +2777,11 @@ function dispatchSend(
     ? []
     : Array.isArray(resolvedAttachments)
       ? resolvedAttachments
-      : resolveAttachmentsForBackend(Array.isArray(attachments) ? attachments : []);
+      : resolveAttachmentsForBackend(
+          Array.isArray(attachments) ? attachments : [],
+          // Only real turns carry attachments, so the mode is the Doctor's own.
+          claudeAttachmentGuard(provider, vibeCodingModeOverride || String(settings.get("vibeCodingMode") || "companion"))
+        );
 
   // A genuine new user turn — reset the Codex auto-continue guard.
   if (!chained) {
@@ -2516,6 +2798,7 @@ function dispatchSend(
     currentUserEntry = activateQueuedUser(trimmed) || findLatestUserEntry(trimmed, provider);
   } else {
     currentUserEntry = pushUser(trimmed, provider, { attachments });
+    noteBlacklistedAttachments(attachments);
   }
   const sessionPlan = provider === PROVIDERS.PRIESTESS ? null : providerSessionPlan(provider);
   const sharedTranscript =
@@ -2540,16 +2823,19 @@ function dispatchSend(
   });
 
   // Silent turns need tools regardless of the Doctor's vibeCodingMode setting.
-  // Proactive checks need at least Read (advisor); maintenance needs file r/w.
+  // Proactive checks need at least Read (advisor); maintenance needs file r/w;
+  // editor-context checks never run above advisor (see silentTurnVibeMode).
   const globalMode = String(settings.get("vibeCodingMode") || "companion");
   let vibeCodingMode = vibeCodingModeOverride || globalMode;
   if (!vibeCodingModeOverride) {
-    if (silentTurnKind === "proactive") {
-      vibeCodingMode = globalMode === "agent" ? "agent" : "advisor";
-      if (vibeCodingMode !== globalMode) console.log("proactive: overrode vibeCodingMode from %s to %s", globalMode, vibeCodingMode);
-    } else if (silentTurnKind === "maintenance") {
-      vibeCodingMode = "maintenance";
-      console.log("proactive: maintenance turn — forcing vibeCodingMode to maintenance");
+    const silentMode = silentTurnVibeMode(silentTurnKind, globalMode, {
+      editorContext: proactiveEditorContext
+    });
+    if (silentMode) {
+      vibeCodingMode = silentMode;
+      if (silentMode !== globalMode) {
+        console.log("%s turn: overrode vibeCodingMode from %s to %s", silentTurnKind, globalMode, silentMode);
+      }
     }
   }
 
@@ -2649,6 +2935,12 @@ function launchPriestessTurn(trimmed) {
     return cancelled;
   };
 
+  // cancel() clears currentProcess before aborting (so the next send is not
+  // blocked), so the callbacks cannot use handle identity: the AbortError they
+  // get afterwards must still finish this turn. The token tells them whether a
+  // newer turn has taken over instead.
+  const token = beginTurnToken();
+  const live = () => token === turnToken;
   const handle = priestessProvider.startTurn({
     baseUrl: settings.get("priestessBaseUrl"),
     apiKey: settings.get("priestessApiKey"),
@@ -2656,16 +2948,16 @@ function launchPriestessTurn(trimmed) {
     system,
     messages: buildPriestessMessages(),
     onDelta: (text) => {
-      if (currentProcess === handle) appendAssistant(text);
+      if (live() && !cancelRequested) appendAssistant(text);
     },
     onDone: () => {
-      if (currentProcess !== handle) return;
+      if (!live()) return;
       finalizeAssistant(pendingAssistantText);
       const cancelled = finishCommon();
       finishTurn(cancelled ? { cancelled: true } : {});
     },
     onError: (error) => {
-      if (currentProcess !== handle) return;
+      if (!live()) return;
       const cancelled = cancelRequested || error?.name === "AbortError";
       if (!cancelled) {
         pushSystem(
@@ -2713,14 +3005,15 @@ async function launchProviderTurn({
   const autoScreenshot =
     isAgent && settings.get("autoScreenshot") !== false && pendingAttachments.length === 0;
   // Chained turns normally skip the screenshot, but an auto-continuation needs a
-  // fresh screen so she can actually answer what she "saw". Proactive checks
-  // exist to look at the screen, so they always capture one regardless of
-  // agent mode.
+  // fresh screen so she can actually answer what she "saw". A proactive check
+  // captures one regardless of agent mode — but only with 老婆模式 consent
+  // (sendProactive); an editor-context check without it stays text-only.
+  const proactiveScreenshot = proactiveCheck && proactiveWantsScreenshot;
   const screenshotPath =
-    proactiveCheck || (autoScreenshot && (!chained || forceScreenshot))
+    proactiveScreenshot || (autoScreenshot && (!chained || forceScreenshot))
       ? await takeScreenshot()
       : null;
-  if (proactiveCheck && !screenshotPath) {
+  if (proactiveScreenshot && !screenshotPath) {
     // Screen access is the whole point of a proactive check — without it
     // (e.g. macOS Screen Recording not granted) skip instead of running blind.
     turnLaunching = false;
@@ -2776,11 +3069,20 @@ async function launchProviderTurn({
     return;
   }
 
+  const token = beginTurnToken();
+  const live = () => token === turnToken;
+  // 'error' and 'close' both end the turn; whichever fires first wins (a spawn
+  // failure emits both), so the status/idle path runs exactly once.
+  let settled = false;
   currentProcess = proc;
   let buffer = "";
   let stderrBuffer = "";
 
   proc.stdout.on("data", (chunk) => {
+    // After Stop (or once a newer turn owns the slot) the dying process's output
+    // is noise: a late `result` would otherwise re-adopt a session id that
+    // "New Conversation" just dropped, or stream text into the next reply.
+    if (!live() || cancelRequested) return;
     buffer += chunk.toString("utf8");
     let newlineAt;
     while ((newlineAt = buffer.indexOf("\n")) !== -1) {
@@ -2807,8 +3109,10 @@ async function launchProviderTurn({
   });
 
   proc.on("error", (error) => {
-    if (currentProcess && currentProcess !== proc) return;
+    if (settled) return;
+    settled = true;
     cleanupInvocation(invocation);
+    if (!live()) return;
     pushSystem(`\`${providerLabel(provider)}\` process error: ${error.message}`);
     finalizeAssistant("");
     currentProcess = null;
@@ -2829,8 +3133,17 @@ async function launchProviderTurn({
   });
 
   proc.on("close", (code) => {
-    if (currentProcess && currentProcess !== proc) return;
-    if (buffer.trim()) {
+    if (settled) return;
+    settled = true;
+    if (!live()) {
+      // A newer turn replaced this one while it was dying; its state is no
+      // longer ours to touch — only the temp files are.
+      cleanupInvocation(invocation);
+      return;
+    }
+    const cancelled = cancelRequested;
+    cancelRequested = false;
+    if (buffer.trim() && !cancelled) {
       try {
         handleProviderStreamEvent(provider, JSON.parse(buffer.trim()));
       } catch {
@@ -2844,8 +3157,6 @@ async function launchProviderTurn({
       provider === PROVIDERS.CODEX
         ? classifyCodexRejection(`${codexErrorText}\n${stderrText}`)
         : "";
-    const cancelled = cancelRequested;
-    cancelRequested = false;
 
     // Self-heal a dead `--resume` session: drop the stale id and replay this
     // turn once with a fresh session, so Claude doesn't get stuck returning
@@ -2860,15 +3171,11 @@ async function launchProviderTurn({
       resumeRetryInFlight = true;
       claudeResultErrored = false;
       const retrySilentKind = silentTurnKind;
-      // Read now, not inside the callback: pendingAttachments is module state
-      // that the next turn overwrites, so a deferred read can replay the wrong
-      // images — or none.
       const retryAttachments = pendingAttachments;
-      if (pendingAssistantId) finalizeAssistant(""); // clears the empty bubble
+      if (pendingAssistantId) finalizeAssistant("", { suppressProactiveNotify: true });
       cleanupInvocation(invocation);
       currentProcess = null;
       currentProvider = null;
-      // Replay keeps the turn's silent nature (finalize just reset it).
       silentTurnKind = retrySilentKind;
       setImmediate(() => dispatchSend(trimmed, {
         userAlreadyShown: true,
@@ -2893,11 +3200,8 @@ async function launchProviderTurn({
       claudeModelFallbackInFlight = true;
       claudeModelInvalid = false;
       const retrySilentKind = silentTurnKind;
-      // Read now, not inside the callback: pendingAttachments is module state
-      // that the next turn overwrites, so a deferred read can replay the wrong
-      // images — or none.
       const retryAttachments = pendingAttachments;
-      if (pendingAssistantId) finalizeAssistant("");
+      if (pendingAssistantId) finalizeAssistant("", { suppressProactiveNotify: true });
       pushSystem(`Claude 模型 \`${badClaudeModel}\` 当前账号不可用，已切回默认并重试。`);
       cleanupInvocation(invocation);
       currentProcess = null;
@@ -2931,7 +3235,10 @@ async function launchProviderTurn({
       // that the next turn overwrites, so a deferred read can replay the wrong
       // images — or none.
       const retryAttachments = pendingAttachments;
-      if (pendingAssistantId) finalizeAssistant("");
+      // A continuation requested earlier in this turn (by a stream-level
+      // finalize) belongs to the turn being replaced, not to the retry.
+      codexContinuationPending = false;
+      if (pendingAssistantId) finalizeAssistant("", { retrying: true });
       pushSystem(`Codex 推理强度 \`${badCodexReasoning}\` 不可用，已恢复默认并重试。`);
       cleanupInvocation(invocation);
       currentProcess = null;
@@ -2964,7 +3271,8 @@ async function launchProviderTurn({
       // that the next turn overwrites, so a deferred read can replay the wrong
       // images — or none.
       const retryAttachments = pendingAttachments;
-      if (pendingAssistantId) finalizeAssistant("");
+      codexContinuationPending = false;
+      if (pendingAssistantId) finalizeAssistant("", { retrying: true });
       pushSystem(`Codex 模型 \`${badCodexModel}\` 不可用，已恢复默认并重试。`);
       cleanupInvocation(invocation);
       currentProcess = null;
@@ -3014,7 +3322,8 @@ async function launchProviderTurn({
         "Claude 返回了一个空的错误回复。请再试一次，或确认 `claude` CLI 已登录且额度未用尽。"
       );
     }
-    if (pendingAssistantId) finalizeAssistant("");
+    const turnHadError = (code !== 0 && code !== null) || claudeResultErrored;
+    if (pendingAssistantId) finalizeAssistant("", { hadError: turnHadError });
     cleanupInvocation(invocation);
     currentProcess = null;
     currentProvider = null;
@@ -3034,7 +3343,12 @@ async function launchProviderTurn({
   });
 }
 
-function cancel() {
+// Stop the running turn (CLI subprocess or built-in backend request). The
+// turn's own close/onError callback reports idle(cancelled) once the process
+// is really gone; meanwhile the slot is free so the next send is not blocked.
+// `sync` (quit/restart paths) makes the Windows taskkill complete before
+// returning — app.exit() follows and would otherwise orphan the CLI tree.
+function cancel({ sync = false } = {}) {
   codexModelFallbackInFlight = false;
   codexReasoningFallbackInFlight = false;
   codexErrorText = "";
@@ -3043,11 +3357,7 @@ function cancel() {
   cancelRequested = true;
   const proc = currentProcess;
   currentProcess = null; // unblock future sends immediately
-  try { proc.kill("SIGTERM"); } catch (_) { /* ignore */ }
-  // Force-kill after 3s if SIGTERM was ignored (defunct child, stuck I/O).
-  setTimeout(() => {
-    try { proc.kill("SIGKILL"); } catch (_) { /* ignore */ }
-  }, 3000).unref();
+  killProcessTree(proc, { sync });
 }
 
 function clear() {
@@ -3129,7 +3439,18 @@ function hydrate({
 //  Silent self-turns — proactive care + memory maintenance entry points.
 //  Scheduling/gating lives in proactive.js; these only know how to run one.
 // ============================================================
-function buildProactivePrompt() {
+// Without a screenshot (老婆模式 off, VS Code editor context only) the prompt
+// must not claim she looked at the screen, and asks for no observation —
+// the observation journal is a 老婆模式 feature too.
+const PROACTIVE_TEXT_ONLY_PROMPT = [
+  "（PRTS 系统提示——这不是博士说的话，博士也看不到这条提示。这一轮没有屏幕截图，你只能看到下面来自 VS Code 的编辑器上下文。这是你对他安静的、不被察觉的照看。",
+  "- 沉默是常态，开口是例外。没有值得说的，必须只回复 [[silent]]，不带任何其他文字；真正的关心多数时候不需要出声。",
+  "- 绝不要暴露「定时检查」这层机制。不说「检测到」「系统提示」这类话——你只是恰好注意到了，像一直坐在他旁边的人那样自然。",
+  "- 除阅读下面的上下文外，这一轮不要做任何其他操作。）"
+].join("\n");
+
+function buildProactivePrompt({ screenshot = true } = {}) {
+  if (!screenshot) return PROACTIVE_TEXT_ONLY_PROMPT;
   const lines = [
     "（PRTS 系统提示——这不是博士说的话，博士也看不到这条提示。老婆模式：你自己抬眼看了一眼博士此刻的屏幕（截图见上方说明）。这是你对他安静的、不被察觉的照看。",
     "- 沉默是常态，开口是例外。没有值得说的，必须只回复 [[silent]]，不带任何其他文字；真正的关心多数时候不需要出声。",
@@ -3157,6 +3478,7 @@ const MAINTENANCE_PROMPT = [
   "- 合并重复或意思相近的条目；把放错位置的条目移进合适的章节；保留条目原有的日期。",
   "- 久远而琐碎的小事可以压缩成更简短的概括，但绝不能丢失真正重要的记忆：姓名、约定、博士的喜好与习惯、重要的事件与心情。",
   "- 整理后全文尽量控制在 9000 字符以内。",
+  "- 写回之前先重新读一遍 MEMORY.md：整理期间可能有新条目被追加进来，不要把它们覆盖掉。",
   "做完后只回复 [[silent]]，不要任何其他文字。）"
 ].join("\n");
 
@@ -3182,7 +3504,11 @@ function sendProactive(opts) {
   const gate = canRunSilentTurn();
   if (!gate.ok) return gate;
   silentTurnKind = "proactive";
-  const prompt = buildVibeProactivePrompt(opts);
+  proactiveEditorContext = Boolean(
+    opts && (opts.diagnosticContext || opts.diagnosticImprovement || opts.terminalEvent || opts.activityContext)
+  );
+  proactiveWantsScreenshot = silentTurnWantsScreenshot("proactive", { waifuMode: settings.get("waifuMode") });
+  const prompt = buildVibeProactivePrompt(opts, { screenshot: proactiveWantsScreenshot });
   const result = dispatchSend(prompt, { silentUser: true });
   if (!result?.ok) silentTurnKind = null;
   return result;
@@ -3190,24 +3516,67 @@ function sendProactive(opts) {
 
 // Build a proactive prompt that may include diagnostic or activity context
 // from the VS Code extension.
-function buildVibeProactivePrompt(opts) {
+function buildVibeProactivePrompt(opts, promptOpts = {}) {
   if (opts?.diagnosticContext) {
-    return buildDiagnosticProactivePrompt(opts.diagnosticContext);
+    return buildDiagnosticProactivePrompt(opts.diagnosticContext, promptOpts);
+  }
+  if (opts?.diagnosticImprovement) {
+    return buildImprovementPrompt(opts.diagnosticImprovement, promptOpts);
+  }
+  if (opts?.terminalEvent) {
+    return buildTerminalPrompt(opts.terminalEvent, promptOpts);
   }
   if (opts?.activityContext) {
-    return buildActivityProactivePrompt();
+    return buildActivityProactivePrompt(promptOpts);
   }
-  return buildProactivePrompt();
+  return buildProactivePrompt(promptOpts);
 }
 
-function buildDiagnosticProactivePrompt(diag) {
+function buildImprovementPrompt(diag, promptOpts) {
   const lines = [
-    buildProactivePrompt(),
+    buildProactivePrompt(promptOpts),
+    "",
+    "博士刚刚修好了代码——编辑器的报错数量降到了 0。",
+    "这是他采纳了你的建议、或者自己努力的结果。",
+    "用你自然的风格，给一句真诚的、属于普瑞赛斯的肯定。不用长，一两句就够了。",
+    "如果只是偶然清零（比如关了文件），可以说 [[silent]]。",
+  ];
+  return lines.join("\n");
+}
+
+// evt comes from ws-policy.normalizeTerminalEvent: a canonical command label
+// and an exit code only — raw terminal output never reaches the prompt.
+function buildTerminalPrompt(evt, promptOpts) {
+  const lines = [
+    buildProactivePrompt(promptOpts),
+    "",
+    `另外，博士刚才在 VS Code 终端里运行的「${evt.command}」失败了（退出码 ${evt.exitCode}）。`,
+  ];
+  if (evt.kind === "build-error") {
+    lines.push("", "看起来构建/编译出错了。用你自然的风格轻声告知博士，可以帮他一起看看错误原因。如果你觉得只是暂时性问题，可以说 [[silent]]。");
+  } else if (evt.kind === "test-fail") {
+    lines.push("", "看起来测试没通过。用你自然的风格提醒博士，建议他看看失败的测试。如果你觉得只是暂时性问题，可以说 [[silent]]。");
+  }
+  return lines.join("\n");
+}
+
+function buildDiagnosticProactivePrompt(diag, promptOpts) {
+  const lines = [
+    buildProactivePrompt(promptOpts),
     "",
     "另外，博士的 VS Code 编辑器刚刚检测到以下问题：",
     `- ${diag.errors} 个错误，${diag.warnings} 个警告，涉及 ${diag.totalFilesWithProblems} 个文件`,
   ];
-  const top5 = (diag.details || []).slice(0, 5);
+  // Diagnostics arrive from VS Code unasked, and a message can quote the line
+  // it flags: entries for blacklisted files (relative to the VS Code
+  // workspace) are left out.
+  const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
+  let root = "";
+  try { root = require("./ws-server").getVscodeWorkspace() || ""; } catch (_) { /* bridge not loaded */ }
+  if (!root) root = resolveCwd();
+  const top5 = (diag.details || [])
+    .filter((d) => d && (!patterns.length || !d.file || matchBlacklist(String(d.file), patterns, { root }) === null))
+    .slice(0, 5);
   for (const d of top5) {
     const file = (d.file || "").split(/[\\/]/).pop();
     lines.push(`  - [${d.severity}] ${file}:${d.line}: ${d.message}`);
@@ -3220,11 +3589,11 @@ function buildDiagnosticProactivePrompt(diag) {
   return lines.join("\n");
 }
 
-function buildActivityProactivePrompt() {
+function buildActivityProactivePrompt(promptOpts) {
   const wsServer = require("./ws-server");
   const activities = wsServer.getRecentActivities();
   const lines = [
-    buildProactivePrompt(),
+    buildProactivePrompt(promptOpts),
     "",
     "博士最近的编辑器活动：",
   ];
@@ -3244,6 +3613,9 @@ function buildActivityProactivePrompt() {
 // A memory-curation pass: she tidies MEMORY.md with her file tools and stays
 // silent. The reply is always discarded.
 function sendMaintenance() {
+  // The VS Code bridge runs its own turns and appends to MEMORY.md through
+  // [[remember:]]; rewriting the file underneath one would drop those entries.
+  if (vscodeTurnRunning()) return { ok: false, reason: "vscode-busy" };
   const gate = canRunSilentTurn();
   if (!gate.ok) return gate;
   silentTurnKind = "maintenance";
@@ -3254,6 +3626,15 @@ function sendMaintenance() {
 
 function isBusy() {
   return Boolean(currentProcess || turnLaunching || outboundQueue.length > 0);
+}
+
+// Lazy: vscode-chat requires this module at load time.
+function vscodeTurnRunning() {
+  try {
+    return Boolean(require("./vscode-chat").isBusy());
+  } catch {
+    return false; // bridge not loaded
+  }
 }
 
 // Timestamp of the most recent real conversation message — proactive.js uses
@@ -3285,6 +3666,9 @@ function isLongMemoryDormant() {
 }
 
 module.exports = {
+  // Exported for tests: the proactive prompt must not claim a screenshot
+  // that was never taken.
+  buildVibeProactivePrompt,
   send,
   sendProactive,
   sendMaintenance,
@@ -3307,6 +3691,15 @@ module.exports = {
   getOutboundQueueLength: () => outboundQueue.length,
   // Exported for vscode-chat.js (VS Code extension independent sessions)
   buildProviderInvocation,
+  cleanupInvocation,
+  // Exported for tests
+  buildVibeProactivePrompt,
   consumeDirectives,
   stripDirectiveTags,
+  // Test-only: start a fake turn (fresh directive state) of the given silent kind.
+  _beginTurnForTests(kind = null) {
+    resetDirectiveParsing();
+    silentTurnKind = kind;
+  },
 };
+
