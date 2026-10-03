@@ -4,6 +4,7 @@ import { ChatPanelProvider } from "./src/chat-panel";
 import { ContextCapture } from "./src/context-capture";
 import { InlineCompletionProvider } from "./src/inline-provider";
 import { buildRecentChangesSummary } from "./src/git-summary";
+import { pushUserBlacklist } from "./src/blacklist-sync";
 
 let wsClient: WsClient | null = null;
 let contextCapture: ContextCapture | null = null;
@@ -48,7 +49,9 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Inline completion provider (ghost text) — registered for all languages.
+  // Inline completion provider (ghost text) — registered for all languages,
+  // but it answers nothing unless prts.inlineCompletion.enabled is on (default
+  // off), the tray app is not in companion mode, and the file is not sensitive.
   const inlineProvider = new InlineCompletionProvider(wsClient);
   context.subscriptions.push(
     vscode.languages.registerInlineCompletionItemProvider(
@@ -327,17 +330,20 @@ export function activate(context: vscode.ExtensionContext) {
 
   let autoSwitchedToAdvisor = false;
 
-  // On first connect: send vscode:active, sync advisor blacklist from VS Code config,
-  // and auto-switch to advisor mode if a workspace is open.
+  // A blacklist the Doctor set in his VS Code user settings follows him to the
+  // tray (on connect and whenever he edits it); an unset one never overwrites
+  // the tray's own list.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("prts.advisorFileBlacklist")) pushUserBlacklist(wsClient);
+    })
+  );
+
+  // On first connect: send vscode:active, push a user-set blacklist, and offer
+  // advisor mode if a workspace is open.
   (wsClient as any).on("connected", () => {
     wsClient!.notify("vscode:active");
-    // Sync the advisor file blacklist from VS Code settings to Electron.
-    const blacklist = vscode.workspace.getConfiguration("prts").get<string>("advisorFileBlacklist");
-    if (typeof blacklist === "string") {
-      // Fire-and-forget sync - a failing settings write is not worth an error
-// dialog on every connect, so swallow the rejection explicitly.
-wsClient!.request("settings:set", { patch: { advisorFileBlacklist: blacklist } }).catch(() => {});
-    }
+    pushUserBlacklist(wsClient);
     // When a workspace is open, offer advisor mode once per session instead of
     // silently rewriting the user's persisted setting: advisor gives the model
     // read access to workspace context, so it should be an explicit choice.

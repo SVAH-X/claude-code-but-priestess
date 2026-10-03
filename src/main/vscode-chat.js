@@ -19,8 +19,8 @@ const chat = require("./chat");
 const persona = require("./persona");
 const settings = require("./settings");
 const skills = require("./skills");
-const { spawnCli } = require("./cli-spawn");
-const { normalizeCwd, buildCodexExecArgs } = require("./chat-runtime");
+const { spawnCli, killProcessTree } = require("./cli-spawn");
+const { normalizeCwd, buildCodexExecArgs, codexSessionIdFromEvent } = require("./chat-runtime");
 const { cleanDirectiveText, consumeDirectiveChunk } = require("./directive-stream");
 const {
   classifyCodexRejection,
@@ -249,13 +249,12 @@ function finalizeAssistant() {
       });
       fs.appendFileSync(persona.conversationArchivePath(), line + "\n", "utf8");
     } catch (_) { /* best effort */ }
-    // Auto-record project notes for workspace continuity across conversations.
+    // Project notes: what this workspace's conversations were about.
     try {
-      const wsServer = require("./ws-server");
       const ws = wsServer.getVscodeWorkspace();
-      if (ws && clean) {
-        const userEntry = [...history].reverse().find((m) => m.role === "user");
-        persona.appendProjectNote(ws, userEntry?.text || "", clean.slice(0, 300));
+      if (ws) {
+        const userEntry = [...history].reverse().find((item) => item.role === "user");
+        persona.appendProjectNote(ws, userEntry?.text || "", clean);
       }
     } catch (_) { /* best effort */ }
   }
@@ -370,17 +369,6 @@ function handleClaudeLine(line) {
   }
 }
 
-function codexThreadId(event) {
-  // Priority matches chat.js codexSessionIdFromEvent:
-  // session_id > sessionId > thread_id > threadId > conversation_id > conversationId > id
-  return (
-    event.session_id || event.sessionId ||
-    event.thread_id || event.threadId ||
-    event.conversation_id || event.conversationId ||
-    event.id
-  );
-}
-
 function handleCodexLine(line) {
   let event;
   try { event = JSON.parse(line); } catch { return; }
@@ -390,7 +378,7 @@ function handleCodexLine(line) {
   // with thread_id; also handle legacy "session" events.
   const type = typeof event.type === "string" ? event.type : "";
   if (type === "thread.started" || type === "session" || type.includes("session")) {
-    const id = codexThreadId(event);
+    const id = codexSessionIdFromEvent(event);
     if (id) {
       vscodeSessionIds.codex = id;
       saveConversation();
@@ -456,6 +444,15 @@ function handleCodexLine(line) {
 // Context augmentation — inject editor context into user message
 // ---------------------------------------------------------------------------
 
+// The blacklist pattern covering `filePath` (relative to the VS Code workspace),
+// or null. Guards what reaches the model without the Doctor asking for it.
+function blacklistPatternFor(filePath, root) {
+  const { parseBlacklist, matchBlacklist } = require("./file-blacklist");
+  const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
+  if (!patterns.length || !filePath) return null;
+  return matchBlacklist(String(filePath), patterns, { root: root || "" });
+}
+
 function buildContextAugmentedMessage(userText, context) {
   if (!context || !context.activeFile) return userText;
 
@@ -516,18 +513,29 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
   }
 
   // Inject editor context into the user message so the CLI sees it.
-  // Filter out blacklisted files: if the active file matches the blacklist,
-  // strip all context so she doesn't even know the file exists.
-  const { parseBlacklist, isBlacklisted } = require("./file-blacklist");
-  const blPatterns = parseBlacklist(settings.get("advisorFileBlacklist"));
-  const filteredContext = (blPatterns.length && context?.activeFile && isBlacklisted(context.activeFile, blPatterns))
-    ? null
-    : context;
+  // Automatic editor context from a blacklisted file (name, cursor, selection)
+  // is dropped, and the Doctor is told so. Text he explicitly sends (the
+  // selection commands put it in the message itself) is his own choice and
+  // passes untouched. Matching is relative to the VS Code workspace, the same
+  // root the CLI runs in below.
+  const blacklistHit = context?.activeFile
+    ? blacklistPatternFor(context.activeFile, require("./ws-server").getVscodeWorkspace() || settings.get("chatCwd") || "")
+    : null;
+  const filteredContext = blacklistHit ? null : context;
   const messageWithContext = buildContextAugmentedMessage(trimmed, filteredContext);
 
   const currentUserEntry = userAlreadyShown
     ? latestMatchingUser(trimmed)
     : pushUser(trimmed, context);
+  if (blacklistHit && !userAlreadyShown) {
+    const name = String(context.activeFile).split(/[\\/]/).pop();
+    history.push({
+      id: nextId(),
+      role: "system",
+      text: `当前文件 ${name} 命中文件黑名单（${blacklistHit}），本轮没有自动附带它的编辑器上下文（文件名、光标、选区）。`,
+      ts: Date.now()
+    });
+  }
 
   // Build a shared transcript from our own history for context continuity.
   const SHARED_MAX = 9000; // matches chat.js SHARED_TRANSCRIPT_MAX_CHARS
@@ -557,7 +565,7 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
   const wsServer = require("./ws-server");
   const vscodeWs = wsServer.getVscodeWorkspace();
   const cwd = normalizeCwd(vscodeWs || settings.get("chatCwd"));
-  const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, sharedTranscript, null, vscodeSessionIds);
+  const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, sharedTranscript, null, vscodeSessionIds, { vscodeTurn: true, workspacePath: vscodeWs || "" });
 
   if (!invocation) {
     const errMsg = "No CLI provider available";
@@ -625,15 +633,18 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
     midTurn = false;
 
     // Self-heal: drop stale session on "not found" errors and retry once.
-    // Covers Claude ("No conversation found"), Codex ("no rollout found"),
-    // and provider-level structured error text captured during streaming.
-    const sessionLost = /no conversation found|session.*not found|no rollout found|invalid.*session/i.test(stderr)
-      || (providerErrorText && /no conversation found|no rollout found/i.test(providerErrorText));
+    // Covers Claude ("No conversation found"), Codex ("no rollout found",
+    // "thread ... not found"), and provider-level structured error text
+    // captured during streaming. errorText also feeds the Codex fallbacks below.
+    const errorText = `${stderr}\n${providerErrorText}`;
+    const sessionLost = /no conversation found|no rollout found|(?:session|thread|conversation|rollout).*not found|invalid.*(?:session|thread|conversation)/i.test(errorText);
     if (sessionLost && !staleRetryInFlight) {
       staleRetryInFlight = true;
       vscodeSessionIds[provider] = null;
       if (currentAssistantId) discardAssistant();
       saveConversation();
+      // Retry with a fresh session. staleRetryInFlight stays true until the
+      // retry succeeds — prevents loops if the fresh session also fails.
       dispatchSend(trimmed, context, { userAlreadyShown: true });
       return;
     }
@@ -819,23 +830,55 @@ function hasPreviousConversation() {
 // Lightweight inline completion — spawns a one-shot CLI subprocess per request.
 // Uses chat.getProviderAvailability() for resolved paths and cli-spawn.js for
 // cross-platform spawning. Does NOT touch history, archive, or any shared turn state.
+//
+// The VS Code extension only asks when the Doctor opted in
+// (prts.inlineCompletion.enabled); the gates below are the backend's own floor
+// because any authenticated bridge client can send chat:inline-complete.
 const COMPLETION_TIMEOUT_MS = 10000;
+// The extension sends ~6 lines before the cursor; one minified line can still
+// be huge, so keep only the tail that matters for the completion.
+const COMPLETION_MAX_PREFIX_CHARS = 4000;
 
-﻿let completionInFlight = false;
+let completionInFlight = false;
 
-async function complete(prefix, file, language) {
+// Companion mode is chat-only: editor contents are never sent to a model
+// unasked. Advisor and agent both allow completion; the completion process
+// itself never gets tools in either (see the Claude args below).
+function completionAllowedByMode() {
+  const mode = String(settings.get("vibeCodingMode") || "companion");
+  return mode === "advisor" || mode === "agent";
+}
+
+// Never send sensitive or blacklisted files to the model. Checks both the full
+// path (for directory patterns) and the bare file name the prompt shows.
+// Matching is relative to the VS Code workspace, the same root dispatchSend()
+// uses; a file outside it is judged by its name only (see file-blacklist.js).
+function completionFileBlocked(file, filePath) {
+  const { parseBlacklist, isBlacklisted, SENSITIVE_FILE_PATTERNS } = require("./file-blacklist");
+  const patterns = [...SENSITIVE_FILE_PATTERNS, ...parseBlacklist(settings.get("advisorFileBlacklist"))];
+  let root = "";
+  try { root = require("./ws-server").getVscodeWorkspace() || ""; } catch (_) { /* bridge not loaded */ }
+  if (!root) root = settings.get("chatCwd") || "";
+  return [filePath, file].some((p) => typeof p === "string" && p && isBlacklisted(p, patterns, { root }));
+}
+
+async function complete(prefix, file, language, filePath) {
+  if (typeof prefix !== "string" || !prefix.trim()) return null;
+
   // Reject completion while a chat turn is streaming - the CLI is busy and
   // spawning a second process would only pile up load.
   if (midTurn) return null;
 
   // Reject completion while another completion is already running. Every
-  // completion request spawns a fresh CLI subprocess (Codex `exec` with the
-  // prompt on stdin / Claude `-p`), and the VS Code inline provider fires
-  // after every ~300ms
-  // pause while the user types. Without this guard a short burst of typing
-  // could fork several CLI processes at once. Dropping the redundant ones
-  // keeps the system cheap; the next pause triggers a fresh completion.
+  // completion request spawns a fresh CLI subprocess, and the VS Code inline
+  // provider fires after every ~300ms pause while the user types. Without
+  // this guard a short burst of typing could fork several CLI processes at
+  // once. Dropping the redundant ones keeps the system cheap; the next pause
+  // triggers a fresh completion.
   if (completionInFlight) return null;
+
+  if (!completionAllowedByMode()) return null;
+  if (completionFileBlocked(file, filePath)) return null;
 
   const availability = chat.getProviderAvailability({ refresh: false });
   const provider = availability.activeProvider;
@@ -843,10 +886,44 @@ async function complete(prefix, file, language) {
   const info = availability.providers[provider];
   if (!info?.available || !info.command) return null;
 
+  // The prompt always goes through stdin, never argv: on Windows a .cmd shim
+  // runs through `cmd /d /s /c`, which drops everything after the first
+  // newline of the command line and expands %VAR% even inside quotes.
   const prompt =
     `Complete this code. Only output the completion text, no markdown, no explanation.\n` +
     `File: ${file || "unknown"} (${language || ""})\n\n` +
-    prefix;
+    prefix.slice(-COMPLETION_MAX_PREFIX_CHARS);
+
+  let args;
+  let effectiveCwd = settings.get("chatCwd") || "";
+  if (provider === "codex") {
+    // `codex exec` has no `-p` prompt flag: -p is `--profile`. Match the main
+    // chat path (buildCodexExecArgs): prompt on stdin (`-`) with the read-only
+    // sandbox, the advisor-level cap (codex has no switch that removes its
+    // tools entirely). --json is dropped: complete() parses plain text.
+    const built = buildCodexExecArgs({ cwd: effectiveCwd, mode: "companion", memoryDir: persona.memoryDir() });
+    args = built.args.filter((a) => a !== "--json");
+    effectiveCwd = built.cwd;
+  } else {
+    args = [
+      "-p",
+      "--output-format",
+      "text",
+      // A completion never needs tools: remove the built-in set, skip the
+      // Doctor's MCP servers, and pin the permission mode so a
+      // `defaultMode: "bypassPermissions"` in ~/.claude/settings.json cannot
+      // apply to this extension-triggered process.
+      "--tools",
+      "",
+      "--strict-mcp-config",
+      "--permission-mode",
+      "default",
+      // One-shot request: do not leave a saved session on disk per pause.
+      "--no-session-persistence"
+    ];
+    const claudeModel = String(settings.get("claudeModel") || "").trim();
+    if (claudeModel) args.push("--model", claudeModel);
+  }
 
   completionInFlight = true;
   return new Promise((resolve) => {
@@ -861,40 +938,31 @@ async function complete(prefix, file, language) {
       resolve(value);
     };
 
-    let args;
-    let effectiveCwd = settings.get("chatCwd") || "";
-    let stdinPrompt = null;
-    if (provider === "codex") {
-      // `codex exec` has no `-p` prompt flag: -p is `--profile`, so the old
-      // `["exec", "-p", prompt, "--json"]` made codex treat the prompt as a
-      // profile name, error out, and produce empty stdout - completions were
-      // always null. Match the main chat path (buildCodexExecArgs): prompt is
-      // fed through stdin (`-`) with a read-only sandbox. --json is dropped:
-      // complete() parses plain text (markdown-stripped), not the event stream.
-      const built = buildCodexExecArgs({ cwd: effectiveCwd, mode: "companion", memoryDir: persona.memoryDir() });
-      args = built.args.filter((a) => a !== "--json");
-      effectiveCwd = built.cwd;
-      stdinPrompt = prompt;
-    } else {
-      // Claude: -p for single-turn, --output-format text (no --max-tokens flag exists)
-      args = ["-p", prompt, "--output-format", "text"];
-      const claudeModel = String(settings.get("claudeModel") || "").trim();
-      if (claudeModel) args.push("--model", claudeModel);
+    let proc;
+    try {
+      proc = spawnCli(info.command, args, {
+        cwd: effectiveCwd || undefined,
+        env: { ...process.env },
+        // Completion fires on every typing pause; never flash a console window.
+        windowsHide: true
+      });
+    } catch (_) {
+      finish(null);
+      return;
     }
 
-    const proc = spawnCli(info.command, args, {
-      cwd: effectiveCwd || undefined,
-      env: { ...process.env },
-    });
-    if (stdinPrompt != null) {
-      try { proc.stdin.end(stdinPrompt); } catch (_) { /* process already exited */ }
-    }
+    // A CLI that exits before draining stdin turns the write into an async
+    // EPIPE; without a listener that stream error would crash the main process.
+    proc.stdin.on("error", () => {});
+    try { proc.stdin.end(prompt); } catch (_) { /* process already exited */ }
+    // Drain stderr so a chatty CLI cannot block on a full pipe.
+    proc.stderr?.resume();
 
     let stdout = "";
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try { proc.kill(); } catch (_) {}
+      killProcessTree(proc);
       finish(null);
     }, COMPLETION_TIMEOUT_MS);
     timer.unref();

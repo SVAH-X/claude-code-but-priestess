@@ -9,8 +9,11 @@ const path = require("node:path");
 // invocation contract:
 //   - codex: prompt via stdin (`-`), NO `-p` (that flag is `--profile` in
 //     `codex exec` and makes codex error out with empty stdout), no --json
-//     (complete() parses plain text, not the event stream);
-//   - claude: prompt via `-p` (correct for the Claude CLI).
+//     (complete() parses plain text, not the event stream), read-only sandbox;
+//   - claude: `-p` print mode with the prompt on stdin (never argv: a Windows
+//     .cmd shim cuts argv at the first newline and expands %VAR%), no tools,
+//     no MCP servers, pinned permission mode, no saved session.
+// Completion is refused in companion mode and for sensitive/blacklisted files.
 // The completion text is read from stdout and markdown-fenced output is
 // cleaned before being returned.
 //
@@ -37,7 +40,7 @@ const emit = () => {
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (c) => { input += c; });
 process.stdin.on('end', emit);
-// Claude feeds the prompt via -p (no stdin); emit on a short timer too.
+// Fallback in case a caller never closes stdin.
 setTimeout(emit, 100);
 `;
 }
@@ -74,7 +77,7 @@ function installModuleStub(modulePath, exports) {
   };
 }
 
-test("vscode-chat complete() uses stdin for codex and cleans the output", async (t) => {
+test("vscode-chat complete() is gated, tool-less and stdin-fed", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "prts-complete-"));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
@@ -108,15 +111,32 @@ test("vscode-chat complete() uses stdin for codex and cleans the output", async 
   });
   t.after(restoreChat);
 
+  const settings = require("../src/main/settings");
+  // test/run.js loads every test file into one process: restore what we change.
+  t.after(() => settings.set({
+    vibeCodingMode: settings.DEFAULTS.vibeCodingMode,
+    advisorFileBlacklist: settings.DEFAULTS.advisorFileBlacklist,
+    chatCwd: settings.DEFAULTS.chatCwd,
+  }));
   const vscodeChat = require("../src/main/vscode-chat");
+  const readCalls = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "")
+    .split("\n")
+    .filter((l) => l.startsWith("["));
 
-  // --- codex branch ---
+  // --- companion mode (the default) never spawns a CLI ---
   availabilityState.activeProvider = "codex";
   availabilityState.providers = {
     codex: { available: true, command: fakeCommand },
     claude: { available: false, command: null },
     priestess: { available: false },
   };
+  assert.equal(settings.get("vibeCodingMode"), "companion");
+  assert.equal(await vscodeChat.complete("function add(a, b) {", "verify.ts", "typescript"), null);
+  assert.equal(readCalls().length, 0, "companion mode must not spawn a completion CLI");
+
+  settings.set({ vibeCodingMode: "advisor" });
+
+  // --- codex branch ---
   let text = await vscodeChat.complete("function add(a, b) {", "verify.ts", "typescript");
   assert.equal(text, "return a + b;");
   const log = fs.readFileSync(logFile, "utf8");
@@ -124,6 +144,8 @@ test("vscode-chat complete() uses stdin for codex and cleans the output", async 
   assert.ok(argsLine, "fake CLI should log its args");
   assert.ok(!argsLine.includes('"-p"'), "codex args must not use -p (it is --profile)");
   assert.ok(!argsLine.includes("--json"), "codex completion should use plain text output");
+  assert.ok(argsLine.includes('"read-only"'), "codex completion runs in the read-only sandbox");
+  assert.ok(!argsLine.includes("dangerously"), "codex completion never bypasses the sandbox");
   assert.ok(log.includes("STDIN:"), "codex prompt must be fed through stdin");
   assert.ok(log.includes("function add(a, b) {"), "stdin must contain the code prefix");
 
@@ -134,9 +156,58 @@ test("vscode-chat complete() uses stdin for codex and cleans the output", async 
     claude: { available: true, command: fakeCommand },
     priestess: { available: false },
   };
-  text = await vscodeChat.complete("function add(a, b) {", "verify.ts", "typescript");
+  const multiLine = "function add(a, b) {\n  // 100% %PATH% \"quoted\"\n";
+  text = await vscodeChat.complete(multiLine, "verify.ts", "typescript", path.join(tmp, "src", "verify.ts"));
   assert.equal(text, "return a + b;");
   const log2 = fs.readFileSync(logFile, "utf8");
-  const claudeLine = log2.split("\n").filter((l) => l.startsWith("[")).pop();
-  assert.ok(claudeLine.includes('"-p"'), "claude args use -p for the prompt");
+  const claudeArgs = JSON.parse(readCalls().pop());
+  assert.equal(claudeArgs[0], "-p", "claude runs in print mode");
+  assert.ok(claudeArgs.every((a) => !a.includes("function add") && !a.includes("\n")),
+    "the prompt must never travel through argv");
+  assert.ok(log2.includes("STDIN:Complete this code."), "claude prompt must be fed through stdin");
+  assert.ok(log2.includes("%PATH%"), "stdin carries the prefix verbatim");
+  const toolsAt = claudeArgs.indexOf("--tools");
+  assert.ok(toolsAt >= 0 && claudeArgs[toolsAt + 1] === "", "claude completion disables all built-in tools");
+  const modeAt = claudeArgs.indexOf("--permission-mode");
+  assert.ok(modeAt >= 0 && claudeArgs[modeAt + 1] === "default",
+    "permission mode is pinned so settings.json defaultMode cannot apply");
+  assert.ok(claudeArgs.includes("--strict-mcp-config"), "the Doctor's MCP servers are not loaded");
+  assert.ok(claudeArgs.includes("--no-session-persistence"), "no saved session per completion");
+  assert.ok(!claudeArgs.some((a) => /dangerously|bypass|allowedTools/i.test(a)), "no permission escalation");
+
+  // --- agent mode is still capped: same tool-less invocation ---
+  settings.set({ vibeCodingMode: "agent" });
+  text = await vscodeChat.complete("const x = compute(", "x.ts", "typescript");
+  assert.equal(text, "return a + b;");
+  const agentArgs = JSON.parse(readCalls().pop());
+  assert.deepEqual(agentArgs, claudeArgs, "agent mode must not widen the completion invocation");
+
+  // --- sensitive and blacklisted files never reach the CLI ---
+  // The blacklist is relative to the workspace root (no VS Code workspace is
+  // reported here, so chatCwd is the root).
+  settings.set({ vibeCodingMode: "advisor", advisorFileBlacklist: "vault/**", chatCwd: tmp });
+  const before = readCalls().length;
+  const blocked = [
+    [".env", path.join(tmp, ".env")],
+    [".env.local", path.join(tmp, ".env.local")],
+    ["SERVER.PEM", "C:\\proj\\certs\\SERVER.PEM"],
+    ["id_ed25519", path.join(tmp, ".ssh", "id_ed25519")],
+    ["prod.key", path.join(tmp, "prod.key")],
+    ["a.ts", path.join(tmp, "vault", "a.ts")],
+    // No full path from an older extension: the bare name is still checked.
+    [".env", undefined],
+  ];
+  for (const [file, full] of blocked) {
+    assert.equal(await vscodeChat.complete("API_KEY=sk-live-123", file, "plaintext", full), null, `${full || file} must be refused`);
+  }
+  // Windows workspace: backslashes and drive-letter case do not matter.
+  settings.set({ chatCwd: "C:\\Users\\Doc\\proj" });
+  assert.equal(await vscodeChat.complete("x", "a.ts", "typescript", "c:\\users\\doc\\proj\\Vault\\a.ts"), null,
+    "vault/** covers a Windows path under the root");
+  assert.equal(readCalls().length, before, "no CLI spawned for sensitive/blacklisted files");
+
+  // Clearing the Doctor's blacklist cannot remove the built-in floor.
+  settings.set({ advisorFileBlacklist: "" });
+  assert.equal(await vscodeChat.complete("API_KEY=sk-live-123", ".env", "plaintext", path.join(tmp, ".env")), null);
+  assert.equal(readCalls().length, before, "the sensitive-file floor survives an empty blacklist");
 });

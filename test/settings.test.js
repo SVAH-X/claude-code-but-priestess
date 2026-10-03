@@ -20,7 +20,7 @@ const DEFAULTS = Object.freeze({
   diagnosticCheckCooldownMin: 5,
   vibeCodingActivityNarration: false,
   activityCheckCooldownMin: 3,
-  advisorFileBlacklist: ".env\n.env.*\n*secret*\n*credential*\n*.pem\n*.key\nid_rsa*\n*password*\n*token*",
+  advisorFileBlacklist: ".env\n.env.*\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa*\nid_ed25519*\nid_ecdsa*\n.npmrc\n.netrc\n.pgpass\n.git-credentials\nsecrets/",
   coauthorCommits: true,
   skillsEnabled: true,
   updateChannel: "stable",

@@ -57,23 +57,3 @@ test("appendMemoryEntry produces correct timestamp format", () => {
   isTrue(line.startsWith("- "), "line starts with dash");
   isTrue(line.includes("空值 bug"), "content preserved");
 });
-
-// ============================================================
-// Project notes logic tests
-// ============================================================
-
-test("projectNotesPath generates stable filename from workspace path", () => {
-  const crypto = require("crypto");
-  const ws1 = "/home/user/projects/my-app";
-  const ws2 = "/home/user/projects/my-app"; // same path
-  const key1 = crypto.createHash("sha256").update(ws1).digest("hex").slice(0, 12);
-  const key2 = crypto.createHash("sha256").update(ws2).digest("hex").slice(0, 12);
-  equal(key1, key2, "same workspace → same key");
-});
-
-test("projectNotesPath generates different keys for different workspaces", () => {
-  const crypto = require("crypto");
-  const key1 = crypto.createHash("sha256").update("/home/project-a").digest("hex").slice(0, 12);
-  const key2 = crypto.createHash("sha256").update("/home/project-b").digest("hex").slice(0, 12);
-  isTrue(key1 !== key2, "different workspaces → different keys");
-});

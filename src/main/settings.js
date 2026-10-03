@@ -41,17 +41,24 @@ const DEFAULTS = Object.freeze({
   // Migrated from the old `agentMode` boolean on first read.
   vibeCodingMode: "companion",
   // Vibe coding: proactive diagnostic checks (she notices lint errors).
-  // Deprecated: proactivity is now tied to vibeCodingMode (companion=silent,
-  // advisor=diagnostics, agent=full). These keys are kept only for backward compat.
+  // Explicit opt-in, honoured in every vibeCodingMode and independent of
+  // 老婆模式; these turns never run above advisor permissions.
   vibeCodingDiagnostics: false,
+  // Minutes between diagnostic proactive checks (min 1).
   diagnosticCheckCooldownMin: 5,
+  // Vibe coding: proactive activity narration (save, git, tasks, and failed
+  // build/test commands in the VS Code terminal). Same opt-in rules.
   vibeCodingActivityNarration: false,
   // Minutes between activity-based proactive checks (min 1).
   activityCheckCooldownMin: 3,
-  // Advisor mode file blacklist — gitignore-style patterns, one per line.
-  // She won't read files matching any of these. Editable from VS Code settings
-  // (prts.advisorFileBlacklist) or directly in settings.json.
-  advisorFileBlacklist: ".env\n.env.*\n*secret*\n*credential*\n*.pem\n*.key\nid_rsa*\n*password*\n*token*",
+  // File blacklist — gitignore-style patterns, one per line, relative to the
+  // working directory (see file-blacklist.js). Applies to what she reads on her
+  // own in companion/advisor turns (Claude: Read deny rules; Codex: advisor
+  // prompt hint only) and to editor context VS Code sends unasked. Never to
+  // agent mode, and never drops the Doctor's own attachments. Edited here in
+  // settings.json, or in VS Code user settings (prts.advisorFileBlacklist),
+  // which the extension pushes only when the Doctor set it there.
+  advisorFileBlacklist: ".env\n.env.*\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa*\nid_ed25519*\nid_ecdsa*\n.npmrc\n.netrc\n.pgpass\n.git-credentials\nsecrets/",
   // When she commits on the Doctor's behalf, sign the commit with an honest
   // Co-Authored-By trailer (普瑞赛斯 <prts.priestess@outlook.com>) so she shows
   // up as a real contributor — the same idea as Claude Code's trailer. On by

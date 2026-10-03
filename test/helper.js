@@ -1,76 +1,35 @@
-// Test helper — thin wrappers around Node.js native assert with descriptive output.
+// Test helper — short assertion names for the table-style test files, backed by
+// node:test so `npm test` reports (and runs) every case on its own: a failing
+// case no longer aborts the rest of its file, and the reporter names it.
+const nodeTest = require("node:test");
 const assert = require("node:assert");
-const { strictEqual, deepStrictEqual, ok, throws, doesNotThrow } = assert;
-
-let currentTest = "";
-let count = 0;
-let failed = 0;
 
 function test(name, fn) {
-  currentTest = name;
-  try {
-    fn();
-    count++;
-  } catch (err) {
-    failed++;
-    console.log(`  ✗ ${name}`);
-    console.log(`    ${err.message}`);
-    throw err; // re-throw so the runner catches it
-  }
+  return nodeTest(name, fn);
 }
 
 function equal(actual, expected, msg) {
-  try {
-    strictEqual(actual, expected, msg);
-  } catch (err) {
-    console.log(`    in: ${currentTest}`);
-    throw err;
-  }
+  assert.strictEqual(actual, expected, msg);
 }
 
 function deepEqual(actual, expected, msg) {
-  try {
-    deepStrictEqual(actual, expected, msg);
-  } catch (err) {
-    console.log(`    in: ${currentTest}`);
-    throw err;
-  }
+  assert.deepStrictEqual(actual, expected, msg);
 }
 
 function isTrue(val, msg) {
-  try {
-    ok(val, msg);
-  } catch (err) {
-    console.log(`    in: ${currentTest}`);
-    throw err;
-  }
+  assert.ok(val, msg);
 }
 
 function isFalse(val, msg) {
-  try {
-    ok(!val, msg);
-  } catch (err) {
-    console.log(`    in: ${currentTest}`);
-    throw err;
-  }
+  assert.ok(!val, msg);
 }
 
 function matches(str, regex, msg) {
-  try {
-    ok(regex.test(str), msg || `expected "${str}" to match ${regex}`);
-  } catch (err) {
-    console.log(`    in: ${currentTest}`);
-    throw err;
-  }
+  assert.ok(regex.test(str), msg || `expected "${str}" to match ${regex}`);
 }
 
 function noMatch(str, regex, msg) {
-  try {
-    ok(!regex.test(str), msg || `expected "${str}" NOT to match ${regex}`);
-  } catch (err) {
-    console.log(`    in: ${currentTest}`);
-    throw err;
-  }
+  assert.ok(!regex.test(str), msg || `expected "${str}" NOT to match ${regex}`);
 }
 
 module.exports = { test, equal, deepEqual, isTrue, isFalse, matches, noMatch, assert };

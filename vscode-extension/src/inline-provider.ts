@@ -1,7 +1,26 @@
 import * as vscode from "vscode";
+import { isSensitiveFile } from "./sensitive-files";
 
 const DEBOUNCE_MS = 300;
 const MIN_PREFIX_LENGTH = 3;
+
+/**
+ * Inline completion is opt-in (`prts.inlineCompletion.enabled`, default off):
+ * every typing pause costs a CLI call and sends the lines before the cursor to
+ * the model.
+ */
+export function isInlineCompletionEnabled(): boolean {
+  return vscode.workspace.getConfiguration("prts").get<boolean>("inlineCompletion.enabled") === true;
+}
+
+/**
+ * The root blacklist patterns are relative to: the document's own workspace
+ * folder, else the first folder (what the tray app uses as the workspace).
+ */
+function workspaceRootFor(document: vscode.TextDocument): string {
+  const own = document.uri ? vscode.workspace.getWorkspaceFolder(document.uri) : undefined;
+  return (own ?? vscode.workspace.workspaceFolders?.[0])?.uri.fsPath ?? "";
+}
 
 export class InlineCompletionProvider implements vscode.InlineCompletionItemProvider {
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -25,6 +44,16 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
     _context: vscode.InlineCompletionContext,
     _token: vscode.CancellationToken
   ): Promise<vscode.InlineCompletionItem[]> {
+    // Gates run before any document text is read.
+    if (!isInlineCompletionEnabled()) return [];
+    // Companion mode is chat-only (the backend enforces this too; skipping
+    // here keeps the prefix inside VS Code). null = not heard yet: ask anyway.
+    if (this.wsClient?.vibeCodingMode === "companion") return [];
+    // Never send secrets (.env*, *.pem, *.key, id_*, ...) or files matching
+    // the Doctor's blacklist (relative to the document's workspace folder).
+    const blacklist = vscode.workspace.getConfiguration("prts").get<string>("advisorFileBlacklist");
+    if (isSensitiveFile(document.fileName, blacklist, workspaceRootFor(document))) return [];
+
     // Get the text before the cursor (last few lines for context).
     const lineStart = Math.max(0, position.line - 5);
     const prefixRange = new vscode.Range(lineStart, 0, position.line, position.character);
@@ -63,7 +92,7 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
 
           // requestCompletion() itself drops the request if another one is
           // still in flight, so we can never stack backend CLI spawns.
-          const items = await this.requestCompletion(prefix, file, lang, position);
+          const items = await this.requestCompletion(prefix, file, document.fileName, lang, position);
 
           if (_token.isCancellationRequested || !items) {
             resolve([]);
@@ -87,6 +116,7 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
   private async requestCompletion(
     prefix: string,
     file: string | undefined,
+    filePath: string,
     language: string,
     position: vscode.Position
   ): Promise<vscode.InlineCompletionItem[] | null> {
@@ -94,9 +124,12 @@ export class InlineCompletionProvider implements vscode.InlineCompletionItemProv
     this.inFlight = true;
     try {
       // Send a lightweight completion request.
+      // filePath lets the backend repeat the sensitive-file check on the full
+      // path; only the bare file name is ever put into the prompt.
       const result = await this.wsClient.request("chat:inline-complete", {
         prefix,
         file,
+        filePath,
         language,
       });
       if (!result?.text) return null;

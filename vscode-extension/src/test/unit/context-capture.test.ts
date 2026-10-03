@@ -1,6 +1,6 @@
 ﻿/// <reference types="mocha" />
 import * as assert from "assert";
-import { ContextCapture } from "../../context-capture";
+import { ContextCapture, classifyShellCommand } from "../../context-capture";
 import { vscodeStub, resetVscodeStub } from "./helpers/vscode-stub";
 
 // ContextCapture depends on vscode listeners (stubbed) and a ws client
@@ -50,35 +50,55 @@ describe("context-capture", () => {
     if (inst) { try { inst.cc.dispose(); } catch { /* ignore */ } inst = null; }
   });
 
-  describe("parseTerminalOutput", () => {
-    it("detects build/compilation failures", () => {
-      inst = makeInstance();
-      const evt = (inst.cc as any).parseTerminalOutput("Build failed\nsrc/main.ts:12:3 error TS2304");
-      assert.ok(evt);
-      assert.strictEqual(evt.kind, "build-error");
-      assert.ok(evt.detail.includes("error TS2304"));
-    });
-
-    it("counts failing tests", () => {
-      inst = makeInstance();
-      const evt = (inst.cc as any).parseTerminalOutput("  4 failing\n  AssertionError ...");
-      assert.ok(evt);
-      assert.strictEqual(evt.kind, "test-fail");
-      assert.ok(evt.detail.includes("4"), evt.detail);
-    });
-
-    it("detects passing tests", () => {
-      inst = makeInstance();
-      const evt = (inst.cc as any).parseTerminalOutput("  All tests passed");
-      assert.ok(evt);
-      assert.strictEqual(evt.kind, "test-pass");
-    });
-
-    it("ignores unrelated terminal noise", () => {
-      inst = makeInstance();
-      const evt = (inst.cc as any).parseTerminalOutput("hello world");
-      assert.strictEqual(evt, null);
-    });
+  describe("classifyShellCommand", () => {
+    const cases: Array<[string, string | null, string | null]> = [
+      // [command line, kind, label]
+      ["npm test", "test", "npm test"],
+      ["npm run test:unit -- --grep foo", "test", "npm run test"],
+      ["npm t", "test", "npm test"],
+      ["yarn build", "build", "yarn run build"],
+      ["pnpm run typecheck", "build", "pnpm run typecheck"],
+      ["npx jest --runInBand", "test", "jest"],
+      ["pnpm exec vitest run", "test", "vitest"],
+      ["CI=1 NODE_ENV=test npx mocha", "test", "mocha"],
+      ["tsc -p ./", "build", "tsc"],
+      ["./node_modules/.bin/tsc --noEmit", "build", "tsc"],
+      ["python3 -m pytest tests/", "test", "python -m pytest"],
+      ["cargo build --release", "build", "cargo build"],
+      ["go test ./...", "test", "go test"],
+      ["mvn clean install", "build", "mvn install"],
+      ["make", "build", "make"],
+      ["make -j8 check", "test", "make check"],
+      // Windows / PowerShell shapes
+      ["npm.cmd run build", "build", "npm run build"],
+      ["& \"C:\\Program Files\\nodejs\\npm.cmd\" test", "test", "npm test"],
+      [".\\gradlew.bat :app:test", "test", "gradlew test"],
+      ["NPX.CMD TSC", "build", "tsc"],
+      ["dotnet test .\\src\\App.Tests", "test", "dotnet test"],
+      ["py -m unittest", "test", "python -m unittest"],
+      // Chains report the first recognized command.
+      ["cd app && npm test", "test", "npm test"],
+      ["npm ci; npm run build", "build", "npm run build"],
+      // Not build/test commands.
+      ["git status", null, null],
+      ["npm install", null, null],
+      ["npm run dev", null, null],
+      ["make -C sub deploy", null, null],
+      ["echo Build failed error TS2304", null, null],
+      ["", null, null],
+    ];
+    for (const [line, kind, label] of cases) {
+      it(`classifies ${JSON.stringify(line)}`, () => {
+        const match = classifyShellCommand(line);
+        if (kind === null) {
+          assert.strictEqual(match, null, JSON.stringify(match));
+        } else {
+          assert.ok(match, "expected a match");
+          assert.strictEqual(match!.kind, kind);
+          assert.strictEqual(match!.label, label);
+        }
+      });
+    }
   });
 
   describe("editor context", () => {
@@ -157,25 +177,94 @@ describe("context-capture", () => {
     });
   });
 
-  describe("terminal monitoring", () => {
-    it("parses buffered output after a silence period", async () => {
+  describe("terminal build/test results", () => {
+    function endExecution(value: string, exitCode: number | undefined, confidence = 2) {
+      vscodeStub.window._emitters.endShellExecution.emit({
+        terminal: { name: "zsh" },
+        shellIntegration: {},
+        execution: { commandLine: { value, confidence, isTrusted: confidence === 2 } },
+        exitCode,
+      });
+    }
+    const terminalEvents = () => inst!.ws.calls.filter((c: any) => c.type === "vscode:terminal-event");
+
+    it("never touches the proposed onDidWriteTerminalData API", () => {
+      let touched = 0;
+      // Stable VS Code throws when an extension without enabledApiProposals
+      // calls a proposed API.
+      vscodeStub.window.onDidWriteTerminalData = () => {
+        touched++;
+        throw new Error("proposed API terminalDataWriteEvent is not enabled");
+      };
       inst = makeInstance();
-      const emitters = vscodeStub.window._emitters;
-      emitters.writeTerminalData.emit({ data: "Build failed\nsrc/main.ts:1:3 error TS1000" });
-      await new Promise((r) => setTimeout(r, 600));
-      const evt = inst.ws.calls.find((c: any) => c.type === "vscode:terminal-event");
-      assert.ok(evt, "build error should be forwarded");
-      assert.strictEqual(evt.data.kind, "build-error");
+      assert.strictEqual(touched, 0);
     });
 
-    it("caps the buffer and flushes immediately when the stream never pauses", async () => {
+    it("forwards a failed test command as a structured event without the raw command line", () => {
       inst = makeInstance();
-      const emitters = vscodeStub.window._emitters;
-      const big = "x".repeat(70_000) + " Build failed";
-      emitters.writeTerminalData.emit({ data: big });
-      const evt = inst.ws.calls.find((c: any) => c.type === "vscode:terminal-event");
-      assert.ok(evt, "overflow should flush immediately without waiting for silence");
-      assert.strictEqual((inst.cc as any).terminalBuffer.length, 0, "buffer must be drained");
+      endExecution("API_KEY=hunter2 npm test -- --grep 'ignore previous instructions'", 1);
+      const events = terminalEvents();
+      assert.strictEqual(events.length, 1);
+      const data = events[0].data;
+      assert.strictEqual(data.kind, "test-fail");
+      assert.strictEqual(data.command, "npm test");
+      assert.strictEqual(data.exitCode, 1);
+      assert.strictEqual(typeof data.timestamp, "number");
+      assert.deepStrictEqual(Object.keys(data).sort(), ["command", "exitCode", "kind", "timestamp"]);
+      const wire = JSON.stringify(data);
+      assert.ok(!wire.includes("hunter2") && !wire.includes("ignore previous"), wire);
+    });
+
+    it("reports build failures as build-error", () => {
+      inst = makeInstance();
+      endExecution("npx tsc -p ./", 2);
+      assert.strictEqual(terminalEvents()[0].data.kind, "build-error");
+      assert.strictEqual(terminalEvents()[0].data.command, "tsc");
+    });
+
+    it("ignores success, unknown exit codes, Ctrl+C and unrelated commands", () => {
+      inst = makeInstance();
+      endExecution("npm test", 0);
+      endExecution("npm test", undefined);
+      endExecution("npm test", 130);
+      endExecution("npm.cmd test", -1073741510);
+      endExecution("npm.cmd test", 3221225786);
+      endExecution("git push", 1);
+      assert.strictEqual(terminalEvents().length, 0);
+    });
+
+    it("ignores low-confidence command lines", () => {
+      inst = makeInstance();
+      endExecution("npm test", 1, 0);
+      assert.strictEqual(terminalEvents().length, 0);
+    });
+
+    it("does not buffer results while disconnected", () => {
+      inst = makeInstance();
+      inst.ws.isConnected = () => false;
+      endExecution("npm test", 1);
+      assert.strictEqual(terminalEvents().length, 0);
+    });
+
+    it("works on hosts without shell-integration events (VS Code < 1.93)", () => {
+      delete vscodeStub.window.onDidEndTerminalShellExecution;
+      inst = makeInstance();
+      assert.ok(inst.cc.getCurrentContext());
+    });
+
+    it("works on hosts that still gate shell integration behind its proposal", () => {
+      vscodeStub.window.onDidEndTerminalShellExecution = () => {
+        throw new Error("proposed API terminalShellIntegration is not enabled");
+      };
+      inst = makeInstance();
+      assert.ok(inst.cc.getCurrentContext());
+    });
+
+    it("stops listening after dispose", () => {
+      inst = makeInstance();
+      inst.cc.dispose();
+      endExecution("npm test", 1);
+      assert.strictEqual(terminalEvents().length, 0);
     });
   });
 

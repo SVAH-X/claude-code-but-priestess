@@ -4,8 +4,11 @@ const assert = require("node:assert/strict");
 const {
   attachmentTempName,
   buildCodexExecArgs,
+  codexSessionIdFromEvent,
+  createBackoffRetry,
   normalizeCwd,
-  resolveResumeSessionId
+  resolveResumeSessionId,
+  silentTurnVibeMode
 } = require("../src/main/chat-runtime");
 
 test("downscaled attachments from different folders keep distinct names", () => {
@@ -103,4 +106,86 @@ test("maintenance confines its writable workspace to the memory directory", () =
   assert.equal(invocation.args[cwdIndex + 1], "/memory");
   assert.equal(invocation.args[sandboxIndex + 1], "workspace-write");
   assert.equal(invocation.args.includes("--add-dir"), false);
+});
+
+test("silent turns pick their permission mode; editor-context checks never run as agent", () => {
+  // Plain 老婆模式 look-ins keep the Doctor's agent mode, as before.
+  assert.equal(silentTurnVibeMode("proactive", "agent"), "agent");
+  assert.equal(silentTurnVibeMode("proactive", "advisor"), "advisor");
+  assert.equal(silentTurnVibeMode("proactive", "companion"), "advisor");
+  // Checks carrying VS Code context are capped at read-only.
+  for (const mode of ["companion", "advisor", "agent"]) {
+    assert.equal(silentTurnVibeMode("proactive", mode, { editorContext: true }), "advisor");
+  }
+  assert.equal(silentTurnVibeMode("maintenance", "agent"), "maintenance");
+  assert.equal(silentTurnVibeMode(null, "agent"), null);
+});
+
+test("Codex session ids come only from session/thread/conversation fields", () => {
+  assert.equal(codexSessionIdFromEvent({ type: "thread.started", thread_id: "t-1" }), "t-1");
+  assert.equal(codexSessionIdFromEvent({ type: "session.created", session_id: "s-1", thread_id: "t-1" }), "s-1");
+  assert.equal(codexSessionIdFromEvent({ type: "session", conversationId: " c-1 " }), "c-1");
+  // A per-event id is not a session id — never resume it.
+  assert.equal(codexSessionIdFromEvent({ type: "session.created", id: "evt-1" }), null);
+  assert.equal(codexSessionIdFromEvent({ type: "thread.started", thread_id: "", id: "evt-2" }), null);
+  assert.equal(codexSessionIdFromEvent({ type: "thread.started", thread_id: 42 }), null);
+  assert.equal(codexSessionIdFromEvent(null), null);
+});
+
+function fakeTimers() {
+  const pending = [];
+  return {
+    pending,
+    setTimer: (fn, ms) => {
+      const timer = { fn, ms };
+      pending.push(timer);
+      return timer;
+    },
+    clearTimer: (timer) => {
+      const index = pending.indexOf(timer);
+      if (index >= 0) pending.splice(index, 1);
+    },
+    fire() {
+      const timer = pending.shift();
+      timer.fn();
+      return timer.ms;
+    }
+  };
+}
+
+test("backoff retry doubles up to its cap and then stops scheduling", () => {
+  const timers = fakeTimers();
+  const retry = createBackoffRetry({ baseMs: 5000, maxMs: 30000, maxAttempts: 5, ...timers });
+  let runs = 0;
+  const delays = [];
+  const again = () => {
+    runs += 1;
+    retry.schedule(again);
+  };
+  assert.equal(retry.schedule(again), true);
+  while (timers.pending.length) delays.push(timers.fire());
+  assert.deepEqual(delays, [5000, 10000, 20000, 30000, 30000]);
+  assert.equal(runs, 5);
+  assert.equal(retry.pending, false);
+  assert.equal(retry.schedule(again), false, "exhausted retries must report it");
+  assert.equal(timers.pending.length, 0);
+});
+
+test("backoff retry keeps a single timer and reset restores the budget", () => {
+  const timers = fakeTimers();
+  const retry = createBackoffRetry({ baseMs: 100, maxMs: 1000, maxAttempts: 2, ...timers });
+  retry.schedule(() => {});
+  retry.schedule(() => {});
+  assert.equal(timers.pending.length, 1, "rescheduling replaces the pending timer");
+  assert.equal(timers.pending[0].ms, 200);
+  assert.equal(retry.schedule(() => {}), false);
+  assert.equal(timers.pending.length, 0, "giving up cancels the pending timer");
+
+  retry.reset();
+  assert.equal(retry.attempts, 0);
+  assert.equal(retry.schedule(() => {}), true);
+  assert.equal(timers.pending[0].ms, 100);
+  retry.reset();
+  assert.equal(timers.pending.length, 0, "reset cancels the pending timer");
+  assert.equal(retry.pending, false);
 });

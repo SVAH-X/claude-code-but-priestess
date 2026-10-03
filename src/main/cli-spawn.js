@@ -1,3 +1,4 @@
+const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 
 function isWindowsCommandScript(command) {
@@ -39,7 +40,36 @@ function spawnCliSync(command, args = [], options = {}) {
   return spawnSync(command, args, { ...options, shell: false });
 }
 
+// Kills a CLI started by spawnCli together with its children. On Windows a
+// .cmd shim runs as cmd.exe -> node.exe (-> codex.exe), and proc.kill() only
+// terminates cmd.exe, leaving the real CLI running (and billing) as an orphan
+// that still holds the stdio pipes. taskkill /T /F takes the whole tree down.
+function killProcessTree(proc) {
+  if (!proc) return;
+  if (process.platform === "win32" && proc.pid) {
+    try {
+      const taskkill = path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe");
+      const killer = spawn(taskkill, ["/pid", String(proc.pid), "/T", "/F"], {
+        shell: false,
+        stdio: "ignore",
+        windowsHide: true
+      });
+      // If taskkill cannot start or fails, at least kill the direct child.
+      const fallback = () => {
+        try { proc.kill(); } catch (_) { /* already gone */ }
+      };
+      killer.on("error", fallback);
+      killer.on("exit", (code) => { if (code) fallback(); });
+      return;
+    } catch (_) {
+      // Fall through to the plain kill below.
+    }
+  }
+  try { proc.kill(); } catch (_) { /* already gone */ }
+}
+
 module.exports = {
+  killProcessTree,
   spawnCli,
   spawnCliSync
 };

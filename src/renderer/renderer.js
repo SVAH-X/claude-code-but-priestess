@@ -73,7 +73,9 @@ const RENDERER_TEXT = {
     preview_open_title: "在默认浏览器中打开",
     preview_close_title: "关闭预览",
     preview_browser_opened: "已在浏览器中打开。",
-    preview_browser_failed: "打开浏览器失败。"
+    preview_browser_failed: "打开浏览器失败。",
+    apply_fix: "对比",
+    apply_fix_title: (f) => `在对比视图中查看这段代码与 ${f} 的差异（不会直接改动文件）`
   },
   en: {
     chat_empty_hint: "Say something to her.",
@@ -102,7 +104,9 @@ const RENDERER_TEXT = {
     preview_open_title: "Open in default browser",
     preview_close_title: "Close preview",
     preview_browser_opened: "Opened in browser.",
-    preview_browser_failed: "Failed to open browser."
+    preview_browser_failed: "Failed to open browser.",
+    apply_fix: "Diff",
+    apply_fix_title: (f) => `Review this code against ${f} in a diff view (the file is not changed)`
   }
 };
 
@@ -126,6 +130,7 @@ function applyL10n() {
   if (closeBtn) closeBtn.title = t("btn_close_title");
   if (openInBrowserBtn) { openInBrowserBtn.textContent = t("preview_open"); openInBrowserBtn.title = t("preview_open_title"); }
   if (closePreviewBtn) closePreviewBtn.title = t("preview_close_title");
+  for (const btn of chatStream?.querySelectorAll(".apply-fix-btn") || []) labelApplyButton(btn);
 }
 
 // ============================================================
@@ -1212,10 +1217,7 @@ function renderMarkdown(input) {
   src = src.replace(/\fCB(\d+)\f/g, (_, idx) => {
     const { lang, code } = codeBlocks[Number(idx)];
     const langClass = lang ? ` class="lang-${escapeHtml(lang)}"` : "";
-    const applyBtn = lastAppliedFilePath
-      ? `<button class="apply-fix-btn" data-code="${escapeHtml(code)}" data-lang="${escapeHtml(lang || '')}">Apply</button>`
-      : "";
-    return `<div class="code-block-wrapper"><pre><code${langClass}>${escapeHtml(code)}</code></pre>${applyBtn}</div>`;
+    return `<div class="code-block-wrapper"><pre><code${langClass}>${escapeHtml(code)}</code></pre></div>`;
   });
   return src;
 }
@@ -1232,6 +1234,51 @@ function renderMarkdownCached(msg) {
   const html = renderMarkdown(msg.text || "");
   mdCache.set(msg.id, { text: msg.text, html });
   return html;
+}
+
+// Apply-fix buttons on assistant code blocks. Only the VS Code webview shim
+// exposes chatApi.applyFix (it opens a diff against the editor file); the tray
+// preload has no editor to diff against, so the tray never renders the button
+// rather than showing a dead control.
+function canApplyFix() {
+  return typeof window.chatApi?.applyFix === "function";
+}
+
+// Binds each assistant reply to the file that was active when the Doctor
+// asked: the editor context of the nearest preceding user message. A reply to
+// a message sent with no open editor, or with an unsaved "Untitled-1" buffer
+// (not an absolute path: /…, C:\…, \\server\…), gets no target and no
+// button, so an older answer is never diffed against a newer message's file.
+function applyTargetsFor(history) {
+  const targets = new Map(); // assistant messageId -> file path
+  if (!canApplyFix()) return targets;
+  let turnFile = null;
+  for (const m of history) {
+    if (m?.role === "user") {
+      const file = m.context?.activeFile;
+      turnFile = typeof file === "string" && /^(?:\/|[a-zA-Z]:[\\/]|\\\\)/.test(file) ? file : null;
+    } else if (m?.role === "assistant" && turnFile) {
+      targets.set(m.id, turnFile);
+    }
+  }
+  return targets;
+}
+
+function labelApplyButton(btn) {
+  const file = btn.dataset.file || "";
+  btn.textContent = t("apply_fix");
+  btn.title = t("apply_fix_title", file.split(/[\\/]/).pop() || file);
+}
+
+function attachApplyButtons(el, filePath) {
+  for (const wrapper of el.querySelectorAll(".code-block-wrapper")) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "apply-fix-btn";
+    btn.dataset.file = filePath;
+    labelApplyButton(btn);
+    wrapper.append(btn);
+  }
 }
 
 let moodResetTimer = null;
@@ -1342,7 +1389,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-function buildMsgEl(msg) {
+function buildMsgEl(msg, applyTarget = null) {
   const el = document.createElement("div");
   el.dataset.id = msg.id;
   if (msg.role === "tool") {
@@ -1410,8 +1457,6 @@ function buildMsgEl(msg) {
       badge.textContent = label;
       badge.title = ctx.activeFile;
       el.append(badge);
-      // Track the active file for Apply buttons on assistant code blocks.
-      lastAppliedFilePath = ctx.activeFile;
     }
   } else if (msg.role === "assistant") {
     const isStreaming = chatRunning && msg.id === currentAssistantId;
@@ -1437,6 +1482,7 @@ function buildMsgEl(msg) {
       el.append(cur);
     } else {
       el.innerHTML = renderMarkdownCached(msg);
+      if (applyTarget) attachApplyButtons(el, applyTarget);
       appendBubbleTime(el, msg);
     }
   } else {
@@ -1625,14 +1671,14 @@ function renderHistory(history) {
     empty.textContent = t("chat_empty_hint");
     chatStream.append(empty);
     currentAssistantId = null;
-    lastAppliedFilePath = null;
     checkAndUpdateHtmlPreview();
     return;
   }
   const assistants = lastHistory.filter((m) => m.role === "assistant");
   currentAssistantId = assistants.length ? assistants[assistants.length - 1].id : null;
+  const applyTargets = applyTargetsFor(lastHistory);
   for (const msg of lastHistory) {
-    chatStream.append(buildMsgEl(msg));
+    chatStream.append(buildMsgEl(msg, applyTargets.get(msg.id)));
   }
   const last = lastHistory[lastHistory.length - 1];
   const sentNewMessage = Boolean(last && last.role === "user" && !prevIds.has(last.id));
@@ -2063,7 +2109,6 @@ const versionBadge = document.getElementById("versionBadge");
 
 let queueLength = 0;
 let lastSettingsPayload = null;
-let lastAppliedFilePath = null; // set from context badge for Apply button target
 
 function refreshComposerMeta() {
   const payload = lastSettingsPayload;
@@ -2158,14 +2203,14 @@ window.addEventListener("keydown", notePopoverActivity, { passive: true });
 // ============================================================
 stage.addEventListener("click", handleStageClick);
 
-// Apply fix button delegation — code blocks in assistant messages may have an Apply button.
+// Apply-fix delegation: each button carries the file bound to its own reply
+// (see applyTargetsFor) and diffs the text of its own code block.
 chatStream.addEventListener("click", (event) => {
   const btn = event.target.closest?.(".apply-fix-btn");
-  if (!btn || !lastAppliedFilePath) return;
-  const code = btn.dataset.code;
-  if (code && window.chatApi?.applyFix) {
-    window.chatApi.applyFix(lastAppliedFilePath, code, 0);
-  }
+  if (!btn || !canApplyFix()) return;
+  const filePath = btn.dataset.file;
+  const code = btn.closest(".code-block-wrapper")?.querySelector("pre > code")?.textContent;
+  if (filePath && code) window.chatApi.applyFix(filePath, code, 0);
 });
 
 // ============================================================

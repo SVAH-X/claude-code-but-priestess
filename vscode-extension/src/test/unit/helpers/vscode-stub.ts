@@ -56,7 +56,7 @@ function createStub(): any {
     activeTextEditor: createEmitter(),
     textEditorSelection: createEmitter(),
     windowState: createEmitter(),
-    writeTerminalData: createEmitter(),
+    endShellExecution: createEmitter(),
     colorTheme: createEmitter(),
   };
   const workspaceEmitters = {
@@ -85,7 +85,9 @@ function createStub(): any {
     onDidChangeActiveTextEditor: (cb: Listener) => windowEmitters.activeTextEditor.on(cb),
     onDidChangeTextEditorSelection: (cb: Listener) => windowEmitters.textEditorSelection.on(cb),
     onDidChangeWindowState: (cb: Listener) => windowEmitters.windowState.on(cb),
-    onDidWriteTerminalData: (cb: Listener) => windowEmitters.writeTerminalData.on(cb),
+    // Stable shell-integration event (VS Code 1.93+). The proposed
+    // onDidWriteTerminalData is deliberately absent, as in stable VS Code.
+    onDidEndTerminalShellExecution: (cb: Listener) => windowEmitters.endShellExecution.on(cb),
     onDidChangeActiveColorTheme: (cb: Listener) => windowEmitters.colorTheme.on(cb),
     _messages: [] as Array<{ kind: string; text: string }>,
     showInformationMessage: async (text: string) => {
@@ -104,8 +106,12 @@ function createStub(): any {
     _emitters: workspaceEmitters,
     _config: {},
     workspaceFolders: [],
+    // Per-scope values for inspect(); tests set e.g.
+    // `_inspect.advisorFileBlacklist = { globalValue: "..." }`.
+    _inspect: {} as Record<string, any>,
     getConfiguration: (_section: string) => ({
       get: (key: string) => workspaceSection._config[key],
+      inspect: (key: string) => ({ key, ...(workspaceSection._inspect[key] || {}) }),
     }),
     // Configurable by tests via workspaceSection._getWorkspaceFolder.
     getWorkspaceFolder: (_uri: any) =>

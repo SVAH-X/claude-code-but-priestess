@@ -15,7 +15,10 @@ const { spawnCli, spawnCliSync } = require("./cli-spawn");
 const {
   attachmentTempName,
   buildCodexExecArgs,
-  resolveResumeSessionId
+  codexSessionIdFromEvent,
+  createBackoffRetry,
+  resolveResumeSessionId,
+  silentTurnVibeMode
 } = require("./chat-runtime");
 const { parseClaudeEffortLevels } = require("./claude-capabilities");
 const {
@@ -25,7 +28,7 @@ const {
   reasoningEffortsForModel,
   resolveCodexModel
 } = require("./codex-model-catalog");
-const { parseBlacklist, findBlacklistedFiles, isBlacklisted } = require("./file-blacklist");
+const { claudeReadDenyRules, matchBlacklist, matchClaudeReadDeny, parseBlacklist } = require("./file-blacklist");
 const {
   classifyCodexRejection,
   codexEventErrorText,
@@ -148,6 +151,10 @@ let sawSilentDirective = false;
 // no tool pills, no streaming. A proactive reply only surfaces if she chose
 // to speak (no [[silent]] and real text). null | "proactive" | "maintenance".
 let silentTurnKind = null;
+// Whether the current proactive turn carries VS Code editor context; such
+// turns are capped at advisor permissions. Set by sendProactive, and kept
+// across the self-heal retries (which replay silentTurnKind the same way).
+let proactiveEditorContext = false;
 // Mirrors the chat window's current 普猫猫 visual state (set by main.js when the
 // pet→chat transition rolls it). Kept here so the persona prompt can match what
 // the Doctor sees. Ephemeral; never persisted.
@@ -247,7 +254,7 @@ function providerSessionPlan(provider) {
 // prompt by persona.js (no --add-dir: `codex exec resume` rejects that flag).
 function codexAttachmentArgs() {
   const args = [];
-  for (const p of filterBlacklistedPaths(pendingAttachments)) {
+  for (const p of pendingAttachments) {
     if (isImagePath(p)) args.push("-i", p);
   }
   return args;
@@ -259,52 +266,141 @@ function codexAttachmentArgs() {
 // non-agent turns answer "no photo". Text files are inlined, so only images.
 function attachmentDirArgs() {
   const dirs = new Set();
-  for (const p of filterBlacklistedPaths(pendingAttachments)) if (isImagePath(p)) dirs.add(path.dirname(p));
+  for (const p of pendingAttachments) if (isImagePath(p)) dirs.add(path.dirname(p));
   const args = [];
   for (const d of dirs) args.push("--add-dir", d);
   return args;
 }
 
-// Drop blacklisted attachments before they reach any CLI arg or inline prompt.
-// The advisor file blacklist is a real deny here (absolute-path match), not just
-// a persona hint - Read/-i/--add-dir never see these paths.
-function filterBlacklistedPaths(paths) {
-  if (!Array.isArray(paths) || !paths.length) return paths;
+// The file blacklist guards what she reads on her own inside the working
+// directory. Files the Doctor attached himself are his explicit choice: they are
+// always delivered, and one from inside the working directory that matches the
+// list only earns a one-line heads-up in the modes where the list applies.
+function blacklistActiveForMode(mode) {
+  return mode === "companion" || mode === "advisor";
+}
+
+function noteBlacklistedAttachments(files) {
+  if (!Array.isArray(files) || !files.length) return;
+  if (!blacklistActiveForMode(String(settings.get("vibeCodingMode") || "companion"))) return;
   const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
-  if (!patterns.length) return paths;
-  return paths.filter((p) => !isBlacklisted(path.resolve(String(p)), patterns));
+  if (!patterns.length) return;
+  const root = resolveCwd();
+  const hits = [];
+  for (const p of files) {
+    const pattern = matchBlacklist(p, patterns, { root, outsideRoot: "ignore" });
+    if (pattern) hits.push(`${path.basename(p)}（${pattern}）`);
+  }
+  if (!hits.length) return;
+  pushSystem(`提示：附件 ${hits.join("、")} 命中了文件黑名单。这是你亲手附上的，已照常发送。`);
+}
+
+// Claude enforcement of the blacklist: companion/advisor turns carry Read deny
+// rules (Claude applies Read rules to Grep/Glob too) in a --settings file. A file
+// keeps globs, spaces and JSON quotes out of argv, which matters on Windows,
+// where a .cmd shim routes every argument through cmd.exe.
+// Returns { args, cleanupDir }: cleanupDir is set when a temp dir of its own
+// had to be created (it goes away with the turn like the prompt file's).
+function claudeReadDenyArgs(mode, promptFile) {
+  const none = { args: [], cleanupDir: null };
+  if (!blacklistActiveForMode(mode)) return none;
+  const rules = claudeReadDenyRules(parseBlacklist(settings.get("advisorFileBlacklist")));
+  if (!rules.length) return none;
+  const json = JSON.stringify({ permissions: { deny: rules } });
+  if (promptFile) {
+    try {
+      const file = path.join(promptFile.dir, "read-deny-settings.json");
+      fs.writeFileSync(file, json, "utf8");
+      return { args: ["--settings", file], cleanupDir: null };
+    } catch (error) {
+      console.warn("chat: failed to write read-deny settings", error);
+    }
+  }
+  const own = createInvocationTempFile("prts-claude-", "read-deny-settings.json", json);
+  if (own) return { args: ["--settings", own.file], cleanupDir: own.dir };
+  // No temp dir at all. Inline JSON is fine for a real executable, but cmd.exe
+  // would mangle its quotes, so on Windows this turn goes unenforced (advisor
+  // turns still carry the persona prompt hint).
+  if (process.platform === "win32") {
+    console.warn("chat: file blacklist not enforced this turn (no temp dir)");
+    return none;
+  }
+  return { args: ["--settings", json], cleanupDir: null };
+}
+
+// An attached image is always delivered. When the file (or the downscaled copy
+// that would stand in for it) sits where this turn's Claude Read deny rules
+// reach, Claude gets a neutrally named temp copy instead, so the Doctor's own
+// attachment stays readable while the deny rules keep guarding the workspace.
+function claudeAttachmentGuard(provider, mode) {
+  if (provider !== PROVIDERS.CLAUDE || !blacklistActiveForMode(mode)) return null;
+  const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
+  if (!patterns.length) return null;
+  // Compare both spellings of each path: the CLI may resolve symlinks (macOS
+  // /tmp -> /private/tmp) or 8.3 names before applying its rules. A file that
+  // does not exist yet is resolved through its folder.
+  const real = (p) => {
+    try { return fs.realpathSync.native(p); } catch { /* not there yet */ }
+    try { return path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p)); } catch { return p; }
+  };
+  const cwd = resolveCwd();
+  const roots = [...new Set([cwd, real(cwd)])];
+  // Outside the cwd Claude's relative rules deny nothing (seen on macOS). That
+  // is unverified on Windows, so there a name match outside the cwd also gets
+  // a neutral copy: a needless rename beats an image she cannot open.
+  const outsideRoot = process.platform === "win32" ? "basename" : "ignore";
+  return (file) => {
+    const files = [...new Set([file, real(file)])];
+    return roots.some((root) => files.some((f) => matchClaudeReadDeny(f, patterns, { root, outsideRoot }) !== null));
+  };
+}
+
+function neutralAttachmentName(index, ext) {
+  return `${String(index).padStart(2, "0")}-attachment${ext || ".png"}`;
 }
 
 // Vision cost + latency scale with pixels, so cap oversized images before they
 // go to a backend (a huge screenshot/photo is mostly wasted detail). The Doctor
 // still sees the full original in their own bubble; only the backend copy
 // shrinks. Returns paths with large images swapped for downscaled temp copies.
+// `denied` (from claudeAttachmentGuard) marks paths Claude may not Read.
 const ATTACHMENT_MAX_DIM = 1280;
 
-function resolveAttachmentsForBackend(paths) {
+function resolveAttachmentsForBackend(paths, denied = null) {
   if (!paths.some(isImagePath)) return paths;
   let dir = null;
-  let img = null;
+  const tempDir = () => {
+    if (!dir) {
+      dir = path.join(os.tmpdir(), "prts-attach");
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return dir;
+  };
   return paths.map((p, index) => {
     if (!isImagePath(p)) return p;
     try {
       const { nativeImage } = require("electron");
-      img = nativeImage.createFromPath(p);
-      if (img.isEmpty()) return p;
-      const { width, height } = img.getSize();
-      if (Math.max(width, height) <= ATTACHMENT_MAX_DIM) return p;
-      const resized =
-        width >= height
-          ? img.resize({ width: ATTACHMENT_MAX_DIM, quality: "good" })
-          : img.resize({ height: ATTACHMENT_MAX_DIM, quality: "good" });
-      if (!dir) {
-        dir = path.join(os.tmpdir(), "prts-attach");
-        fs.rmSync(dir, { recursive: true, force: true });
-        fs.mkdirSync(dir, { recursive: true });
+      const img = nativeImage.createFromPath(p);
+      const size = img.isEmpty() ? null : img.getSize();
+      if (size && Math.max(size.width, size.height) > ATTACHMENT_MAX_DIM) {
+        const resized =
+          size.width >= size.height
+            ? img.resize({ width: ATTACHMENT_MAX_DIM, quality: "good" })
+            : img.resize({ height: ATTACHMENT_MAX_DIM, quality: "good" });
+        let out = path.join(tempDir(), attachmentTempName(p, index));
+        // The copy keeps the original's name, and os.tmpdir() can sit inside
+        // the cwd (Windows: %LOCALAPPDATA%\Temp under a home-dir cwd).
+        if (denied && (denied(p) || denied(out))) out = path.join(tempDir(), neutralAttachmentName(index, ".png"));
+        fs.writeFileSync(out, resized.toPNG());
+        return out;
       }
-      const out = path.join(dir, attachmentTempName(p, index));
-      fs.writeFileSync(out, resized.toPNG());
-      return out;
+      if (denied && denied(p)) {
+        const out = path.join(tempDir(), neutralAttachmentName(index, path.extname(p).toLowerCase()));
+        fs.copyFileSync(p, out);
+        return out;
+      }
+      return p;
     } catch {
       return p;
     }
@@ -955,6 +1051,12 @@ function finishTurn(extra = {}) {
   emitStatus("idle", extra);
 }
 
+// A queued message whose CLI vanished mid-turn (e.g. a self-update swapping the
+// binary) is retried on a short backoff: 5s, 10s, 20s, 40s. Each attempt
+// rescans the CLIs with synchronous `--version` probes on the main thread, so
+// the retry is bounded instead of polling forever.
+const outboundRetry = createBackoffRetry({ baseMs: 5000, maxMs: 40000, maxAttempts: 4 });
+
 function drainOutboundQueue() {
   if (quitPending || currentProcess || outboundQueue.length === 0) return;
   // Peek, don't shift yet — if dispatchSend fails (missing-cli, quitting),
@@ -966,18 +1068,33 @@ function drainOutboundQueue() {
     attachments: next.attachments || []
   });
   if (result?.ok) {
+    outboundRetry.reset();
     outboundQueue.shift();
     emitQueueState();
-  } else if (outboundQueue.length > 0 && result?.reason !== "busy" && result?.reason !== "quitting") {
-    // Dispatch failed (e.g. missing-cli) — retry after a delay so the queue
-    // isn't permanently stuck when the CLI becomes available again.
-    setTimeout(() => {
-      if (!quitPending && !currentProcess) drainOutboundQueue();
-    }, 5000).unref();
+    return;
   }
+  if (result?.reason === "busy" || result?.reason === "quitting") return;
+  const scheduled = outboundRetry.schedule(() => {
+    if (!quitPending && !currentProcess) drainOutboundQueue();
+  });
+  if (!scheduled) abandonOutboundQueue(result?.reason || "missing-cli");
+}
+
+// Out of retries: drop the queue so the renderer (which ignores "idle" while
+// anything is queued) leaves the thinking state, and say what happened. The
+// unsent bubbles stay greyed out as queued, so their text can be copied.
+function abandonOutboundQueue(reason) {
+  const count = outboundQueue.length;
+  clearOutboundQueue();
+  pushSystem(
+    `找不到可用的 Claude Code 或 Codex CLI，排队中的 ${count} 条消息没有发出。` +
+      "请确认 CLI 已安装并登录，然后重新发送。"
+  );
+  emitStatus("idle", { error: reason });
 }
 
 function clearOutboundQueue() {
+  outboundRetry.reset();
   if (!outboundQueue.length) return;
   outboundQueue.length = 0;
   emitQueueState();
@@ -2065,21 +2182,6 @@ function isCodexAssistantEvent(event, type) {
   );
 }
 
-function codexSessionIdFromEvent(event) {
-  // Only use unambiguous session/thread/conversation identifiers.
-  // event.id is a per-event UUID — storing it as a session ID corrupts
-  // session tracking and causes silent resume failures.
-  return (
-    event.session_id ||
-    event.sessionId ||
-    event.thread_id ||
-    event.threadId ||
-    event.conversation_id ||
-    event.conversationId ||
-    null
-  );
-}
-
 function rememberCodexError(text) {
   const message = String(text || "").trim();
   if (!message) return;
@@ -2318,7 +2420,7 @@ async function takeScreenshot() {
   return null;
 }
 
-function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
+function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds, { vscodeTurn = false, workspacePath = "" } = {}) {
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
   const isAdvisor = mode === "advisor";
@@ -2345,7 +2447,11 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     catMode: silentTurnKind ? null : chatCatMode,
     coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
     attachments: silentTurnKind ? [] : pendingAttachments,
-    neteaseClientPlayback: neteaseClientPlaybackEnabled()
+    neteaseClientPlayback: neteaseClientPlaybackEnabled(),
+    workspacePath: vscodeTurn ? workspacePath : "",
+    // silentTurnKind is popover state: a VS Code turn is never a silent turn.
+    vscodeTurn,
+    silentTurn: !vscodeTurn && Boolean(silentTurnKind)
   });
   const promptFile = createInvocationTempFile("prts-claude-", "system-prompt.txt", systemPrompt);
   const args = [
@@ -2384,6 +2490,8 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     // Companion mode: chat only, no tools at all.
     args.push("--allowedTools", "");
   }
+  const readDeny = claudeReadDenyArgs(mode, promptFile);
+  args.push(...readDeny.args);
   // Let Read reach attachments dropped from outside the project dir.
   args.push(...attachmentDirArgs());
 
@@ -2395,12 +2503,12 @@ function buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTr
     command: resolveExecutable("claude"),
     args,
     stdin: `${trimmed}\n`,
-    cleanupDirs: promptFile ? [promptFile.dir] : [],
+    cleanupDirs: [promptFile && promptFile.dir, readDeny.cleanupDir].filter(Boolean),
     resumed: Boolean(resumeSessionId)
   };
 }
 
-function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscript) {
+function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, { vscodeTurn = false, workspacePath = "" } = {}) {
   const mode = vibeCodingMode || "companion";
   const isAgent = mode === "agent";
   const memoryRecallRequested = shouldIncludeLongMemoryForText(trimmed);
@@ -2421,21 +2529,24 @@ function buildCodexPrompt(trimmed, vibeCodingMode, screenshotPath, sharedTranscr
       catMode: silentTurnKind ? null : chatCatMode,
       coauthorCommits: !silentTurnKind && settings.get("coauthorCommits") !== false,
       attachments: silentTurnKind ? [] : pendingAttachments,
-      neteaseClientPlayback: neteaseClientPlaybackEnabled()
+      neteaseClientPlayback: neteaseClientPlaybackEnabled(),
+      workspacePath: vscodeTurn ? workspacePath : "",
+      vscodeTurn,
+      silentTurn: !vscodeTurn && Boolean(silentTurnKind)
     }) +
     "\n\n【博士本轮请求】\n" +
     trimmed
   );
 }
 
-function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
+function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds, turnOptions = {}) {
   const mode = vibeCodingMode || "companion";
   const resumeSessionId = resolveResumeSessionId(
     PROVIDERS.CODEX,
     sessionPlan,
     customSessionIds
   );
-  const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript);
+  const prompt = buildCodexPrompt(trimmed, mode, screenshotPath, sharedTranscript, turnOptions);
   const codexModel = validatedCodexModel();
   const codexReasoningEffort = validatedCodexReasoningEffort();
   const invocation = buildCodexExecArgs({
@@ -2457,7 +2568,10 @@ function buildCodexInvocation(trimmed, cwd, vibeCodingMode, screenshotPath, shar
   };
 }
 
-function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds) {
+// turnOptions.vscodeTurn marks a turn from the VS Code extension (vscode-chat.js):
+// it always gets the coding voice and is never treated as a silent popover turn.
+function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds, turnOptions) {
+  turnOptions = turnOptions || {};
   if (provider === PROVIDERS.CODEX) {
     return buildCodexInvocation(
       trimmed,
@@ -2466,18 +2580,17 @@ function buildProviderInvocation(provider, trimmed, cwd, vibeCodingMode, screens
       screenshotPath,
       sharedTranscript,
       sessionPlan,
-      customSessionIds
+      customSessionIds,
+      turnOptions
     );
   }
-  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds);
+  return buildClaudeInvocation(trimmed, vibeCodingMode, screenshotPath, sharedTranscript, sessionPlan, customSessionIds, turnOptions);
 }
 
 function send(text, attachments) {
-  const files = filterBlacklistedPaths(
-    Array.isArray(attachments)
-      ? attachments.filter((p) => typeof p === "string" && p.trim())
-      : []
-  );
+  const files = Array.isArray(attachments)
+    ? attachments.filter((p) => typeof p === "string" && p.trim())
+    : [];
   let trimmed = String(text ?? "").trim();
   if (!trimmed && files.length === 0) return { ok: false, reason: "empty" };
   if (!trimmed) trimmed = "看看这些。"; // attachments with no text of their own
@@ -2497,6 +2610,7 @@ function send(text, attachments) {
   if (currentProcess || turnLaunching) {
     outboundQueue.push({ text: trimmed, attachments: files });
     pushUser(trimmed, provider, { queued: true, attachments: files });
+    noteBlacklistedAttachments(files);
     emitQueueState();
     return { ok: true, queued: true, queueLength: outboundQueue.length };
   }
@@ -2530,7 +2644,11 @@ function dispatchSend(
     ? []
     : Array.isArray(resolvedAttachments)
       ? resolvedAttachments
-      : resolveAttachmentsForBackend(Array.isArray(attachments) ? attachments : []);
+      : resolveAttachmentsForBackend(
+          Array.isArray(attachments) ? attachments : [],
+          // Only real turns carry attachments, so the mode is the Doctor's own.
+          claudeAttachmentGuard(provider, vibeCodingModeOverride || String(settings.get("vibeCodingMode") || "companion"))
+        );
 
   // A genuine new user turn — reset the Codex auto-continue guard.
   if (!chained) {
@@ -2547,6 +2665,7 @@ function dispatchSend(
     currentUserEntry = activateQueuedUser(trimmed) || findLatestUserEntry(trimmed, provider);
   } else {
     currentUserEntry = pushUser(trimmed, provider, { attachments });
+    noteBlacklistedAttachments(attachments);
   }
   const sessionPlan = provider === PROVIDERS.PRIESTESS ? null : providerSessionPlan(provider);
   const sharedTranscript =
@@ -2571,16 +2690,19 @@ function dispatchSend(
   });
 
   // Silent turns need tools regardless of the Doctor's vibeCodingMode setting.
-  // Proactive checks need at least Read (advisor); maintenance needs file r/w.
+  // Proactive checks need at least Read (advisor); maintenance needs file r/w;
+  // editor-context checks never run above advisor (see silentTurnVibeMode).
   const globalMode = String(settings.get("vibeCodingMode") || "companion");
   let vibeCodingMode = vibeCodingModeOverride || globalMode;
   if (!vibeCodingModeOverride) {
-    if (silentTurnKind === "proactive") {
-      vibeCodingMode = globalMode === "agent" ? "agent" : "advisor";
-      if (vibeCodingMode !== globalMode) console.log("proactive: overrode vibeCodingMode from %s to %s", globalMode, vibeCodingMode);
-    } else if (silentTurnKind === "maintenance") {
-      vibeCodingMode = "maintenance";
-      console.log("proactive: maintenance turn — forcing vibeCodingMode to maintenance");
+    const silentMode = silentTurnVibeMode(silentTurnKind, globalMode, {
+      editorContext: proactiveEditorContext
+    });
+    if (silentMode) {
+      vibeCodingMode = silentMode;
+      if (silentMode !== globalMode) {
+        console.log("%s turn: overrode vibeCodingMode from %s to %s", silentTurnKind, globalMode, silentMode);
+      }
     }
   }
 
@@ -3207,6 +3329,9 @@ function sendProactive(opts) {
   const gate = canRunSilentTurn();
   if (!gate.ok) return gate;
   silentTurnKind = "proactive";
+  proactiveEditorContext = Boolean(
+    opts && (opts.diagnosticContext || opts.diagnosticImprovement || opts.terminalEvent || opts.activityContext)
+  );
   const prompt = buildVibeProactivePrompt(opts);
   const result = dispatchSend(prompt, { silentUser: true });
   if (!result?.ok) silentTurnKind = null;
@@ -3243,12 +3368,13 @@ function buildImprovementPrompt(diag) {
   return lines.join("\n");
 }
 
+// evt comes from ws-policy.normalizeTerminalEvent: a canonical command label
+// and an exit code only — raw terminal output never reaches the prompt.
 function buildTerminalPrompt(evt) {
   const lines = [
     buildProactivePrompt(),
     "",
-    "博士刚才运行了终端命令。结果是：",
-    evt.detail,
+    `另外，博士刚才在 VS Code 终端里运行的「${evt.command}」失败了（退出码 ${evt.exitCode}）。`,
   ];
   if (evt.kind === "build-error") {
     lines.push("", "看起来构建/编译出错了。用你自然的风格轻声告知博士，可以帮他一起看看错误原因。如果你觉得只是暂时性问题，可以说 [[silent]]。");
@@ -3265,7 +3391,16 @@ function buildDiagnosticProactivePrompt(diag) {
     "另外，博士的 VS Code 编辑器刚刚检测到以下问题：",
     `- ${diag.errors} 个错误，${diag.warnings} 个警告，涉及 ${diag.totalFilesWithProblems} 个文件`,
   ];
-  const top5 = (diag.details || []).slice(0, 5);
+  // Diagnostics arrive from VS Code unasked, and a message can quote the line
+  // it flags: entries for blacklisted files (relative to the VS Code
+  // workspace) are left out.
+  const patterns = parseBlacklist(settings.get("advisorFileBlacklist"));
+  let root = "";
+  try { root = require("./ws-server").getVscodeWorkspace() || ""; } catch (_) { /* bridge not loaded */ }
+  if (!root) root = resolveCwd();
+  const top5 = (diag.details || [])
+    .filter((d) => d && (!patterns.length || !d.file || matchBlacklist(String(d.file), patterns, { root }) === null))
+    .slice(0, 5);
   for (const d of top5) {
     const file = (d.file || "").split(/[\\/]/).pop();
     lines.push(`  - [${d.severity}] ${file}:${d.line}: ${d.message}`);
@@ -3365,6 +3500,8 @@ module.exports = {
   getOutboundQueueLength: () => outboundQueue.length,
   // Exported for vscode-chat.js (VS Code extension independent sessions)
   buildProviderInvocation,
+  // Exported for tests
+  buildVibeProactivePrompt,
   consumeDirectives,
   stripDirectiveTags,
 };

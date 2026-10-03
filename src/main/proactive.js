@@ -94,20 +94,20 @@ function activityCooldownMs() {
   return clampNumber(settings.get("activityCheckCooldownMin"), 1, 60, 3) * 60 * 1000;
 }
 
-// Proactivity level is tied to vibeCodingMode:
-// companion → completely silent, no proactive checks at all
-// advisor   → diagnostic checks only (lint errors change)
-// agent     → diagnostics + activity + waifu checks (if waifu enabled)
-function proactiveLevel() {
-  const mode = settings.get("vibeCodingMode") || "companion";
-  if (mode === "agent") return "full";
-  if (mode === "advisor") return "diagnostics";
-  return "silent";
-}
+// Gating is independent of vibeCodingMode on purpose. 老婆模式 is a
+// companionship feature, not a coding permission, so it runs in every mode.
+// The coding checks each need their own explicit opt-in (settings.json):
+//   vibeCodingDiagnostics        → editor errors (and the "fixed it" praise)
+//   vibeCodingActivityNarration  → save/git/task activity + terminal build/test failures
+// Turns that carry editor context are capped at advisor permissions in
+// chat.js (see chat-runtime silentTurnVibeMode).
+
+// A terminal build/test failure is only worth mentioning right after it
+// happened; one that waited out quiet hours or a busy turn is dropped.
+const TERMINAL_EVENT_FRESH_MS = 2 * 60 * 1000;
 
 function shouldRunDiagnosticCheck(now) {
   if (!getWsServer().isVscodeActive()) return false;
-  if (proactiveLevel() === "silent") return false;
   if (settings.get("vibeCodingDiagnostics") !== true) return false; // explicit user opt-in
   if (now - lastDiagnosticAttemptAt < diagnosticCooldownMs()) return false;
   if (chat.isBusy()) return false;
@@ -137,7 +137,8 @@ function shouldRunDiagnosticCheck(now) {
 
 function shouldRunTerminalCheck(now) {
   if (!getWsServer().isVscodeActive()) return false;
-  if (proactiveLevel() === "silent") return false; // companion mode
+  // Build/test results are activity: same opt-in and cooldown as narration.
+  if (settings.get("vibeCodingActivityNarration") !== true) return false;
   if (now - lastActivityAttemptAt < activityCooldownMs()) return false;
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
@@ -154,6 +155,7 @@ function shouldRunTerminalCheck(now) {
   if (!evt) return false;
   // Only trigger on build errors or test failures (not test passes).
   if (evt.kind !== "build-error" && evt.kind !== "test-fail") return false;
+  if (!(now - Number(evt.at) < TERMINAL_EVENT_FRESH_MS)) return false;
   const lastTs = chat.getLastConversationTs();
   if (lastTs && now - lastTs < cooldownMs()) return false;
   return true;
@@ -161,7 +163,7 @@ function shouldRunTerminalCheck(now) {
 
 function shouldRunActivityCheck(now) {
   if (!getWsServer().isVscodeActive()) return false;
-  if (proactiveLevel() !== "full") return false; // only agent mode
+  if (settings.get("vibeCodingActivityNarration") !== true) return false; // explicit user opt-in
   if (now - lastActivityAttemptAt < activityCooldownMs()) return false;
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
@@ -186,7 +188,6 @@ function shouldRunActivityCheck(now) {
 
 function shouldRunProactive(now) {
   if (settings.get("waifuMode") !== true) return false;
-  if (proactiveLevel() !== "full") return false; // only agent mode
   if (now - lastProactiveAttemptAt < intervalMs()) return false;
   if (inQuietHours()) return false;
   const day = localDayKey();
@@ -245,8 +246,10 @@ function tick() {
 
     if (shouldRunTerminalCheck(now)) {
       lastActivityAttemptAt = now;
-      const evt = getWsServer().getLatestTerminalEvent();
-      if (chat.sendProactive({ terminalEvent: evt })?.ok) {
+      // Consume the event: one failure is mentioned at most once, instead of
+      // re-triggering every cooldown until the daily cap.
+      const evt = getWsServer().takeTerminalEvent();
+      if (evt && chat.sendProactive({ terminalEvent: evt })?.ok) {
         daily.count += 1;
       }
       return;
@@ -292,4 +295,5 @@ function start() {
   tickTimer.unref?.();
 }
 
-module.exports = { start };
+// tick is exported for tests; the app only calls start().
+module.exports = { start, tick };

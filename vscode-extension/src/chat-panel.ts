@@ -4,6 +4,20 @@ import * as fs from "fs";
 import * as os from "os";
 import { generateApiShim } from "./api-shim";
 import { ContextCapture } from "./context-capture";
+import { isPathInside } from "./path-guard";
+
+/**
+ * Resolves symlinks / junctions (and, on Windows, subst drives and 8.3 short
+ * names). realpathSync.native is preferred; it fails on some Windows virtual
+ * drives (e.g. RAM disks), where the JS implementation still resolves links.
+ */
+function realpath(p: string): string {
+  try {
+    return fs.realpathSync.native(p);
+  } catch (_) {
+    return fs.realpathSync(p);
+  }
+}
 
 export class ChatPanelProvider implements vscode.WebviewViewProvider {
   private wsUnsubs: (() => void)[] = [];
@@ -496,32 +510,55 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     return tmpDir;
   }
 
-  private applyFix(filePath: string, newCode: string) {
-    const uri = vscode.Uri.file(filePath);
+  /**
+   * Opens a diff of a suggested code block against a workspace file. The path
+   * comes from the webview (the editor context stored with the chat history),
+   * so it is checked before anything touches the disk:
+   *  - it must be an absolute path; "." / ".." segments are resolved first,
+   *    because getWorkspaceFolder() matches URI path segments lexically and
+   *    would count "<ws>/../secret" as inside the workspace;
+   *  - getWorkspaceFolder() then applies VS Code's own path-casing rules
+   *    (case-insensitive on Windows / macOS, drive letters included);
+   *  - the real paths (symlinks / junctions resolved) must still be contained,
+   *    so a link inside the workspace cannot point the diff at a file outside.
+   */
+  private applyFix(filePath: unknown, newCode: unknown) {
+    if (typeof filePath !== "string" || !filePath || !path.isAbsolute(filePath) ||
+        typeof newCode !== "string") {
+      vscode.window.showErrorMessage("PRTS: 无效的对比请求。");
+      return;
+    }
+    const target = path.resolve(filePath);
+    const uri = vscode.Uri.file(target);
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    if (!folder?.uri?.fsPath) {
+      vscode.window.showErrorMessage("PRTS: 只能对比当前工作区内的文件：" + target);
+      return;
+    }
     try {
-      if (!fs.existsSync(uri.fsPath)) {
-        vscode.window.showErrorMessage("PRTS: File not found: " + filePath);
+      let realTarget: string;
+      try {
+        realTarget = realpath(target);
+      } catch (_) {
+        vscode.window.showErrorMessage("PRTS: 找不到文件：" + target);
         return;
       }
-      // Safety: only allow files inside an open workspace folder.
-      // getWorkspaceFolder() uses VS Code's own path normalization (handles
-      // case differences on Windows), unlike a manual startsWith() compare
-      // that would both false-reject valid paths and be bypassable via
-      // symlinks pointing outside the workspace.
-      const folder = vscode.workspace.getWorkspaceFolder(uri);
-      if (!folder) {
-        vscode.window.showErrorMessage("PRTS: File is outside the workspace: " + filePath);
+      if (!isPathInside(realTarget, realpath(folder.uri.fsPath))) {
+        vscode.window.showErrorMessage("PRTS: 只能对比当前工作区内的文件：" + target);
+        return;
+      }
+      if (!fs.statSync(realTarget).isFile()) {
+        vscode.window.showErrorMessage("PRTS: 目标不是文件：" + target);
         return;
       }
       const tmpDir = this.createTempDir("prts-suggestion-");
-      const tmpFile = path.join(tmpDir, path.basename(filePath));
+      const tmpFile = path.join(tmpDir, path.basename(target));
       fs.writeFileSync(tmpFile, newCode, "utf8");
       const tmpUri = vscode.Uri.file(tmpFile);
       vscode.commands.executeCommand("vscode.diff", uri, tmpUri,
-        `PRTS Suggestion — ${path.basename(filePath)}`);
+        `PRTS 建议 — ${path.basename(target)}`);
     } catch (err) {
-      vscode.window.showErrorMessage("PRTS: Failed to create suggestion diff: " +
-        (err as Error).message);
+      vscode.window.showErrorMessage("PRTS: 创建对比视图失败 — " + (err as Error).message);
     }
   }
 

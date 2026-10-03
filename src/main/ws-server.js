@@ -6,7 +6,7 @@ const { WebSocketServer } = require("ws");
 const chat = require("./chat");
 const vscodeChat = require("./vscode-chat");
 const settings = require("./settings");
-const { isAllowedWsOrigin } = require("./ws-policy");
+const { isAllowedWsOrigin, normalizeTerminalEvent } = require("./ws-policy");
 
 let wss = null;
 let port = null;
@@ -27,7 +27,7 @@ let vscodeWorkspace = null;
 let latestDiagnostics = null;
 let latestContext = null;
 const recentActivities = []; // ring buffer, max 30
-let latestTerminalEvent = null; // most recent build/test result
+let latestTerminalEvent = null; // most recent failed build/test command, until proactive consumes it
 
 function generateToken() {
   return crypto.randomBytes(16).toString("hex");
@@ -120,9 +120,10 @@ function handleInbound(ws, raw) {
   const reqId = msg.reqId;
 
   switch (type) {
-    // Inline completion — lightweight, no history side effects.
+    // Inline completion — lightweight, no history side effects. filePath is
+    // only used for the sensitive-file / blacklist check, never in the prompt.
     case "chat:inline-complete":
-      vscodeChat.complete(msg.prefix, msg.file, msg.language).then((text) => {
+      vscodeChat.complete(msg.prefix, msg.file, msg.language, msg.filePath).then((text) => {
         if (reqId) sendTo(ws, { type: "chat:inline-complete:result", reqId, text });
       }).catch(() => {
         if (reqId) sendTo(ws, { type: "chat:inline-complete:result", reqId, text: null });
@@ -172,11 +173,12 @@ function handleInbound(ws, raw) {
         if (recentActivities.length > 30) recentActivities.shift();
       }
       break;
-    case "vscode:terminal-event":
-      if (msg && msg.kind) {
-        latestTerminalEvent = msg;
-      }
+    // Vibe coding: a build/test command failed in the integrated terminal.
+    case "vscode:terminal-event": {
+      const evt = normalizeTerminalEvent(msg);
+      if (evt) latestTerminalEvent = evt;
       break;
+    }
     case "chat:cancel":
       vscodeChat.cancel();
       break;
@@ -399,4 +401,11 @@ module.exports = {
   getLatestContext: () => latestContext,
   getRecentActivities: () => recentActivities.slice(),
   getLatestTerminalEvent: () => latestTerminalEvent,
+  // Returns the pending terminal event and clears it, so one failure is
+  // narrated at most once.
+  takeTerminalEvent: () => {
+    const evt = latestTerminalEvent;
+    latestTerminalEvent = null;
+    return evt;
+  },
 };

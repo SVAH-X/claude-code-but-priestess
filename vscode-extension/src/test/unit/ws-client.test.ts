@@ -251,6 +251,32 @@ describe("ws-client", () => {
     assert.strictEqual(availability.activeProvider, "codex");
   });
 
+  it("tracks vibeCodingMode from settings:state messages", async () => {
+    wss = await startServer();
+    let serverSocket: any = null;
+    wss.on("connection", (ws) => {
+      serverSocket = ws;
+      ws.on("message", (data: Buffer) => {
+        const msg = JSON.parse(String(data));
+        if (msg.type === "auth") {
+          ws.send(JSON.stringify({ type: "auth:ok", version: "test" }));
+          ws.send(JSON.stringify({ type: "settings:state", state: { vibeCodingMode: "companion" } }));
+        }
+      });
+    });
+    const root = makeDataRoot();
+    writePortFile(root, serverPort(wss));
+
+    client = new WsClient(makeContext() as any);
+    assert.strictEqual(client.vibeCodingMode, null, "unknown before the server reports it");
+    await waitForConnected(client);
+    await waitFor(() => client!.vibeCodingMode === "companion");
+
+    // Later settings broadcasts update the snapshot.
+    serverSocket.send(JSON.stringify({ type: "settings:state", state: { vibeCodingMode: "advisor" } }));
+    await waitFor(() => client!.vibeCodingMode === "advisor");
+  });
+
   it("manual electronPort config is honoured but still requires the port-file token", async () => {
     wss = await startServer();
     const auth = wireAuth(wss);
@@ -363,7 +389,8 @@ describe("ws-client", () => {
         received.push(msg);
         if (msg.type === "auth") {
           ws.send(JSON.stringify({ type: "auth:ok", version: "test" }));
-          // Announce an available CLI provider, exactly like the real server.
+          // Announce settings and an available CLI provider, exactly like the real server.
+          ws.send(JSON.stringify({ type: "settings:state", state: { vibeCodingMode: "advisor" } }));
           ws.send(JSON.stringify({ type: "chat:status", status: "idle", provider: "codex" }));
         } else if (msg.type === "chat:inline-complete" && msg.reqId) {
           // Pretend to be vscode-chat.complete(): return a ghost suggestion.
@@ -381,7 +408,10 @@ describe("ws-client", () => {
     const wsClient = new WsClient(makeContext() as any);
     client = wsClient; // afterEach disposes it
     await waitForConnected(wsClient);
+    await waitFor(() => wsClient.vibeCodingMode === "advisor");
 
+    // Inline completion is opt-in.
+    vscodeStub.workspace._config["inlineCompletion.enabled"] = true;
     const provider = new InlineCompletionProvider(wsClient as any);
     const doc = {
       languageId: "typescript",

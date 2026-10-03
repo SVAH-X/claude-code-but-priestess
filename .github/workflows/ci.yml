@@ -1,19 +1,39 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 name: CI
 
+# The maintainer develops on macOS; this matrix is how Windows (and Linux)
+# behaviour gets exercised on every push and pull request.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
+      # Let every OS finish so a Windows-only failure is not hidden behind
+      # a cancelled job.
+      fail-fast: false
       matrix:
-        node-version: [22]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: [20, 22]
+    defaults:
+      run:
+        # Git Bash on Windows. `npm test` itself still runs its script through
+        # cmd.exe there, exactly as on a Windows developer machine.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -21,42 +41,38 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            vscode-extension/package-lock.json
 
+      # --ignore-scripts: the tests only need electron to be resolvable (they
+      # stub it), not its ~100MB binary download or any other install step.
       - name: Install dependencies
         run: |
-          npm install --prefix vscode-extension
-          npm install --omit=dev
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund --prefix vscode-extension
 
       - name: Syntax check (JavaScript)
         run: |
-          for f in src/main/chat.js src/main/vscode-chat.js src/main/ws-server.js \
-                   src/main/main.js src/main/persona.js src/main/settings.js \
-                   src/main/proactive.js src/main/platform.js src/main/ws-policy.js \
-                   src/main/chat-runtime.js src/main/directive-stream.js \
-                   src/renderer/renderer.js; do
+          for f in src/main/*.js src/renderer/renderer.js scripts/*.js; do
             node --check "$f" || { echo "FAIL: $f"; exit 1; }
           done
           echo "All JS syntax checks passed"
 
-      - name: Syntax check (TypeScript)
-        run: |
-          cd vscode-extension
-          ./node_modules/.bin/tsc --noEmit
+      - name: Tests (node --test)
+        run: npm test
 
-      - name: Run tests
-        run: node test/run.js
-      - name: VS Code extension unit tests
-        run: |
-          cd vscode-extension
-          npm run test:unit
+      - name: VS Code extension typecheck + unit tests
+        working-directory: vscode-extension
+        run: npm run test:unit
 
-      # Launches a real VS Code instance headlessly (xvfb) - downloads VS Code
-      # on first run, hence the larger job timeout.
+      # Launches a real VS Code instance headlessly (xvfb) and downloads VS Code
+      # on first run, so it runs once rather than on every matrix cell.
       - name: VS Code extension integration tests
-        run: |
-          cd vscode-extension
-          xvfb-run -a npm run test:integration
-
+        if: runner.os == 'Linux' && matrix.node-version == 22
+        working-directory: vscode-extension
+        run: xvfb-run -a npm run test:integration
 
   lint:
     runs-on: ubuntu-latest

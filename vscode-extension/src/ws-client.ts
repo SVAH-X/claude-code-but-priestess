@@ -116,6 +116,13 @@ export class WsClient extends EventEmitter {
    */
   providerAvailability: { activeProvider: string | null } | null = null;
 
+  /**
+   * The tray app's vibeCodingMode as last reported by a `settings:state`
+   * message (sent on auth and on every settings change). `null` means not
+   * heard yet. Inline completion stays off in "companion" mode.
+   */
+  vibeCodingMode: string | null = null;
+
   constructor(
     context: vscode.ExtensionContext,
     options?: { requestTimeoutMs?: number }
@@ -241,6 +248,10 @@ export class WsClient extends EventEmitter {
     // already-updated snapshot.
     if (msg.type === "chat:status") {
       this.providerAvailability = { activeProvider: msg.provider || null };
+    }
+    if (msg.type === "settings:state" && msg.state && typeof msg.state === "object") {
+      const mode = msg.state.vibeCodingMode;
+      this.vibeCodingMode = typeof mode === "string" ? mode : null;
     }
 
     // Emit generic events for the API shim

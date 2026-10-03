@@ -204,10 +204,17 @@
           "default": 0,
           "description": "WebSocket port of the PRTS Electron app. Auto-detected from ws-port.json at startup; set manually only if auto-detection fails."
         },
+        "prts.inlineCompletion.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "启用行内代码补全（灰色提示文本）。每次输入停顿都会调用一次本地 Claude Code / Codex CLI（消耗用量），并把光标前约 6 行代码发送给模型。陪伴模式下不生效；.env*、*.pem、*.key、id_* 等敏感文件以及匹配 prts.advisorFileBlacklist 的文件永远不会发送。补全进程不带任何工具。"
+        },
         "prts.advisorFileBlacklist": {
           "type": "string",
-          "default": ".env\n.env.*\n*secret*\n*credential*\n*.pem\n*.key\nid_rsa*\n*password*\n*token*",
-          "description": "Prompt the model to avoid reading files matching these patterns (gitignore-style, one per line). This is a model-prompt constraint, not a filesystem security guarantee."
+          "default": ".env\n.env.*\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa*\nid_ed25519*\nid_ecdsa*\n.npmrc\n.netrc\n.pgpass\n.git-credentials\nsecrets/",
+          "scope": "application",
+          "editPresentation": "multilineText",
+          "description": "普瑞赛斯在陪伴/顾问模式下不会自行读取的文件（gitignore 风格，每行一个，相对工作区根目录）。Claude Code 以 Read 拒绝规则强制执行；Codex 没有对应的拦截机制，仅在顾问模式下收到文字提示。匹配文件的编辑器上下文（活动文件、选区、诊断）也不会自动发送。代理模式下不生效，也从不拦截你亲手附上的文件。只有你在 VS Code 用户设置里显式设置的值才会同步到 PRTS 托盘；保持未设置则以托盘 settings.json 中的列表为准。"
         }
       }
     }
