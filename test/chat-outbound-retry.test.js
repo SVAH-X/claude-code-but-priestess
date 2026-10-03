@@ -116,8 +116,12 @@ test("a queued message backs off and is dropped visibly when no backend returns"
   await queueBehindTurnThenLoseBackend("第二条");
   assert.equal(chat.getOutboundQueueLength(), 1);
 
+  // Bounded loop: a regression that re-arms the retry forever must fail the
+  // deepEqual below instead of hanging the test run.
   const delays = [];
-  while (timers.length) delays.push(await fireNextTimer());
+  for (let attempt = 0; attempt < 8 && timers.length; attempt += 1) {
+    delays.push(await fireNextTimer());
+  }
   assert.deepEqual(delays, [5000, 10000, 20000, 40000]);
   assert.equal(timers.length, 0, "no retry may stay armed after giving up");
 
@@ -130,6 +134,11 @@ test("a queued message backs off and is dropped visibly when no backend returns"
     { status: statuses[statuses.length - 1].status, error: statuses[statuses.length - 1].error },
     { status: "idle", error: "missing-cli" }
   );
+  // The renderer ignores "idle" while anything is queued, so the queue must
+  // be emptied (queue event with length 0) before the idle status goes out.
+  const emptiedAt = events.findIndex((event) => event.kind === "queue" && event.length === 0);
+  const idleAt = events.lastIndexOf(statuses[statuses.length - 1]);
+  assert.ok(emptiedAt !== -1 && emptiedAt < idleAt, "queue must be cleared before idle is emitted");
   const notes = chat.getHistory().filter((entry) => entry.role === "system");
   assert.match(notes[notes.length - 1].text, /排队中的 1 条消息没有发出/);
 });

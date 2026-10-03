@@ -75,6 +75,10 @@ export interface ShellCommandMatch {
  */
 const MAX_SELECTION_CHARS = 20_000;
 
+const SEVERITY_RANK: Record<DiagnosticDetail["severity"], number> = {
+  error: 0, warning: 1, info: 2, hint: 3,
+};
+
 // ---------------------------------------------------------------------------
 // Terminal command classification (pure; exported for tests)
 // ---------------------------------------------------------------------------
@@ -211,10 +215,19 @@ export class ContextCapture {
     this.wsClient = wsClient;
     this.currentContext = this.emptyContext();
 
-    // Send workspace paths on connect
+    // Each VS Code window runs its own extension host, so every connection
+    // reports its own workspace and focus state; the tray aggregates them
+    // (any window focused, the last focused window's workspace as cwd).
     this.wsClient.on("connected", () => {
       this.sendWorkspace();
+      this.sendFocus();
     });
+
+    this.disposables.push(
+      vscode.window.onDidChangeWindowState(() => {
+        this.sendFocus();
+      })
+    );
 
     // ---- Editor context listeners ----
 
@@ -460,6 +473,11 @@ export class ContextCapture {
       }
     }
 
+    // Errors first (stable, so order within a severity is kept): the cap
+    // below would otherwise crowd them out behind warnings and hints from
+    // whichever files happen to be enumerated earlier.
+    details.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
+
     // Cap details at 50 entries to avoid blowing up WS payload (large projects
     // can produce thousands of diagnostics, potentially exceeding maxPayload).
     const MAX_DETAILS = 50;
@@ -498,6 +516,12 @@ export class ContextCapture {
       workspaceFolders: folders,
       primaryWorkspace: folders[0] || null,
     });
+  }
+
+  private sendFocus(): void {
+    if (!this.wsClient?.isConnected()) return;
+    const state = vscode.window.state;
+    this.wsClient.notify("vscode:focus", { focused: state ? state.focused === true : true });
   }
 
   // -----------------------------------------------------------------------
@@ -562,47 +586,58 @@ export class ContextCapture {
       // The git extension API is not directly importable - detect at runtime
       const gitExt = vscode.extensions.getExtension("vscode.git");
       if (!gitExt) return;
-      Promise.resolve(gitExt.activate()).then((api: any) => {
-        if (!api || !api.repositories) return;
-        for (const repo of api.repositories) {
-          const root = repo.rootUri?.fsPath || "";
-          // Remember the current HEAD so state changes can be classified.
-          // repo.state fires on ANY change (file status, index, HEAD...), so
-          // comparing the HEAD reference lets us report real branch switches
-          // and new commits instead of "HEAD changed" for every refresh.
-          const snapshot = this.snapshotGitHead(repo);
-          if (snapshot) this.gitHeadState.set(root, snapshot);
-          this.gitWatchers.push(
-            repo.state.onDidChange(() => {
-              const next = this.snapshotGitHead(repo);
-              if (!next) return;
-              const prev = this.gitHeadState.get(root);
-              this.gitHeadState.set(root, next);
-              if (prev && next.name && prev.name !== next.name) {
-                // The branch pointer moved - a real branch switch.
-                this.sendActivity({
-                  kind: "git-branch-switch",
-                  detail: `Branch switched to ${next.name} in ${path.basename(root) || "repo"}`,
-                  timestamp: Date.now(),
-                  file: root,
-                });
-              } else if (prev && next.hash && prev.hash !== next.hash) {
-                // Same branch, new commit.
-                this.sendActivity({
-                  kind: "git-commit",
-                  detail: `New commit ${next.hash.slice(0, 7)} in ${path.basename(root) || "repo"}`,
-                  timestamp: Date.now(),
-                  file: root,
-                });
-              }
-              // Otherwise: a plain working-tree/index change - nothing to report.
-            })
-          );
+      Promise.resolve(gitExt.activate()).then((exports: any) => {
+        // activate() resolves to the extension's exports, { enabled, getAPI };
+        // the repository list lives on the versioned API object.
+        const api = exports && typeof exports.getAPI === "function" ? exports.getAPI(1) : null;
+        if (!api) return;
+        for (const repo of api.repositories || []) this.watchRepository(repo);
+        // Repositories are discovered asynchronously after activation, so the
+        // list is usually still empty here: watch the ones that open later.
+        if (typeof api.onDidOpenRepository === "function") {
+          this.gitWatchers.push(api.onDidOpenRepository((repo: any) => this.watchRepository(repo)));
         }
       }, () => { /* git not available */ });
     } catch {
       // Git extension not available - silently ignore
     }
+  }
+
+  private watchRepository(repo: any): void {
+    if (!repo?.state || typeof repo.state.onDidChange !== "function") return;
+    const root = repo.rootUri?.fsPath || "";
+    // Remember the current HEAD so state changes can be classified.
+    // repo.state fires on ANY change (file status, index, HEAD...), so
+    // comparing the HEAD reference lets us report real branch switches
+    // and new commits instead of "HEAD changed" for every refresh.
+    const snapshot = this.snapshotGitHead(repo);
+    if (snapshot) this.gitHeadState.set(root, snapshot);
+    this.gitWatchers.push(
+      repo.state.onDidChange(() => {
+        const next = this.snapshotGitHead(repo);
+        if (!next) return;
+        const prev = this.gitHeadState.get(root);
+        this.gitHeadState.set(root, next);
+        if (prev && next.name && prev.name !== next.name) {
+          // The branch pointer moved - a real branch switch.
+          this.sendActivity({
+            kind: "git-branch-switch",
+            detail: `Branch switched to ${next.name} in ${path.basename(root) || "repo"}`,
+            timestamp: Date.now(),
+            file: root,
+          });
+        } else if (prev && next.hash && prev.hash !== next.hash) {
+          // Same branch, new commit.
+          this.sendActivity({
+            kind: "git-commit",
+            detail: `New commit ${next.hash.slice(0, 7)} in ${path.basename(root) || "repo"}`,
+            timestamp: Date.now(),
+            file: root,
+          });
+        }
+        // Otherwise: a plain working-tree/index change - nothing to report.
+      })
+    );
   }
 
   /**

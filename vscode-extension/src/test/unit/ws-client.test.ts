@@ -245,6 +245,9 @@ describe("ws-client", () => {
 
     client = new WsClient(makeContext() as any);
     await waitForConnected(client);
+    // "connected" fires on auth:ok; the chat:status frame behind it may still
+    // be in flight, so give it a moment instead of reading the snapshot at once.
+    await waitFor(() => Boolean((client as any).providerAvailability));
 
     const availability = (client as any).providerAvailability;
     assert.ok(availability, "providerAvailability should be recorded from chat:status");
@@ -338,6 +341,55 @@ describe("ws-client", () => {
     assert.ok(
       !second.received.some((m) => m.type === "chat:get-history"),
       "an expired request must not be replayed after reconnect"
+    );
+  });
+
+  it("does not replay a request that was rejected when the connection closed", async () => {
+    // Reserve a port, then release it: the first connect attempt is refused,
+    // which closes the socket and rejects every pending request.
+    const probe = await startServer();
+    const port = serverPort(probe);
+    await closeServer(probe);
+    const root = makeDataRoot();
+    writePortFile(root, port);
+    client = new WsClient(makeContext() as any, { requestTimeoutMs: 10_000 } as any);
+    const p = client.request("chat:send", { text: "hi" }); // buffered: no socket yet
+    await assert.rejects(p, /Connection closed/);
+    assert.strictEqual((client as any).bufferedMessages.length, 0,
+      "a request the caller was told failed must leave the send buffer");
+
+    wss = await listenOn(port);
+    const second = wireAuth(wss);
+    await waitForMsg(second.received, (m) => m.type === "auth", 6000);
+    await waitForConnected(client);
+    await wait(150); // give the open-handler flush a moment
+    assert.ok(
+      !second.received.some((m) => m.type === "chat:send"),
+      "a rejected request must not be replayed after reconnect"
+    );
+  });
+
+  it("flushes buffered messages once, not again on every reconnect", async () => {
+    wss = await startServer();
+    const port = serverPort(wss);
+    const first = wireAuth(wss);
+    const root = makeDataRoot();
+    writePortFile(root, port);
+    client = new WsClient(makeContext() as any);
+    client.notify("vscode:focus", { focused: true }); // buffered: socket not open yet
+    await waitForMsg(first.received, (m) => m.type === "vscode:focus");
+    await waitForConnected(client);
+
+    await closeServer(wss);
+    wss = null;
+    await waitFor(() => !client!.isConnected());
+    wss = await listenOn(port);
+    const second = wireAuth(wss);
+    await waitForMsg(second.received, (m) => m.type === "auth", 6000);
+    await wait(150);
+    assert.ok(
+      !second.received.some((m) => m.type === "vscode:focus"),
+      "an already delivered message must not be sent again after reconnect"
     );
   });
 

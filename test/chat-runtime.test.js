@@ -73,9 +73,11 @@ test("resumed Codex invocations put parent options before resume", () => {
   assert.ok(invocation.args.indexOf("-s") < resumeIndex);
   assert.ok(invocation.args.indexOf("--model") < resumeIndex);
   assert.ok(invocation.args.indexOf("-c") < resumeIndex);
+  // Bare TOML-ish value: codex falls back to the raw string, and no `"` means
+  // nothing for a Windows .cmd shim (cmd.exe) to mangle.
   assert.equal(
     invocation.args[invocation.args.indexOf("-c") + 1],
-    'model_reasoning_effort="ultra"'
+    "model_reasoning_effort=ultra"
   );
   assert.ok(invocation.args.indexOf("-i") > resumeIndex);
   assert.equal(invocation.args.includes("--add-dir"), false);
@@ -188,4 +190,14 @@ test("backoff retry keeps a single timer and reset restores the budget", () => {
   retry.reset();
   assert.equal(timers.pending.length, 0, "reset cancels the pending timer");
   assert.equal(retry.pending, false);
+});
+
+test("a silent turn only looks at the screen with 老婆模式 consent", () => {
+  const { silentTurnWantsScreenshot } = require("../src/main/chat-runtime");
+  assert.equal(silentTurnWantsScreenshot("proactive", { waifuMode: true }), true);
+  // A VS Code diagnostic/activity check without 老婆模式 sends text context only.
+  assert.equal(silentTurnWantsScreenshot("proactive", { waifuMode: false }), false);
+  assert.equal(silentTurnWantsScreenshot("proactive", { waifuMode: undefined }), false);
+  assert.equal(silentTurnWantsScreenshot("maintenance", { waifuMode: true }), false);
+  assert.equal(silentTurnWantsScreenshot(null, { waifuMode: true }), false);
 });

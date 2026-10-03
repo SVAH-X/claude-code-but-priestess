@@ -6,24 +6,34 @@ const { WebSocketServer } = require("ws");
 const chat = require("./chat");
 const vscodeChat = require("./vscode-chat");
 const settings = require("./settings");
-const { isAllowedWsOrigin, normalizeTerminalEvent } = require("./ws-policy");
+const {
+  isAllowedWsOrigin,
+  normalizeTerminalEvent,
+  filterBridgeSettingsPatch,
+  describeBadMessage,
+} = require("./ws-policy");
 
 let wss = null;
 let port = null;
 let token = null;
-let vscodeActive = false;
-let vscodeFocused = false;
 let currentCatMode = { cat: false, mood: "normal" };
-const authenticated = new Set();
+// Authenticated sockets -> per-window state. Each VS Code window runs its own
+// copy of the extension, so "is VS Code active", "is it focused" and "which
+// workspace is the cwd" are derived across windows: any-active, any-focused,
+// and the workspace of the focused window; with none focused, of the window
+// that was focused (or, failing that, connected) most recently. `rank` is
+// that recency, from a shared counter.
+const clients = new Map();
+let rankSeq = 0;
 let vscodeChatUnsub = null;
 let settingsUnsub = null;
 let onVscodeConnected = null;
 let onVscodeDisconnected = null;
 let vscodeDisconnectTimer = null;
+let restartTimer = null;
 let appVersion = null;
 
 // Vibe coding state
-let vscodeWorkspace = null;
 let latestDiagnostics = null;
 let latestContext = null;
 const recentActivities = []; // ring buffer, max 30
@@ -50,9 +60,57 @@ function writePortFile() {
   }
 }
 
+// The extension re-reads ws-port.json on every reconnect, so a stale file
+// would keep it dialling a dead port with a dead token.
+function removePortFile() {
+  try { fs.unlinkSync(portFilePath()); } catch (_) { /* already gone */ }
+}
+
+function anyActive() {
+  for (const c of clients.values()) if (c.active) return true;
+  return false;
+}
+
+function anyFocused() {
+  for (const c of clients.values()) if (c.focused) return true;
+  return false;
+}
+
+// A window that currently has focus wins outright: a second window merely
+// connecting (newer rank, not focused) must not steal the cwd from the one the
+// Doctor is typing in. Rank only breaks ties within the same focus state.
+function currentWorkspace() {
+  let best = null;
+  for (const c of clients.values()) {
+    if (!c.workspace) continue;
+    if (!best || (c.focused && !best.focused) || (c.focused === best.focused && c.rank > best.rank)) best = c;
+  }
+  return best ? best.workspace : null;
+}
+
+// Fires the connected/disconnected callbacks on aggregate transitions only:
+// a second window coming or going must not flip the desktop pet.
+function noteActiveChange(wasActive) {
+  const active = anyActive();
+  if (!wasActive && active) {
+    clearTimeout(vscodeDisconnectTimer);
+    vscodeDisconnectTimer = null;
+    if (onVscodeConnected) onVscodeConnected();
+  } else if (wasActive && !active && onVscodeDisconnected) {
+    onVscodeDisconnected();
+  }
+}
+
+function tokenMatches(candidate) {
+  if (typeof candidate !== "string" || typeof token !== "string") return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(token);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function broadcast(msg, exclude) {
   const data = JSON.stringify(msg);
-  for (const ws of authenticated) {
+  for (const ws of clients.keys()) {
     if (ws === exclude) continue;
     if (ws.readyState === 1) {
       try { ws.send(data); } catch (_) { /* socket closed between check and send */ }
@@ -86,12 +144,20 @@ function handleInbound(ws, raw) {
     return;
   }
 
+  const isAuthenticated = clients.has(ws);
+  const problem = describeBadMessage(msg, isAuthenticated);
+  if (problem) {
+    if (isAuthenticated) console.warn("ws-server: dropping client, " + problem);
+    ws.close(isAuthenticated ? 4000 : 4001, problem);
+    return;
+  }
+
   const type = msg.type;
 
   // Auth must come first
-  if (!authenticated.has(ws)) {
-    if (type === "auth" && msg.token === token) {
-      authenticated.add(ws);
+  if (!isAuthenticated) {
+    if (tokenMatches(msg.token)) {
+      clients.set(ws, { workspace: null, active: false, focused: false, rank: ++rankSeq });
       sendTo(ws, { type: "auth:ok", version: appVersion });
 
       // Send VS Code's own conversation state (not Electron's). It is loaded
@@ -117,7 +183,8 @@ function handleInbound(ws, raw) {
     return;
   }
 
-  const reqId = msg.reqId;
+  const reqId = msg.reqId == null ? null : msg.reqId;
+  const client = clients.get(ws);
 
   switch (type) {
     // Inline completion — lightweight, no history side effects. filePath is
@@ -153,7 +220,7 @@ function handleInbound(ws, raw) {
 
     // Vibe coding: workspace paths
     case "vscode:workspace":
-      vscodeWorkspace = (msg.workspaceFolders && msg.workspaceFolders[0]) || msg.primaryWorkspace || null;
+      client.workspace = (msg.workspaceFolders && msg.workspaceFolders[0]) || msg.primaryWorkspace || null;
       break;
 
     // Vibe coding: editor context snapshot
@@ -189,6 +256,22 @@ function handleInbound(ws, raw) {
     case "chat:get-history":
       if (reqId) sendTo(ws, { type: "chat:get-history:result", reqId, history: vscodeChat.getHistory() });
       break;
+    // Read-only snapshot of the shared VS Code conversation. A window uses it
+    // to decide whether offering "restore / start fresh" is safe: never while
+    // a turn is running or another window shares the same live conversation.
+    // `clients` counts every authenticated socket, the asking one included.
+    case "chat:state":
+      if (reqId) {
+        sendTo(ws, {
+          type: "chat:state:result",
+          reqId,
+          busy: vscodeChat.isBusy(),
+          clients: clients.size,
+          hasPrevious: vscodeChat.hasPreviousConversation(),
+          historyLength: vscodeChat.getHistory().length,
+        });
+      }
+      break;
 
     // Conversation lifecycle
     case "conversation:new":
@@ -206,28 +289,41 @@ function handleInbound(ws, raw) {
     case "settings:get":
       if (reqId) sendTo(ws, { type: "settings:get:result", reqId, state: safeSettingsState() });
       break;
-    case "settings:set":
-      settings.set(msg.patch || {});
-      if (reqId) sendTo(ws, { type: "settings:set:result", reqId, state: safeSettingsState() });
+    case "settings:set": {
+      const { accepted, rejected } = filterBridgeSettingsPatch(msg.patch);
+      if (Object.keys(accepted).length > 0) settings.set(accepted);
+      if (rejected.length > 0) {
+        console.warn("ws-server: settings:set from the bridge rejected keys: " + rejected.join(", "));
+      }
+      if (reqId) {
+        const reply = { type: "settings:set:result", reqId, ok: rejected.length === 0, state: safeSettingsState() };
+        if (rejected.length > 0) {
+          reply.rejected = rejected;
+          reply.error = "这些设置不能从 VS Code 修改：" + rejected.join("、");
+        }
+        sendTo(ws, reply);
+      }
       break;
+    }
 
-    // Window lifecycle
+    // Window lifecycle (per window; callbacks fire on the aggregate)
     case "vscode:active": {
-      const wasActive = vscodeActive;
-      vscodeActive = true;
+      const wasActive = anyActive();
+      client.active = true;
       clearTimeout(vscodeDisconnectTimer);
       vscodeDisconnectTimer = null;
-      if (!wasActive && onVscodeConnected) onVscodeConnected();
+      noteActiveChange(wasActive);
       break;
     }
     case "vscode:inactive": {
-      const wasActive = vscodeActive;
-      vscodeActive = false;
-      if (wasActive && onVscodeDisconnected) onVscodeDisconnected();
+      const wasActive = anyActive();
+      client.active = false;
+      noteActiveChange(wasActive);
       break;
     }
     case "vscode:focus":
-      vscodeFocused = Boolean(msg.focused);
+      client.focused = Boolean(msg.focused);
+      if (client.focused) client.rank = ++rankSeq;
       break;
 
     case "desktop-pet:cat-mode-get":
@@ -252,47 +348,7 @@ function start(callbacks) {
   }
 
   appVersion = require("electron").app.getVersion();
-  token = generateToken();
-
-  function createWss() {
-    return new WebSocketServer({
-      host: "127.0.0.1",
-      port: 0,
-      maxPayload: 4 * 1024 * 1024,
-      verifyClient: (info) => isAllowedWsOrigin(info.origin)
-    });
-  }
-
-  wss = createWss();
-
-  wss.on("listening", () => {
-    port = wss.address().port;
-    writePortFile();
-    console.log("ws-server: listening on 127.0.0.1:" + port);
-  });
-
-  function handleWssError(err) {
-    console.warn("ws-server: error", err);
-    setTimeout(() => {
-      if (wss) {
-        try { wss.close(); } catch (_) { /* ignore */ }
-      }
-      authenticated.clear();
-      token = generateToken();
-      wss = createWss();
-      wss.on("listening", () => {
-        port = wss.address().port;
-        writePortFile();
-        console.log("ws-server: restarted on 127.0.0.1:" + port);
-      });
-      wss.on("connection", handleConnection);
-      wss.on("error", handleWssError); // recursively retry
-    }, 1000);
-  }
-
-  wss.on("error", handleWssError);
-
-  wss.on("connection", handleConnection);
+  listen("listening");
 
   // Bridge VS Code chat events to WS (NOT Electron chat events)
   vscodeChatUnsub = vscodeChat.subscribe((event) => {
@@ -339,15 +395,80 @@ function start(callbacks) {
   vscodeChat.init();
 }
 
+// Binds a fresh server with a fresh token. `verb` is only for the log line.
+function listen(verb) {
+  token = generateToken();
+  const server = new WebSocketServer({
+    host: "127.0.0.1",
+    port: 0,
+    maxPayload: 4 * 1024 * 1024,
+    verifyClient: (info) => isAllowedWsOrigin(info.origin)
+  });
+  wss = server;
+
+  server.on("listening", () => {
+    if (server !== wss) return;
+    port = server.address().port;
+    writePortFile();
+    console.log("ws-server: " + verb + " on 127.0.0.1:" + port);
+  });
+
+  server.on("error", (err) => {
+    if (server !== wss) return; // a superseded server's late error
+    console.warn("ws-server: error", err);
+    clearTimeout(restartTimer);
+    restartTimer = setTimeout(restart, 1000);
+  });
+
+  server.on("connection", handleConnection);
+}
+
+// Closes every socket of the current server with a code the client treats as
+// a normal reconnect, and drops the port file so the client reads the new
+// one (new port, new token) instead of dialling the old pair.
+function teardown(code, reason) {
+  clearTimeout(restartTimer);
+  restartTimer = null;
+  if (!wss) return;
+  for (const ws of wss.clients) {
+    try { ws.close(code, reason); } catch (_) { /* ignore */ }
+  }
+  removePortFile();
+  try { wss.close(); } catch (_) { /* ignore */ }
+  wss = null;
+  port = null;
+}
+
+// Replaces the listening server (after a wss 'error', or on demand). The old
+// clients get 1012 "service restart" so the extension reconnects and re-reads
+// ws-port.json; the per-window state follows their close events as usual.
+function restart() {
+  if (!wss) return; // stopped meanwhile
+  teardown(1012, "service restart");
+  listen("restarted");
+}
+
 function handleConnection(ws) {
+  // Without a listener the ws library's own errors (e.g. "Max payload size
+  // exceeded" for a > maxPayload frame, which it answers with 1009) are
+  // rethrown and would take the main process down.
+  ws.on("error", (err) => {
+    console.warn("ws-server: client socket error: " + (err && err.message));
+  });
+
   ws.on("message", (data) => {
-    handleInbound(ws, data.toString());
+    try {
+      handleInbound(ws, data.toString());
+    } catch (err) {
+      console.warn("ws-server: message handler threw", err);
+      try { ws.close(4002, "internal error"); } catch (_) { /* ignore */ }
+    }
   });
 
   ws.on("close", () => {
-    authenticated.delete(ws);
-    if (authenticated.size === 0 && vscodeActive) {
-      vscodeActive = false;
+    const wasActive = anyActive();
+    clients.delete(ws);
+    if (wasActive && !anyActive()) {
       // Debounce: a rapid reconnect (within 200ms) cancels the disconnect callback.
       clearTimeout(vscodeDisconnectTimer);
       vscodeDisconnectTimer = setTimeout(() => {
@@ -361,15 +482,10 @@ function handleConnection(ws) {
 function stop() {
   if (vscodeChatUnsub) { vscodeChatUnsub(); vscodeChatUnsub = null; }
   if (settingsUnsub) { settingsUnsub(); settingsUnsub = null; }
-  if (wss) {
-    for (const ws of authenticated) {
-      try { ws.close(1000, "server stopping"); } catch (_) { /* ignore */ }
-    }
-    authenticated.clear();
-    vscodeActive = false;
-    try { wss.close(); } catch (_) { /* ignore */ }
-    wss = null;
-  }
+  teardown(1000, "server stopping");
+  clients.clear();
+  clearTimeout(vscodeDisconnectTimer);
+  vscodeDisconnectTimer = null;
   port = null;
   token = null;
 }
@@ -386,8 +502,8 @@ function safeSettingsState() {
 }
 
 function getPort() { return port; }
-function isVscodeActive() { return vscodeActive; }
-function isVscodeFocused() { return vscodeFocused; }
+function isVscodeActive() { return anyActive(); }
+function isVscodeFocused() { return anyFocused(); }
 
 function setCatMode(mode) {
   currentCatMode = mode || { cat: false, mood: "normal" };
@@ -395,8 +511,8 @@ function setCatMode(mode) {
 }
 
 module.exports = {
-  start, stop, getPort, isVscodeActive, isVscodeFocused, setCatMode, broadcast,
-  getVscodeWorkspace: () => vscodeWorkspace,
+  start, stop, restart, getPort, isVscodeActive, isVscodeFocused, setCatMode, broadcast,
+  getVscodeWorkspace: currentWorkspace,
   getLatestDiagnostics: () => latestDiagnostics,
   getLatestContext: () => latestContext,
   getRecentActivities: () => recentActivities.slice(),

@@ -130,3 +130,33 @@ test("an unknown model offers every level the catalog advertises", () => {
     ["low", "medium", "high", "max", "ultra"]
   );
 });
+
+test("readCodexModelCatalogFile reads Codex's own cache for the matching CLI version", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const { readCodexModelCatalogFile } = require("../src/main/codex-model-catalog");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "prts-codex-home-"));
+  const previousHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  try {
+    assert.equal(readCodexModelCatalogFile("0.50.0"), null, "no file yet");
+    fs.writeFileSync(path.join(home, "models_cache.json"), JSON.stringify({
+      client_version: "0.50.0",
+      models: [
+        { slug: "gpt-5-codex", display_name: "GPT-5 Codex", visibility: "list", supported_reasoning_levels: ["low", "high"] },
+        { slug: "hidden", visibility: "hide" }
+      ]
+    }));
+    const catalog = readCodexModelCatalogFile("0.50.0");
+    assert.deepEqual(catalog.map((model) => model.slug), ["gpt-5-codex"]);
+    assert.deepEqual(readCodexModelCatalogFile("").map((model) => model.slug), ["gpt-5-codex"]);
+    assert.equal(readCodexModelCatalogFile("0.51.0"), null, "another CLI's cache is not trusted");
+    fs.writeFileSync(path.join(home, "models_cache.json"), "{not json");
+    assert.equal(readCodexModelCatalogFile("0.50.0"), null);
+  } finally {
+    if (previousHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -88,7 +88,7 @@ const SERVICE_KEYWORDS = [
   ["bilibili", /bilibili|哔哩|b\s*站|bili/i],
   ["youtube", /youtube|油管|yt\b/i],
   ["spotify", /spotify/i],
-  ["netease", /netease|网易|云音乐|163/i],
+  ["netease", /netease|网易云音乐|网易云|网易|云音乐|163/i],
   ["apple", /apple\s*music|itunes|苹果音乐/i],
   ["monstersiren", /monster\s*siren|塞壬/i]
 ];
@@ -109,13 +109,26 @@ function detectService(arg) {
   return null;
 }
 
+// Request phrases are only removed as anchored prefixes ("请帮我放一首…",
+// "来首…", "在 … 放 …") and suffixes ("…这首歌", "…吧"), never from the middle,
+// so titles that contain those characters (夜曲, 后来, 我的歌声里) survive.
+// A lone verb (放/听/点/来/在) only counts as a prefix when a space follows it,
+// which keeps titles such as 听妈妈的话 or 在水一方 intact.
+const LEADING_REQUEST_RE = new RegExp(
+  "^(?:(?:请|麻烦|帮我|给我|替我|我想听|我要听|我想|我要|想听|要听|播放|" +
+    "来一首|来首|放一首|放首|听一首|听首|点一首|点首|一首|这首|那首|一下|" +
+    "上(?=[放听点来播])|[在放听点来](?=\\s|$))\\s*)+"
+);
+const TRAILING_FILLER_RE =
+  /(?:\s*(?:这首歌|那首歌|这首|那首|的歌|歌曲|给我听|谢谢|吧|呀|啊|呢|吗|[。，、！？!?,.~～]))+$/;
+
 function stripServiceWords(arg) {
-  let s = arg;
+  let s = String(arg || "");
   for (const [, re] of SERVICE_KEYWORDS) {
     s = s.replace(new RegExp(re.source, "gi"), " ");
   }
-  // Drop common filler so "在b站放 Eclipse" → "Eclipse".
-  s = s.replace(/[在听放点歌曲首的上来给我]/g, " ");
+  s = s.replace(/\s+/g, " ").trim();
+  s = s.replace(LEADING_REQUEST_RE, "").replace(TRAILING_FILLER_RE, "");
   return s.replace(/\s+/g, " ").trim();
 }
 
@@ -474,7 +487,8 @@ async function runSkill(name, arg) {
           process.platform === "win32" &&
           settings.get("windowsNeteaseClientControl") === true &&
           (!requestedService || requestedService === "netease");
-        if (useNeteaseClient) return playWithNeteaseClient(value);
+        // Awaited so a helper failure lands in the catch below as {ok:false}.
+        if (useNeteaseClient) return await playWithNeteaseClient(value);
 
         const { url, label, autoplay } = resolveMusic(value);
         await openExternal(url);
@@ -515,4 +529,4 @@ async function runSkill(name, arg) {
   }
 }
 
-module.exports = { runSkill, SKILL_NAMES };
+module.exports = { runSkill, SKILL_NAMES, stripServiceWords };

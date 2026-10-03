@@ -25,7 +25,13 @@ export function generateApiShim(options: {
   let reqCounter = 0;
   const pending = new Map();
 
+  // Only the extension host may drive this shim. VS Code delivers host
+  // messages through the webview's parent frame (window.parent); anything
+  // else - above all the sandboxed HTML preview iframe, whose content is
+  // model output - could otherwise forge chat events or answer a pending
+  // request by posting to its parent.
   window.addEventListener("message", function (e) {
+    if (e.source !== window.parent && e.source !== window) return;
     const msg = e.data;
     if (!msg || typeof msg !== "object") return;
     // The stylesheet is shared with the Electron popover, where PRTS drives
@@ -191,8 +197,29 @@ ${isChat
   // ============ previewApi ============
 ${isChat
   ? `
+  // The renderer auto-opens its HTML preview for every fresh HTML reply. In
+  // the sidebar that panel takes half of the chat stream, so opening is
+  // opt-in here: only an open the Doctor started by clicking the renderer's
+  // preview button on the message is honoured. An automatic open is undone
+  // at once through the panel's own close button, which also marks that
+  // reply as dismissed so re-renders leave it closed until he asks.
+  let previewClickPending = false;
+  document.addEventListener("click", function (e) {
+    const target = e.target;
+    if (!target || typeof target.closest !== "function" || !target.closest(".msg-preview-btn")) return;
+    previewClickPending = true;
+    // The renderer opens the panel synchronously from this same click, so
+    // the flag only has to outlive the current dispatch.
+    setTimeout(function () { previewClickPending = false; }, 0);
+  }, true);
+
   window.previewApi = {
     open: function (payload) {
+      if (!previewClickPending) {
+        const closeBtn = document.getElementById("closePreviewBtn");
+        if (closeBtn) closeBtn.click();
+        return Promise.resolve();
+      }
       vscode.postMessage({ type: "preview:open", width: payload && payload.width });
       return Promise.resolve();
     },

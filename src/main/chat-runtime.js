@@ -48,13 +48,26 @@ function buildCodexExecArgs({
 
   if (model) args.push("--model", model);
   if (reasoningEffort) {
-    args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`);
+    // Bare value on purpose: `-c key=value` parses the value as TOML and falls
+    // back to the raw string when that fails (`codex exec --help`), so `high`
+    // is read as the string "high". The quoted form `"high"` reached cmd.exe
+    // on Windows .cmd shims, where the embedded quotes flipped its quote state
+    // and the CLI received a mangled override.
+    args.push("-c", `model_reasoning_effort=${reasoningEffort}`);
   }
   if (isAgent) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   } else {
-    // Persona and memory are already injected by PRTS. Do not add the memory
-    // directory as a writable root for normal read-only conversations.
+    // What the sandbox can and cannot enforce per mode:
+    //   - advisor and companion both get `-s read-only`: no writes, no
+    //     network, but the shell tool stays (ls/cat/grep still run). Codex
+    //     has no tool-less mode and no documented switch that removes its
+    //     shell, so companion on Codex is advisor-level; the companion
+    //     persona prompt says so instead of claiming she has no tools
+    //     (Claude turns are truly tool-less, see claudeModeToolArgs).
+    //   - maintenance gets `workspace-write` with the memory dir as cwd, so
+    //     writes stay inside it. Persona and memory are already injected by
+    //     PRTS: the memory directory is never a writable root for the rest.
     args.push("-s", isMaintenance ? "workspace-write" : "read-only");
   }
 
@@ -93,6 +106,13 @@ function silentTurnVibeMode(silentTurnKind, globalMode, { editorContext = false 
   }
   if (silentTurnKind === "maintenance") return "maintenance";
   return null;
+}
+
+// A silent turn may only look at the screen with 老婆模式 consent: a plain
+// 老婆模式 look-in always has it, while a VS Code diagnostic/activity check
+// without it runs on the editor text context alone (no full-screen capture).
+function silentTurnWantsScreenshot(silentTurnKind, { waifuMode = false } = {}) {
+  return silentTurnKind === "proactive" && waifuMode === true;
 }
 
 // The resume id of a Codex session, read from a session/thread lifecycle
@@ -175,5 +195,6 @@ module.exports = {
   createBackoffRetry,
   normalizeCwd,
   resolveResumeSessionId,
-  silentTurnVibeMode
+  silentTurnVibeMode,
+  silentTurnWantsScreenshot
 };

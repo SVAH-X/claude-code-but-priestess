@@ -24,16 +24,24 @@ const updater = require("./updater");
 const priestessProvider = require("./priestess-provider");
 const { spawnCli } = require("./cli-spawn");
 const {
-  codexVersionsMatch,
   compatibleReasoningEffort,
   findCatalogModel,
   normalizeCodexVersion,
   parseCodexModelCatalog,
   readCodexConfigValue,
+  readCodexModelCatalogFile,
   reasoningEffortsForModel,
   resolveCodexModel
 } = require("./codex-model-catalog");
 const wsServer = require("./ws-server");
+const {
+  autoScreenshotMenuVisible,
+  shouldNotify,
+  isAttachmentPathAllowed,
+  shouldRequestSingleInstanceLock,
+  shouldCollapsePopoverOnVscodeDisconnect,
+  wrapHtmlForBrowser
+} = require("./app-shell-policy");
 
 let conversationFile = null;
 let saveTimer = null;
@@ -84,6 +92,10 @@ let desktopPetTimer = null;
 // — it only starts once she goes idle. See scheduleDesktopPet + the chat status
 // handler.
 let chatTurnRunning = false;
+// True when the popover was last shown while VS Code held her attention. Such
+// a popover never got the idle countdown, so a VS Code disconnect collapses it
+// into the pet — but only when idle (see onVscodeDisconnected).
+let popoverOpenedDuringVscode = false;
 let desktopPetPositionSaveTimer = null;
 // Transient scale during active scroll-resizing. While set, it overrides the
 // persisted setting so resizing never has to round-trip through a synchronous
@@ -909,6 +921,7 @@ function showPopover() {
   popover.show();
   popover.focus();
   popover.webContents.send("popover:opened");
+  popoverOpenedDuringVscode = wsServer.isVscodeActive();
   // Don't schedule the pet timer while VS Code has her attention — the Doctor
   // will return to VS Code, and an idle-timer pet pop-in would be a distraction.
   if (!wsServer.isVscodeActive()) scheduleDesktopPet();
@@ -1349,23 +1362,6 @@ function codexPresetsFromCatalog(catalog) {
   }));
 }
 
-function readCodexModelCatalogFromFile(expectedVersion) {
-  try {
-    const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-    const file = path.join(codexHome, "models_cache.json");
-    if (!fs.existsSync(file)) return null;
-    const raw = fs.readFileSync(file, "utf8");
-    const parsed = JSON.parse(raw);
-    const cachedVersion = normalizeCodexVersion(parsed.client_version);
-    if (expectedVersion && cachedVersion && !codexVersionsMatch(cachedVersion, expectedVersion)) {
-      return null;
-    }
-    return parseCodexModelCatalog(raw);
-  } catch {
-    return null;
-  }
-}
-
 function setCodexModelPresetCache(command, version, catalog) {
   const presets = codexPresetsFromCatalog(catalog);
   if (!presets) return null;
@@ -1444,7 +1440,7 @@ function codexModelPresetsForMenu() {
   const filePresets = setCodexModelPresetCache(
     command,
     version,
-    readCodexModelCatalogFromFile(version)
+    readCodexModelCatalogFile(version)
   );
   refreshCodexModelPresetsInBackground(command, version);
   return filePresets || MODEL_PRESETS.codex;
@@ -1748,7 +1744,7 @@ function buildContextMenu() {
     {
       label: mt("autoScreenshot"),
       type: "checkbox",
-      visible: Boolean(all.agentMode),
+      visible: autoScreenshotMenuVisible(all),
       checked: all.autoScreenshot !== false,
       click: (item) => settings.set({ autoScreenshot: item.checked })
     },
@@ -1829,11 +1825,20 @@ function buildContextMenu() {
 // Quit and relaunch. The main use is macOS Screen Recording: that permission
 // only takes effect after a restart, so once the Doctor grants it this makes
 // "grant → restart" a single click instead of a manual quit + reopen.
+// Invariant for every exit path (before-quit, restartApp, boundary quit, the
+// updater's relaunch via app.quit()): no mid-turn CLI subprocess may outlive
+// the app — the tray chat's and VS Code's alike — or it keeps running (and
+// billing) with no UI attached. Synchronous so the Windows taskkill finishes
+// before app.exit().
+function cancelRunningChats() {
+  try { chat.cancel({ sync: true }); } catch (_) { /* ignore */ }
+  try { require("./vscode-chat").cancel({ sync: true }); } catch (_) { /* ignore */ }
+}
+
 function restartApp() {
   // app.exit() skips before-quit — kill mid-turn CLI subprocesses explicitly
   // so they don't keep running (and billing) past the restart.
-  chat.cancel();
-  try { require("./vscode-chat").cancel(); } catch (_) { /* ignore */ }
+  cancelRunningChats();
   app.relaunch();
   app.exit(0);
 }
@@ -1947,12 +1952,18 @@ function wipePersistedConversation() {
   }
 }
 
+function popoverFocused() {
+  return Boolean(popover && !popover.isDestroyed() && popover.isVisible() && popover.isFocused());
+}
+
 // She spoke up on her own (proactive care) — surface it with a notification
-// carrying her words, unless the Doctor is already looking at the chat.
+// carrying her words, unless the Doctor is already looking at the chat. A
+// plain 老婆模式 remark reaches him even while VS Code is connected; a remark
+// prompted by VS Code editor context stays quiet there (shouldNotify).
 // Clicking the notification opens the popover.
-function notifyProactiveMessage(text) {
-  if (wsServer.isVscodeActive()) return;
-  if (popover && popover.isVisible() && popover.isFocused()) return;
+function notifyProactiveMessage(text, { editorContext = false } = {}) {
+  const kind = editorContext ? "editor" : "waifu";
+  if (!shouldNotify(kind, { vscodeActive: wsServer.isVscodeActive(), popoverFocused: popoverFocused() })) return;
   if (!Notification.isSupported()) return;
   try {
     const notification = new Notification({
@@ -1983,10 +1994,9 @@ function notifyProactiveMessage(text) {
 function maybeNotifyDoneNotification(event) {
   if (event.status !== "idle") return;
   if (event.error || event.cancelled || event.silent) return;
-  if (wsServer.isVscodeActive()) return;
   const duration = chat.getLastTurnDurationMs();
   if (duration < 20000) return;
-  if (popover && popover.isVisible() && popover.isFocused()) return;
+  if (!shouldNotify("done", { vscodeActive: wsServer.isVscodeActive(), popoverFocused: popoverFocused() })) return;
   if (!Notification.isSupported()) return;
   try {
     new Notification({
@@ -2002,9 +2012,16 @@ function maybeNotifyDoneNotification(event) {
 // ============================================================
 //  Single-instance lock — prevent multiple copies from running.
 //  On a second launch the existing instance is brought forward and
-//  the new process shows an alert then exits.
+//  the new process shows an alert then exits. A dev run (`npm run dev` →
+//  process.defaultApp, or PRTS_DEV=1) skips the lock so it can run next to
+//  the installed PRTS.
 // ============================================================
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+const gotSingleInstanceLock = shouldRequestSingleInstanceLock({
+  defaultApp: Boolean(process.defaultApp),
+  env: process.env
+})
+  ? app.requestSingleInstanceLock()
+  : true;
 
 if (!gotSingleInstanceLock) {
   app.whenReady().then(async () => {
@@ -2105,12 +2122,24 @@ if (!gotSingleInstanceLock) {
       }
     },
     onVscodeDisconnected() {
-      // Bring the desktop pet back immediately, no idle delay.
-      if (settings.get("desktopPet")) {
-        clearTimeout(desktopPetTimer);
-        desktopPetTimer = null;
-        showDesktopPet();
+      if (!settings.get("desktopPet")) return;
+      clearTimeout(desktopPetTimer);
+      desktopPetTimer = null;
+      if (popover && !popover.isDestroyed() && popover.isVisible()) {
+        // An open chat only collapses into the pet when it was opened during
+        // the VS Code session and is idle — never mid-reply or while the
+        // Doctor is typing; otherwise the normal idle countdown takes over.
+        const collapse = shouldCollapsePopoverOnVscodeDisconnect({
+          openedDuringVscode: popoverOpenedDuringVscode,
+          turnRunning: chatTurnRunning,
+          focused: popover.isFocused()
+        });
+        if (collapse) collapsePopoverToDesktopPet();
+        else scheduleDesktopPet();
+        return;
       }
+      // Bring the desktop pet back immediately, no idle delay.
+      showDesktopPet();
     }
   });
 
@@ -2155,11 +2184,17 @@ if (!gotSingleInstanceLock) {
         }
       }
     } else if (event.kind === "proactive") {
-      if (event.spoke && event.text) notifyProactiveMessage(event.text);
+      if (event.spoke && event.text) {
+        notifyProactiveMessage(event.text, { editorContext: Boolean(event.editorContext) });
+      }
     } else if (event.kind === "quit") {
       // Boundary quit must run even if the popover window is gone.
       wipePersistedConversation();
-      setTimeout(() => app.exit(0), 1500);
+      setTimeout(() => {
+        // app.exit() skips before-quit: a VS Code turn may still be running.
+        cancelRunningChats();
+        app.exit(0);
+      }, 1500);
       return;
     }
     if (!popover || popover.isDestroyed()) return;
@@ -2200,9 +2235,9 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   // Don't orphan mid-turn CLI subprocesses — they'd keep running
-  // (consuming quota / resources) with no UI attached.
-  chat.cancel();
-  try { require("./vscode-chat").cancel(); } catch (_) { /* ignore */ }
+  // (consuming quota / resources) with no UI attached. The updater's relaunch
+  // (mac swap script, Windows quitAndInstall) goes through app.quit() too.
+  cancelRunningChats();
   try { wsServer.stop(); } catch (_) { /* ignore */ }
 });
 
@@ -2259,24 +2294,30 @@ ipcMain.handle("chat:send", (_, payload) => {
   if (typeof payload === "string") return chat.send(payload);
   return chat.send(payload?.text, payload?.attachments);
 });
+// Attachment preview/open allowlist: the usual roots, plus anything the Doctor
+// attached himself in the current conversation (he picked it from anywhere).
+function attachmentPathAllowed(resolved) {
+  const attachments = [];
+  for (const entry of chat.getHistory()) {
+    if (Array.isArray(entry?.attachments)) attachments.push(...entry.attachments);
+  }
+  return isAttachmentPathAllowed(resolved, {
+    roots: [os.homedir(), settings.get("chatCwd") || os.homedir(), os.tmpdir()],
+    attachments
+  });
+}
 ipcMain.handle("chat:open-attachment", (_, p) => {
   if (typeof p !== "string" || !p) return;
-  // Validate: path must be within allowed roots (same as chat:attachment-data-uri).
   const resolved = path.resolve(p);
-  const allowedRoots = [os.homedir(), settings.get("chatCwd") || os.homedir(), os.tmpdir()];
-  const allowed = allowedRoots.some((root) => resolved.startsWith(root + path.sep) || resolved === root);
-  if (allowed) shell.openPath(resolved);
+  if (attachmentPathAllowed(resolved)) shell.openPath(resolved);
 });
 // Local image → data: URI for in-bubble thumbnails / Quick Look. Done in main
 // because the popover runs with webSecurity on, which blocks cross-dir file://.
 ipcMain.handle("chat:attachment-data-uri", (_, p) => {
   try {
     if (typeof p !== "string" || !p) return "";
-    // Validate: path must be absolute and within allowed roots.
     const resolved = path.resolve(p);
-    const allowedRoots = [os.homedir(), settings.get("chatCwd") || os.homedir(), os.tmpdir()];
-    const allowed = allowedRoots.some((root) => resolved.startsWith(root + path.sep) || resolved === root);
-    if (!allowed) return "";
+    if (!attachmentPathAllowed(resolved)) return "";
     if (fs.statSync(resolved).size > 16 * 1024 * 1024) return "";
     const ext = path.extname(resolved).toLowerCase();
     const mime =
@@ -2387,11 +2428,10 @@ ipcMain.handle("html:open-in-browser", async (_, payload) => {
   if (!html.trim()) return { ok: false, reason: "empty content" };
   const tempFile = path.join(os.tmpdir(), `prts-preview-${Date.now()}.html`);
   try {
-    // Wrap with a restrictive CSP to prevent the model-generated HTML from
-    // executing scripts, submitting forms, or navigating away in the browser.
-    const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: https:; font-src \'none\'">';
-    const sandboxed = `<!doctype html>\n<html><head>${csp}</head><body>${html}</body></html>`;
-    fs.writeFileSync(tempFile, sandboxed, "utf8");
+    // An explicit user action on her own output: no forced CSP (it broke
+    // pages with scripts or CDN assets). The in-app preview panel keeps its
+    // own hardening.
+    fs.writeFileSync(tempFile, wrapHtmlForBrowser(html), "utf8");
     const error = await shell.openPath(tempFile);
     if (error) {
       console.warn("main: shell.openPath failed:", error);

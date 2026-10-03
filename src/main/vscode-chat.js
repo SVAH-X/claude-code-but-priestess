@@ -35,6 +35,7 @@ const {
 let history = [];
 let subscribers = [];
 let currentProcess = null;
+let currentInvocation = null;
 let currentProvider = null;
 let messageIdCounter = 0;
 let midTurn = false;
@@ -75,6 +76,11 @@ function saveConversation() {
 }
 
 function loadConversation() {
+  // A restore mid-turn would swap the history array out from under the running
+  // reply (finalizeAssistant looks its entry up by id there), so the answer
+  // would be lost for good. The running turn keeps its history; the client
+  // already gets the current one back.
+  if (midTurn || currentProcess) return false;
   try {
     const raw = fs.readFileSync(conversationPath(), "utf8");
     const data = JSON.parse(raw);
@@ -122,12 +128,9 @@ function pushUser(text, context) {
   history.push(entry);
   emit({ kind: "history", history: history.slice() });
   saveConversation();
-  // Archive to shared memory so the doctor's words aren't lost.
-  try {
-    persona.ensureConversationArchiveFile();
-    const line = JSON.stringify({ role: "user", text, ts: Date.now(), provider: currentProvider });
-    fs.appendFileSync(persona.conversationArchivePath(), line + "\n", "utf8");
-  } catch (_) { /* best effort */ }
+  // Archive to shared memory so the doctor's words aren't lost (same append
+  // + size prune as the popover).
+  persona.appendConversationArchiveEntry({ role: "user", text, ts: entry.ts, provider: currentProvider });
   return entry;
 }
 
@@ -153,6 +156,9 @@ function beginAssistant() {
     text: "",
     ts: Date.now(),
   });
+  // The webview only applies chunks to a message it already has: publish the
+  // placeholder before the first chunk (mirrors chat.js emitHistory()).
+  emit({ kind: "history", history: history.slice() });
 }
 
 function appendAssistant(raw) {
@@ -174,6 +180,8 @@ function appendAssistant(raw) {
 const skillExecutedThisTurn = new Set();
 let lastEmittedMood = null;
 const rememberedThisTurn = new Set();
+// Same per-turn cap as the popover (chat.js REMEMBER_MAX_PER_TURN).
+const REMEMBER_MAX_PER_TURN = 3;
 
 // Simple mood aliases matching chat.js normalizeMood behaviour.
 function normalizeMood(raw) {
@@ -196,7 +204,7 @@ function handleVscodeDirective(directive) {
 
   if (directive.type === "remember") {
     const text = String(directive.value || "").trim();
-    if (text && !rememberedThisTurn.has(text)) {
+    if (text && rememberedThisTurn.size < REMEMBER_MAX_PER_TURN && !rememberedThisTurn.has(text)) {
       rememberedThisTurn.add(text);
       persona.appendMemoryEntry(text);
     }
@@ -239,16 +247,12 @@ function finalizeAssistant() {
 
   // Archive to shared memory
   if (clean) {
-    try {
-      persona.ensureConversationArchiveFile();
-      const line = JSON.stringify({
-        role: "assistant",
-        text: clean,
-        ts: Date.now(),
-        provider: currentProvider || "unknown",
-      });
-      fs.appendFileSync(persona.conversationArchivePath(), line + "\n", "utf8");
-    } catch (_) { /* best effort */ }
+    persona.appendConversationArchiveEntry({
+      role: "assistant",
+      text: clean,
+      ts: Date.now(),
+      provider: currentProvider || "unknown",
+    });
     // Project notes: what this workspace's conversations were about.
     try {
       const ws = wsServer.getVscodeWorkspace();
@@ -409,15 +413,9 @@ function handleCodexLine(line) {
     return;
   }
 
-  const delta =
-    event.delta !== undefined ? String(event.delta) :
-    event.text !== undefined ? String(event.text) :
-    event.item?.delta !== undefined ? String(event.item.delta) :
-    event.item?.text !== undefined ? String(event.item.text) :
-    "";
-
-  if (delta) {
-    appendAssistant(delta);
+  const visibleText = codexVisibleText(event, type, itemType);
+  if (visibleText) {
+    appendAssistant(visibleText);
   }
 
   if (event.type === "tool_use" || event.type === "tool_start") {
@@ -440,9 +438,70 @@ function handleCodexLine(line) {
   }
 }
 
+// The text of a Codex event that belongs in the visible reply: output
+// (agent_message) deltas and completed agent messages. Reasoning summaries
+// stream as their own items/deltas and are never part of the reply, so they
+// are neither shown nor archived.
+function codexVisibleText(event, type, itemType) {
+  if (itemType === "reasoning" || type.includes("reasoning")) return "";
+  const item = event.item || event.event?.item || null;
+  const role = String(item?.role || event.role || "");
+  const isAssistantItem =
+    itemType === "agent_message" ||
+    itemType === "assistant_message" ||
+    itemType === "final_answer" ||
+    (itemType === "message" && (!role || role === "assistant"));
+  if (type.includes("delta") || type.includes("chunk")) {
+    if (item && !isAssistantItem) return "";
+    const delta = event.delta !== undefined ? event.delta : item?.delta;
+    return typeof delta === "string" ? delta : "";
+  }
+  if (item) {
+    // Items arrive as started/updated/completed; only the completed one
+    // carries the final text, and taking it once keeps the reply from doubling.
+    if (!isAssistantItem || !type.endsWith("completed")) return "";
+    return typeof item.text === "string" ? item.text : "";
+  }
+  if (type.includes("message") || type.includes("answer") || type === "result" || role === "assistant") {
+    const text = event.text !== undefined ? event.text : event.message;
+    return typeof text === "string" ? text : "";
+  }
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // Context augmentation — inject editor context into user message
 // ---------------------------------------------------------------------------
+
+// The selection commands put the selected code in the message itself; the
+// context block would otherwise send it a second time, and the history entry
+// would store it twice. Drop the selection from the context in that case.
+function withoutInlinedSelection(context, text) {
+  const selected = context?.selection?.text;
+  if (typeof selected !== "string" || !selected.trim()) return context;
+  if (!String(text || "").includes(selected.trim())) return context;
+  const { selection, ...rest } = context;
+  return rest;
+}
+
+// Bounded transcript of this bridge's own history for the first turn of a
+// fresh CLI session (budget matches chat.js SHARED_TRANSCRIPT_MAX_CHARS).
+const SHARED_TRANSCRIPT_MAX_CHARS = 9000;
+
+function buildSharedTranscript(currentUserEntry) {
+  const lines = [];
+  let chars = 0;
+  for (let i = history.length - 1; i >= 0 && chars < SHARED_TRANSCRIPT_MAX_CHARS; i--) {
+    const m = history[i];
+    if (m.id === currentUserEntry?.id) continue;
+    if (m.role === "user" || m.role === "assistant") {
+      const line = `${m.role === "user" ? "博士" : "普瑞赛斯"}: ${(m.text || "").slice(0, 200)}`;
+      lines.unshift(line);
+      chars += line.length + 1;
+    }
+  }
+  return lines.join("\n");
+}
 
 // The blacklist pattern covering `filePath` (relative to the VS Code workspace),
 // or null. Guards what reaches the model without the Doctor asking for it.
@@ -518,6 +577,7 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
   // selection commands put it in the message itself) is his own choice and
   // passes untouched. Matching is relative to the VS Code workspace, the same
   // root the CLI runs in below.
+  context = withoutInlinedSelection(context, trimmed);
   const blacklistHit = context?.activeFile
     ? blacklistPatternFor(context.activeFile, require("./ws-server").getVscodeWorkspace() || settings.get("chatCwd") || "")
     : null;
@@ -537,20 +597,13 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
     });
   }
 
-  // Build a shared transcript from our own history for context continuity.
-  const SHARED_MAX = 9000; // matches chat.js SHARED_TRANSCRIPT_MAX_CHARS
-  const sharedLines = [];
-  let sharedChars = 0;
-  for (let i = history.length - 1; i >= 0 && sharedChars < SHARED_MAX; i--) {
-    const m = history[i];
-    if (m.id === currentUserEntry?.id) continue;
-    if (m.role === "user" || m.role === "assistant") {
-      const line = `${m.role === "user" ? "博士" : "普瑞赛斯"}: ${(m.text || "").slice(0, 200)}`;
-      sharedLines.unshift(line);
-      sharedChars += line.length + 1;
-    }
-  }
-  const sharedTranscript = sharedLines.join("\n");
+  // A resumed CLI session already holds everything it was told; replaying
+  // the transcript every turn only costs ~9k chars of prompt. It goes out on
+  // the first turn of a session only (a stale-session retry clears the id and
+  // sends it again), like the popover path does.
+  const resumeId = vscodeSessionIds[provider];
+  const resuming = typeof resumeId === "string" && Boolean(resumeId.trim());
+  const sharedTranscript = resuming ? "" : buildSharedTranscript(currentUserEntry);
 
   const rawMode = settings.get("vibeCodingMode") || "companion";
   // VS Code extension never gets full agent — cap at advisor.
@@ -560,21 +613,32 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
     history.push({ id: nextId(), role: "system", text: "VS Code 扩展不支持代理模式，已切换至顾问模式（只读工具）。", ts: Date.now() });
   }
 
-  beginAssistant();
-
   const wsServer = require("./ws-server");
   const vscodeWs = wsServer.getVscodeWorkspace();
   const cwd = normalizeCwd(vscodeWs || settings.get("chatCwd"));
-  const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, sharedTranscript, null, vscodeSessionIds, { vscodeTurn: true, workspacePath: vscodeWs || "" });
+  // Built before the assistant placeholder so a validator notice (model /
+  // effort fallback) lands in this history ahead of the reply. The popover's
+  // attachments, cat mode and silent-turn state are never part of a VS Code
+  // turn: this bridge hands over its own (empty) inputs explicitly.
+  const invocation = chat.buildProviderInvocation(provider, messageWithContext, cwd, vibeCodingMode, null, sharedTranscript, null, vscodeSessionIds, {
+    vscodeTurn: true,
+    workspacePath: vscodeWs || "",
+    attachments: [],
+    catMode: null,
+    silent: false,
+    onNotice: pushSystem
+  });
 
   if (!invocation) {
     const errMsg = "No CLI provider available";
     history.push({ id: nextId(), role: "system", text: errMsg, ts: Date.now() });
     emit({ kind: "status", status: "idle", error: errMsg });
+    emit({ kind: "history", history: history.slice() });
     midTurn = false;
-    discardAssistant();
     return;
   }
+
+  beginAssistant();
 
   emit({
     kind: "status",
@@ -590,6 +654,7 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
       env: { ...process.env },
     });
   } catch (error) {
+    chat.cleanupInvocation(invocation);
     midTurn = false;
     discardAssistant();
     emit({
@@ -602,6 +667,7 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
     return;
   }
   currentProcess = proc;
+  currentInvocation = invocation;
 
   if (invocation.stdin) {
     // Same as chat.js: a CLI that exits before draining stdin turns the rest of
@@ -630,7 +696,11 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
   proc.on("close", (code) => {
     if (currentProcess !== proc) return;
     currentProcess = null;
+    currentInvocation = null;
     midTurn = false;
+    // Every exit path below (the retries included) starts here: the temp dir
+    // holding the persona system prompt must not outlive the turn.
+    chat.cleanupInvocation(invocation);
 
     // Self-heal: drop stale session on "not found" errors and retry once.
     // Covers Claude ("No conversation found"), Codex ("no rollout found",
@@ -708,7 +778,9 @@ function dispatchSend(trimmed, context, { userAlreadyShown = false } = {}) {
   proc.on("error", (err) => {
     if (currentProcess !== proc) return;
     currentProcess = null;
+    currentInvocation = null;
     midTurn = false;
+    chat.cleanupInvocation(invocation);
     staleRetryInFlight = false;
     codexModelFallbackInFlight = false;
     codexReasoningFallbackInFlight = false;
@@ -745,18 +817,25 @@ function send(text, context) {
   return { ok: true };
 }
 
-function cancel() {
+// `sync` is for the quit/restart paths (see chat.cancel): the Windows taskkill
+// must finish before app.exit().
+function cancel({ sync = false } = {}) {
   directiveTurnToken += 1;
   codexModelFallbackInFlight = false;
   codexReasoningFallbackInFlight = false;
+  // Clear / New Conversation call this while idle too; then there is nothing
+  // to report — a "cancelled" status would just flash in the webview.
+  const wasBusy = Boolean(currentProcess || midTurn || outboundQueue.length || currentAssistantId);
   if (currentProcess) {
     const proc = currentProcess;
     currentProcess = null;
-    try { proc.kill("SIGTERM"); } catch (_) { /* ignore */ }
-    // Force-kill after 3s if SIGTERM was ignored (matches chat.js pattern).
-    setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch (_) { /* ignore */ }
-    }, 3000).unref();
+    // The close handler ignores the dead process (identity guard above), so
+    // this is the only place that ends the turn and releases its temp dir
+    // (the CLI read the prompt file at startup). Whole tree: a .cmd shim's
+    // cmd.exe would otherwise leave the real CLI streaming as an orphan.
+    chat.cleanupInvocation(currentInvocation);
+    currentInvocation = null;
+    killProcessTree(proc, { sync });
   }
   outboundQueue.length = 0;
   midTurn = false;
@@ -764,6 +843,7 @@ function cancel() {
     if (pendingAssistantText) finalizeAssistant();
     else discardAssistant();
   }
+  if (!wasBusy) return;
   emit({ kind: "tool", active: false });
   emit({ kind: "status", status: "idle", cancelled: true });
 }

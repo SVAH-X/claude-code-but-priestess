@@ -11,7 +11,15 @@ const root = path.resolve(__dirname, "..");
 const source = path.join(root, "src", "native", "windows", "NeteaseController.cs");
 const output = path.join(root, "src", "native", "windows", "NeteaseController.exe");
 
+// Locally a missing compiler only disables NetEase playback; on CI (the
+// release build) the helper is a required part of the Windows package.
+const onCI = /^(1|true|yes)$/i.test(String(process.env.CI || "").trim());
+
 function skip(message) {
+  if (onCI) {
+    console.error(`windows helper: FAILED on CI (${message})`);
+    process.exit(1);
+  }
   console.warn(`windows helper: skipped (${message})`);
   process.exit(0);
 }

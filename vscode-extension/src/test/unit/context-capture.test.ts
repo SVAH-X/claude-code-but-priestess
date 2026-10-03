@@ -50,6 +50,39 @@ describe("context-capture", () => {
     if (inst) { try { inst.cc.dispose(); } catch { /* ignore */ } inst = null; }
   });
 
+  describe("per-window state", () => {
+    it("reports this window's workspace and focus on connect", () => {
+      vscodeStub.workspace.workspaceFolders = [{ uri: { fsPath: "C:\\Users\\doc\\proj" } }];
+      vscodeStub.window.state = { focused: false };
+      inst = makeInstance();
+      inst.ws.listeners["connected"]();
+      assert.deepStrictEqual(inst.ws.calls, [
+        { type: "vscode:workspace", data: { workspaceFolders: ["C:\\Users\\doc\\proj"], primaryWorkspace: "C:\\Users\\doc\\proj" } },
+        { type: "vscode:focus", data: { focused: false } },
+      ]);
+    });
+
+    it("sends vscode:focus whenever the window state changes", () => {
+      inst = makeInstance();
+      vscodeStub.window.state = { focused: true };
+      vscodeStub.window._emitters.windowState.emit({ focused: true });
+      vscodeStub.window.state = { focused: false };
+      vscodeStub.window._emitters.windowState.emit({ focused: false });
+      assert.deepStrictEqual(inst.ws.calls, [
+        { type: "vscode:focus", data: { focused: true } },
+        { type: "vscode:focus", data: { focused: false } },
+      ]);
+    });
+
+    it("stays quiet while disconnected", () => {
+      inst = makeInstance();
+      inst.ws.isConnected = () => false;
+      vscodeStub.window._emitters.windowState.emit({ focused: true });
+      inst.ws.listeners["connected"]();
+      assert.deepStrictEqual(inst.ws.calls, []);
+    });
+  });
+
   describe("classifyShellCommand", () => {
     const cases: Array<[string, string | null, string | null]> = [
       // [command line, kind, label]
@@ -157,6 +190,29 @@ describe("context-capture", () => {
       assert.strictEqual(snap.warnings, 30);
       assert.strictEqual(snap.totalFilesWithProblems, 1);
       assert.strictEqual(snap.details.length, 50, "details must be capped to avoid blowing the WS payload");
+    });
+
+    it("lists errors before lower severities so the cap never crowds them out", () => {
+      inst = makeInstance();
+      const sev = vscodeStub.DiagnosticSeverity;
+      const mk = (severity: number, message: string, line: number) =>
+        ({ severity, message, range: { start: { line } }, source: "ts" });
+      const noisy: any[] = [];
+      for (let i = 0; i < 60; i++) noisy.push(mk(i % 3 === 0 ? sev.Hint : sev.Warning, `noise ${i}`, i));
+      // The errors live in a file enumerated last.
+      vscodeStub.languages._diagnostics = [
+        [{ fsPath: "C:\\work\\noisy.ts" }, noisy],
+        [{ fsPath: "C:\\work\\broken.ts" }, [mk(sev.Error, "first error", 3), mk(sev.Error, "second error", 9)]],
+      ];
+      const snap = (inst.cc as any).captureDiagnostics();
+      assert.strictEqual(snap.errors, 2);
+      assert.strictEqual(snap.details.length, 50);
+      assert.deepStrictEqual(snap.details.slice(0, 2).map((d: any) => d.message), ["first error", "second error"]);
+      assert.strictEqual(snap.details[0].file, "C:\\work\\broken.ts");
+      // Stable: warnings keep their order and precede hints.
+      const rest = snap.details.slice(2).map((d: any) => d.severity);
+      assert.ok(rest.every((s: string) => s === "warning" || s === "hint"));
+      assert.strictEqual(rest.indexOf("hint"), rest.lastIndexOf("warning") + 1);
     });
   });
 
@@ -288,8 +344,11 @@ describe("context-capture", () => {
       inst = makeInstance();
       const r1 = makeRepo("C:\\work\\a", { name: "main", commit: { hash: "aaa111" } });
       const r2 = makeRepo("C:\\work\\b", { name: "dev", commit: { hash: "bbb222" } });
+      // The git extension's exports are { enabled, getAPI }; the repository
+      // list lives on the versioned API object.
       const gitApi = { repositories: [r1.repo, r2.repo] };
-      vscodeStub.extensions.getExtension = () => ({ activate: async () => gitApi }) as any;
+      vscodeStub.extensions.getExtension = () =>
+        ({ activate: async () => ({ enabled: true, getAPI: (v: number) => (v === 1 ? gitApi : null) }) }) as any;
 
       (inst.cc as any).tryWatchGit({});
       await new Promise((r) => setTimeout(r, 10)); // let activate() resolve
@@ -309,6 +368,43 @@ describe("context-capture", () => {
       assert.ok(kinds.includes("git-branch-switch"), JSON.stringify(kinds));
       assert.ok(kinds.includes("git-commit"), JSON.stringify(kinds));
       assert.strictEqual(kinds.length, 2, JSON.stringify(kinds));
+    });
+
+    it("watches repositories the git extension opens after activation", async () => {
+      inst = makeInstance();
+      // Collected in an array: a `let` holder assigned inside the callback
+      // is narrowed to its initializer by TS and ends up `never` after the
+      // assertion below.
+      const opened: Array<(repo: any) => void> = [];
+      // Repositories are discovered asynchronously: the list is empty when
+      // activate() resolves and onDidOpenRepository fires later.
+      const gitApi = {
+        repositories: [] as any[],
+        onDidOpenRepository: (cb: (repo: any) => void) => { opened.push(cb); return { dispose() {} }; },
+      };
+      vscodeStub.extensions.getExtension = () =>
+        ({ activate: async () => ({ enabled: true, getAPI: () => gitApi }) }) as any;
+      (inst.cc as any).tryWatchGit();
+      await new Promise((r) => setTimeout(r, 10));
+      assert.strictEqual(opened.length, 1, "must subscribe to onDidOpenRepository");
+
+      const r1 = makeRepo("/home/doctor/app", { name: "main", commit: { hash: "aaa111" } });
+      opened[0](r1.repo);
+      r1.repo.state.HEAD = { name: "main", commit: { hash: "bbb222" } };
+      r1.emit();
+      const kinds = inst.ws.calls.filter((c: any) => c.type === "vscode:activity").map((c: any) => c.data.activity.kind);
+      assert.deepStrictEqual(kinds, ["git-commit"]);
+    });
+
+    it("ignores exports without getAPI instead of reading repositories off them", async () => {
+      inst = makeInstance();
+      const r1 = makeRepo("/home/doctor/app", { name: "main", commit: { hash: "aaa111" } });
+      vscodeStub.extensions.getExtension = () => ({ activate: async () => ({ repositories: [r1.repo] }) }) as any;
+      (inst.cc as any).tryWatchGit();
+      await new Promise((r) => setTimeout(r, 10));
+      r1.repo.state.HEAD = { name: "dev", commit: { hash: "aaa111" } };
+      r1.emit();
+      assert.strictEqual(inst.ws.calls.length, 0);
     });
   });
 

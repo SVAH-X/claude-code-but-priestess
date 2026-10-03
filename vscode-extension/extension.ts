@@ -5,6 +5,7 @@ import { ContextCapture } from "./src/context-capture";
 import { InlineCompletionProvider } from "./src/inline-provider";
 import { buildRecentChangesSummary } from "./src/git-summary";
 import { pushUserBlacklist } from "./src/blacklist-sync";
+import { shouldOfferRestore } from "./src/restore-prompt";
 
 let wsClient: WsClient | null = null;
 let contextCapture: ContextCapture | null = null;
@@ -316,15 +317,8 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // ---- Window focus tracking ----
-
-  context.subscriptions.push(
-    vscode.window.onDidChangeWindowState((state) => {
-      if (wsClient && wsClient.isConnected()) {
-        wsClient.notify("vscode:focus", { focused: state.focused });
-      }
-    })
-  );
+  // Window focus tracking (vscode:focus) is sent by ContextCapture together
+  // with this window's workspace, on connect and on every change.
 
   // ---- Connection lifecycle ----
 
@@ -379,7 +373,12 @@ export function activate(context: vscode.ExtensionContext) {
   let hasPromptedRestore = false;
 
   (wsClient as any).on("conversation:has-previous", (msg: any) => {
-    if (msg.hasPrevious && !hasPromptedRestore) {
+    if (!msg.hasPrevious || hasPromptedRestore) return;
+    // The conversation is shared by every VS Code window. Ask the tray first:
+    // a second window must not be offered a prompt whose either answer would
+    // cancel or wipe the turn the first window is running (restore-prompt.ts).
+    shouldOfferRestore(wsClient!).then((safe) => {
+      if (!safe || hasPromptedRestore || !wsClient) return;
       hasPromptedRestore = true;
       vscode.window
         .showInformationMessage(
@@ -394,7 +393,7 @@ export function activate(context: vscode.ExtensionContext) {
             wsClient!.notify("conversation:new");
           }
         });
-    }
+    });
   });
 
   console.log("PRTS: activated");

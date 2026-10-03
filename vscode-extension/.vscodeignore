@@ -1,8 +1,19 @@
+# Build inputs: only out/ (compiled JS) ships, never the TypeScript sources.
 .vscode/**
 .vscode-test/**
 src/**
+extension.ts
+**/*.ts
+**/*.map
 tsconfig.json
 .gitignore
+*.vsix
 **/.DS_Store
 out/src/test/**
 dist/**
+# Only the sprites the webviews load ship. Anything else dropped into assets/
+# (scratch exports, drafts of a new skin) stays out of the VSIX.
+assets/**
+!assets/character/{idle,half_closed,almost_closed,closed,smile,angry,threat,cry,sleep}.png
+!assets/character/casual/{idle,half_closed,almost_closed,closed,smile,angry,threat,cry,sleep}.png
+!assets/character/普猫猫/{cat_normal,cat_crying}.png

@@ -74,9 +74,13 @@ function createStub(): any {
   };
 
   const windowSection: any = {
+    // Dark by default; tests may reassign (nested objects stay live
+    // through `import * as vscode`, top-level keys added later do not).
+    activeColorTheme: { kind: 2 },
     _emitters: windowEmitters,
     _createdStatusBarItems: [] as any[],
     activeTextEditor: undefined,
+    state: { focused: true },
     createStatusBarItem: (_alignment: number, _priority?: number) => {
       const item = createStatusBarItem();
       windowSection._createdStatusBarItems.push(item);
@@ -138,6 +142,7 @@ function createStub(): any {
 
   return {
     StatusBarAlignment: { Left: 1, Right: 2 },
+    ColorThemeKind: { Light: 1, Dark: 2, HighContrast: 3, HighContrastLight: 4 },
     DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
     InlineCompletionItem: class InlineCompletionItem {
       public insertText: string;

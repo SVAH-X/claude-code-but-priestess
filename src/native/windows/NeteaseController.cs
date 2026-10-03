@@ -11,8 +11,21 @@ using Accessibility;
 internal static class NeteaseController
 {
     private const int SW_HIDE = 0;
+    private const int SW_SHOW = 5;
     private const int SW_MINIMIZE = 6;
     private const int SW_RESTORE = 9;
+    // The helper gives itself a deadline so it can still put the client away
+    // in its finally block; PRTS only kills it (losing that cleanup) at 40 s.
+    private const int HELPER_DEADLINE_MS = 20000;
+    private const int WATCHDOG_MS = 30000;
+    private const string NOT_FOREGROUND_ERROR = "网易云音乐已不在前台，已停止发送输入";
+    private const string TIMEOUT_ERROR = "网易云客户端响应超时";
+    private const int SM_SWAPBUTTON = 23;
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TRANSPARENT = 0x00000020;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
+    private const uint GW_OWNER = 4;
     private const uint WM_SYSCOMMAND = 0x0112;
     private const int SC_MINIMIZE = 0xF020;
     private const uint INPUT_MOUSE = 0;
@@ -21,6 +34,8 @@ internal static class NeteaseController
     private const uint KEYEVENTF_UNICODE = 0x0004;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
     private const ushort VK_CONTROL = 0x11;
     private const ushort VK_A = 0x41;
     private const ushort VK_RETURN = 0x0D;
@@ -78,6 +93,19 @@ internal static class NeteaseController
         public int Right;
         public int Bottom;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINDOWPLACEMENT
+    {
+        public uint length;
+        public uint flags;
+        public uint showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
+    private static readonly Stopwatch Clock = Stopwatch.StartNew();
 
     private sealed class ElementSnapshot
     {
@@ -142,6 +170,37 @@ internal static class NeteaseController
     private static extern uint GetDpiForWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(POINT point);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
+
+    // GetWindowLong (not the Ptr variant) exists in both 32- and 64-bit user32
+    // and the extended-style bits fit in 32 bits.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowLong(IntPtr hWnd, int index);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hWnd, uint command);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(
+        IntPtr hWnd,
+        StringBuilder text,
+        int maxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(
+        IntPtr hWnd,
+        StringBuilder className,
+        int maxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowPlacement(
+        IntPtr hWnd,
+        ref WINDOWPLACEMENT placement);
+
+    [DllImport("user32.dll")]
     private static extern bool EnumWindows(
         EnumWindowsProc callback,
         IntPtr lParam);
@@ -164,19 +223,21 @@ internal static class NeteaseController
         try
         {
             SetProcessDPIAware();
+            StartWatchdog();
             string title = DecodeArgument(args, "--title-b64");
             string query = DecodeArgument(args, "--query-b64");
             if (String.IsNullOrWhiteSpace(title) || String.IsNullOrWhiteSpace(query))
                 return Fail("缺少歌曲名称");
+            string[] titleCandidates = BuildTitleCandidates(title);
 
             IntPtr previousForeground = GetForegroundWindow();
             Process process = FindOrLaunchClient();
             if (process == null)
                 return Fail("未找到网易云音乐客户端，请先安装桌面版");
 
-            IntPtr handle = WaitForWindow(process, 12000);
+            IntPtr handle = WaitForWindow(process, Remaining(12000));
             if (handle == IntPtr.Zero)
-                return Fail("网易云音乐客户端没有可控制的窗口");
+                return Fail(DeadlinePassed() ? TIMEOUT_ERROR : "网易云音乐客户端没有可控制的窗口");
 
             bool minimizeAfterPlayback = !WindowBelongsToProcess(
                 previousForeground,
@@ -184,10 +245,15 @@ internal static class NeteaseController
             string backgroundMode = "kept";
             try
             {
-                ShowWindow(handle, SW_RESTORE);
+                // SW_RESTORE would un-maximize a maximized window, so only use
+                // it to bring back a minimized one; SW_SHOW keeps the current
+                // size for a visible or hidden (see PutClientAway) window.
+                ShowWindow(handle, IsIconic(handle) ? SW_RESTORE : SW_SHOW);
                 SetForegroundWindow(handle);
-                if (!WaitForForegroundProcess(process.Id, 1800))
-                    return Fail("无法将网易云音乐置于前台，已停止发送搜索输入");
+                if (!WaitForForegroundProcess(process.Id, Remaining(1800)))
+                    return Fail(DeadlinePassed()
+                        ? TIMEOUT_ERROR
+                        : "无法将网易云音乐置于前台，已停止发送搜索输入");
                 Thread.Sleep(350);
 
                 RECT windowRect;
@@ -202,47 +268,61 @@ internal static class NeteaseController
                 int height = windowRect.Bottom - windowRect.Top;
                 uint dpi = GetDpiForWindow(handle);
                 double scale = dpi > 0 ? dpi / 96.0 : 1.0;
-                ClickAt(
-                    windowRect.Left + Math.Min(
-                        (int)(400 * scale),
-                        Math.Max((int)(180 * scale), width - (int)(180 * scale))),
-                    windowRect.Top + Math.Min(
-                        (int)(36 * scale),
-                        Math.Max((int)(20 * scale), height - (int)(100 * scale))));
+                int searchX = windowRect.Left + Math.Min(
+                    (int)(400 * scale),
+                    Math.Max((int)(180 * scale), width - (int)(180 * scale)));
+                int searchY = windowRect.Top + Math.Min(
+                    (int)(36 * scale),
+                    Math.Max((int)(20 * scale), height - (int)(100 * scale)));
+
+                // Synthetic input goes to whatever is in front, so re-check
+                // before every burst that NetEase still is (and, for clicks,
+                // that NetEase owns the pixel under the cursor).
+                if (!ClientAcceptsInput(process.Id, searchX, searchY))
+                    return Fail(NOT_FOREGROUND_ERROR);
+                ClickAt(searchX, searchY);
+                if (!ClientAcceptsInput(process.Id))
+                    return Fail(NOT_FOREGROUND_ERROR);
                 KeyDown(VK_CONTROL);
                 PressKey(VK_A);
                 KeyUp(VK_CONTROL);
+                if (!ClientAcceptsInput(process.Id))
+                    return Fail(NOT_FOREGROUND_ERROR);
                 SendUnicode(query);
                 Thread.Sleep(650);
+                if (!ClientAcceptsInput(process.Id))
+                    return Fail(NOT_FOREGROUND_ERROR);
                 PressKey(VK_RETURN);
                 Thread.Sleep(1700);
+                if (DeadlinePassed())
+                    return Fail(TIMEOUT_ERROR);
 
-                ElementSnapshot resultTitle = FindElement(
+                // Match the title as a (case- and space-insensitive) substring
+                // of the result text: NetEase decorates titles ("夜曲 (Live)")
+                // and the request may carry the artist ("周杰伦 晴天").
+                List<ElementSnapshot> texts = CollectTextElements(
                     handle,
-                    new AndCondition(
-                        new PropertyCondition(
-                            AutomationElement.ControlTypeProperty,
-                            ControlType.Text),
-                        new PropertyCondition(
-                            AutomationElement.NameProperty,
-                            title,
-                            PropertyConditionFlags.IgnoreCase)),
-                    3500);
-                if (resultTitle == null)
+                    Remaining(3500));
+                ElementSnapshot resultTitle = PickResult(texts, titleCandidates);
+                if (resultTitle == null && !DeadlinePassed())
                 {
-                    resultTitle = FindAccessibleElement(
+                    texts = CollectAccessibleTexts(
                         handle,
                         ROLE_SYSTEM_STATICTEXT,
-                        new[] { title },
-                        3500);
+                        Remaining(3500));
+                    resultTitle = PickResult(texts, titleCandidates);
                 }
                 if (resultTitle == null)
-                    return Fail("网易云搜索结果已打开，但没有找到“" + title + "”");
+                    return Fail(DeadlinePassed()
+                        ? TIMEOUT_ERROR
+                        : "网易云搜索结果已打开，但没有找到“" + title + "”");
 
-                DoubleClickAt(
-                    resultTitle.Left + (resultTitle.Right - resultTitle.Left) / 2,
-                    resultTitle.Top + (resultTitle.Bottom - resultTitle.Top) / 2);
-                if (!WaitForTitle(process, title, 8000))
+                int resultX = resultTitle.Left + (resultTitle.Right - resultTitle.Left) / 2;
+                int resultY = resultTitle.Top + (resultTitle.Bottom - resultTitle.Top) / 2;
+                if (!ClientAcceptsInput(process.Id, resultX, resultY))
+                    return Fail(NOT_FOREGROUND_ERROR);
+                DoubleClickAt(resultX, resultY);
+                if (!WaitForTitle(process, handle, titleCandidates, Remaining(8000)))
                     return Fail("网易云搜索到了歌曲，但没有切换到“" + title + "”");
             }
             finally
@@ -264,6 +344,47 @@ internal static class NeteaseController
         uint ownerProcessId;
         GetWindowThreadProcessId(handle, out ownerProcessId);
         return ownerProcessId == (uint)processId;
+    }
+
+    private static int Remaining(int cap)
+    {
+        long left = HELPER_DEADLINE_MS - Clock.ElapsedMilliseconds;
+        if (left <= 0) return 0;
+        return (int)Math.Min(cap, left);
+    }
+
+    private static bool DeadlinePassed()
+    {
+        return Clock.ElapsedMilliseconds >= HELPER_DEADLINE_MS;
+    }
+
+    // Last resort when a UI Automation call never returns: report the timeout
+    // ourselves so PRTS gets a readable error instead of a killed process.
+    private static void StartWatchdog()
+    {
+        Thread watchdog = new Thread(() =>
+        {
+            Thread.Sleep(WATCHDOG_MS);
+            Console.WriteLine(FailJson(TIMEOUT_ERROR));
+            Console.Out.Flush();
+            Environment.Exit(1);
+        });
+        watchdog.IsBackground = true;
+        watchdog.Start();
+    }
+
+    private static bool ClientAcceptsInput(int processId)
+    {
+        return WindowBelongsToProcess(GetForegroundWindow(), processId);
+    }
+
+    private static bool ClientAcceptsInput(int processId, int x, int y)
+    {
+        if (!ClientAcceptsInput(processId)) return false;
+        POINT point;
+        point.X = x;
+        point.Y = y;
+        return WindowBelongsToProcess(WindowFromPoint(point), processId);
     }
 
     private static bool WaitForForegroundProcess(int processId, int timeoutMs)
@@ -357,7 +478,7 @@ internal static class NeteaseController
         {
             if (!System.IO.File.Exists(candidate)) continue;
             Process.Start(candidate);
-            for (int i = 0; i < 30; i++)
+            for (int i = 0; i < 30 && !DeadlinePassed(); i++)
             {
                 Thread.Sleep(300);
                 process = FindClient();
@@ -392,43 +513,91 @@ internal static class NeteaseController
 
     private static IntPtr FindClientWindow(Process process)
     {
+        // Process.MainWindowHandle is just the first visible top-level window
+        // the process owns, which can be the desktop-lyrics or mini-player
+        // window. Score every top-level window instead: unowned, not a
+        // tool/transparent/no-activate window, no lyrics-like title or class,
+        // at least 400x300 in its normal (non-minimized) placement, largest
+        // and preferably visible. Hidden windows (PutClientAway's last resort)
+        // still qualify so the next request can bring them back.
+        int processId = process.Id;
+        IntPtr best = IntPtr.Zero;
+        long bestScore = 0;
+        EnumWindowsProc inspect = delegate(IntPtr candidate, IntPtr ignored)
+        {
+            long score = ScoreClientWindow(candidate, processId);
+            if (score > bestScore)
+            {
+                best = candidate;
+                bestScore = score;
+            }
+            return true;
+        };
+        EnumWindows(inspect, IntPtr.Zero);
+        if (best != IntPtr.Zero) return best;
+
         try
         {
             process.Refresh();
-            if (process.MainWindowHandle != IntPtr.Zero)
-                return process.MainWindowHandle;
+            return process.MainWindowHandle;
         }
         catch
         {
             return IntPtr.Zero;
         }
+    }
 
-        // A window hidden by the tray (or by an interrupted older helper run)
-        // is omitted from Process.MainWindowHandle. Find the large top-level
-        // window owned by the main cloudmusic process so it remains recoverable.
-        IntPtr best = IntPtr.Zero;
-        long bestArea = 0;
-        EnumWindowsProc inspect = delegate(IntPtr candidate, IntPtr ignored)
+    private static long ScoreClientWindow(IntPtr candidate, int processId)
+    {
+        if (!WindowBelongsToProcess(candidate, processId)) return 0;
+        if (GetWindow(candidate, GW_OWNER) != IntPtr.Zero) return 0;
+        int exStyle = GetWindowLong(candidate, GWL_EXSTYLE);
+        if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)) != 0)
+            return 0;
+        if (LooksLikeLyricsWindow(WindowText(candidate)) ||
+            LooksLikeLyricsWindow(WindowClassName(candidate)))
+            return 0;
+
+        WINDOWPLACEMENT placement = new WINDOWPLACEMENT();
+        placement.length = (uint)Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+        int width;
+        int height;
+        if (GetWindowPlacement(candidate, ref placement))
         {
-            uint ownerProcessId;
-            GetWindowThreadProcessId(candidate, out ownerProcessId);
-            if (ownerProcessId != (uint)process.Id) return true;
-
+            width = placement.rcNormalPosition.Right - placement.rcNormalPosition.Left;
+            height = placement.rcNormalPosition.Bottom - placement.rcNormalPosition.Top;
+        }
+        else
+        {
             RECT rect;
-            if (!GetWindowRect(candidate, out rect)) return true;
-            int width = Math.Max(0, rect.Right - rect.Left);
-            int height = Math.Max(0, rect.Bottom - rect.Top);
-            if (width < 400 || height < 300) return true;
-            long area = width * (long)height;
-            if (area > bestArea)
-            {
-                best = candidate;
-                bestArea = area;
-            }
-            return true;
-        };
-        EnumWindows(inspect, IntPtr.Zero);
-        return best;
+            if (!GetWindowRect(candidate, out rect)) return 0;
+            width = rect.Right - rect.Left;
+            height = rect.Bottom - rect.Top;
+        }
+        if (width < 400 || height < 300) return 0;
+        long area = width * (long)height;
+        return IsWindowVisible(candidate) ? area * 2 : area;
+    }
+
+    private static bool LooksLikeLyricsWindow(string text)
+    {
+        if (String.IsNullOrEmpty(text)) return false;
+        return text.IndexOf("歌词", StringComparison.Ordinal) >= 0 ||
+            text.IndexOf("lyric", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static string WindowText(IntPtr handle)
+    {
+        StringBuilder buffer = new StringBuilder(512);
+        GetWindowText(handle, buffer, buffer.Capacity);
+        return buffer.ToString();
+    }
+
+    private static string WindowClassName(IntPtr handle)
+    {
+        StringBuilder buffer = new StringBuilder(256);
+        GetClassName(handle, buffer, buffer.Capacity);
+        return buffer.ToString();
     }
 
     private static IntPtr WaitForWindow(Process process, int timeoutMs)
@@ -467,34 +636,134 @@ internal static class NeteaseController
         SetCursorPos(original.X, original.Y);
     }
 
-    private static ElementSnapshot FindElement(
+    // Whitespace-free, lower-case form used for every title comparison.
+    private static string NormalizeText(string value)
+    {
+        if (String.IsNullOrEmpty(value)) return "";
+        StringBuilder result = new StringBuilder(value.Length);
+        foreach (char character in value)
+        {
+            if (!Char.IsWhiteSpace(character)) result.Append(character);
+        }
+        return result.ToString().ToLowerInvariant();
+    }
+
+    // The full normalized title first; when the title has several words
+    // ("周杰伦 晴天") also each word long enough to identify a song, last
+    // word first, so an artist prefix does not prevent finding the song.
+    private static string[] BuildTitleCandidates(string title)
+    {
+        List<string> candidates = new List<string>();
+        string full = NormalizeText(title);
+        if (full.Length > 0) candidates.Add(full);
+        string[] words = title.Split(
+            (char[])null,
+            StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length > 1)
+        {
+            for (int i = words.Length - 1; i >= 0; i--)
+            {
+                string word = NormalizeText(words[i]);
+                // Two CJK characters identify a song; two Latin letters ("of",
+                // "me") would match almost any text, so Latin words need three.
+                int minimumLength = IsAscii(word) ? 3 : 2;
+                if (word.Length >= minimumLength && !candidates.Contains(word))
+                    candidates.Add(word);
+            }
+        }
+        return candidates.ToArray();
+    }
+
+    private static bool IsAscii(string value)
+    {
+        foreach (char character in value)
+        {
+            if (character > 0x7E) return false;
+        }
+        return true;
+    }
+
+    private static bool TextMatchesAny(string text, string[] candidates)
+    {
+        string normalized = NormalizeText(text);
+        if (normalized.Length == 0) return false;
+        foreach (string candidate in candidates)
+        {
+            if (normalized.IndexOf(candidate, StringComparison.Ordinal) >= 0)
+                return true;
+        }
+        return false;
+    }
+
+    // Exact match of the full title wins. Otherwise, per candidate in order
+    // (full title, then single words), the shortest text containing it: a
+    // result row's title cell is compact ("夜曲 (Live)"), whereas the results
+    // header ("搜索“周杰伦 晴天”…找到 N 首单曲") also contains the title but
+    // is long, and double-clicking it would play nothing.
+    private static ElementSnapshot PickResult(
+        List<ElementSnapshot> texts,
+        string[] candidates)
+    {
+        if (texts == null || candidates.Length == 0) return null;
+        foreach (ElementSnapshot text in texts)
+        {
+            if (NormalizeText(text.Name) == candidates[0]) return text;
+        }
+        foreach (string candidate in candidates)
+        {
+            ElementSnapshot best = null;
+            int bestLength = Int32.MaxValue;
+            foreach (ElementSnapshot text in texts)
+            {
+                string normalized = NormalizeText(text.Name);
+                if (normalized.IndexOf(candidate, StringComparison.Ordinal) < 0)
+                    continue;
+                if (normalized.Length < bestLength)
+                {
+                    best = text;
+                    bestLength = normalized.Length;
+                }
+            }
+            if (best != null) return best;
+        }
+        return null;
+    }
+
+    private static List<ElementSnapshot> CollectTextElements(
         IntPtr handle,
-        Condition condition,
         int timeoutMs)
     {
-        ElementSnapshot result = null;
+        List<ElementSnapshot> result = new List<ElementSnapshot>();
+        if (timeoutMs <= 0) return result;
         Thread worker = new Thread(() =>
         {
             try
             {
+                Condition condition = new PropertyCondition(
+                    AutomationElement.ControlTypeProperty,
+                    ControlType.Text);
                 foreach (IntPtr candidateHandle in GetWindowHandles(handle))
                 {
                     AutomationElement root = AutomationElement.FromHandle(candidateHandle);
-                    AutomationElement element = root.FindFirst(
+                    AutomationElementCollection elements = root.FindAll(
                         TreeScope.Descendants,
                         condition);
-                    if (element == null) continue;
-                    Rect rect = element.Current.BoundingRectangle;
-                    if (rect.IsEmpty) continue;
-                    result = new ElementSnapshot
+                    foreach (AutomationElement element in elements)
                     {
-                        Left = (int)rect.Left,
-                        Top = (int)rect.Top,
-                        Right = (int)rect.Right,
-                        Bottom = (int)rect.Bottom,
-                        Name = element.Current.Name ?? ""
-                    };
-                    return;
+                        Rect rect = element.Current.BoundingRectangle;
+                        if (rect.IsEmpty) continue;
+                        string name = element.Current.Name ?? "";
+                        if (name.Length == 0) continue;
+                        ElementSnapshot snapshot = new ElementSnapshot
+                        {
+                            Left = (int)rect.Left,
+                            Top = (int)rect.Top,
+                            Right = (int)rect.Right,
+                            Bottom = (int)rect.Bottom,
+                            Name = name
+                        };
+                        lock (result) result.Add(snapshot);
+                    }
                 }
             }
             catch
@@ -505,16 +774,18 @@ internal static class NeteaseController
         worker.IsBackground = true;
         worker.SetApartmentState(ApartmentState.MTA);
         worker.Start();
-        return worker.Join(timeoutMs) ? result : null;
+        worker.Join(timeoutMs);
+        // Whatever was collected before the deadline is still usable.
+        lock (result) return new List<ElementSnapshot>(result);
     }
 
-    private static ElementSnapshot FindAccessibleElement(
+    private static List<ElementSnapshot> CollectAccessibleTexts(
         IntPtr handle,
         int role,
-        string[] names,
         int timeoutMs)
     {
-        ElementSnapshot result = null;
+        List<ElementSnapshot> result = new List<ElementSnapshot>();
+        if (timeoutMs <= 0) return result;
         Thread worker = new Thread(() =>
         {
             try
@@ -529,13 +800,12 @@ internal static class NeteaseController
                         OBJID_CLIENT,
                         ref iid,
                         out root) != 0 || root == null) continue;
-                    result = FindAccessibleElementCore(
+                    CollectAccessibleTextsCore(
                         root,
                         role,
-                        names,
                         0,
-                        ref visited);
-                    if (result != null) return;
+                        ref visited,
+                        result);
                 }
             }
             catch
@@ -546,7 +816,8 @@ internal static class NeteaseController
         worker.IsBackground = true;
         worker.SetApartmentState(ApartmentState.MTA);
         worker.Start();
-        return worker.Join(timeoutMs) ? result : null;
+        worker.Join(timeoutMs);
+        lock (result) return new List<ElementSnapshot>(result);
     }
 
     private static List<IntPtr> GetWindowHandles(IntPtr root)
@@ -562,22 +833,21 @@ internal static class NeteaseController
         return handles;
     }
 
-    private static ElementSnapshot FindAccessibleElementCore(
+    private static void CollectAccessibleTextsCore(
         IAccessible accessible,
         int role,
-        string[] names,
         int depth,
-        ref int visited)
+        ref int visited,
+        List<ElementSnapshot> result)
     {
-        if (accessible == null || depth > 40 || visited >= 6000) return null;
+        if (accessible == null || depth > 40 || visited >= 6000) return;
         visited++;
 
         ElementSnapshot self = SnapshotAccessibleChild(
             accessible,
             CHILDID_SELF,
-            role,
-            names);
-        if (self != null) return self;
+            role);
+        if (self != null) lock (result) result.Add(self);
 
         int childCount;
         try
@@ -586,7 +856,7 @@ internal static class NeteaseController
         }
         catch
         {
-            return null;
+            return;
         }
         for (int childId = 1; childId <= childCount && visited < 6000; childId++)
         {
@@ -603,13 +873,12 @@ internal static class NeteaseController
             IAccessible childAccessible = child as IAccessible;
             if (childAccessible != null)
             {
-                ElementSnapshot nested = FindAccessibleElementCore(
+                CollectAccessibleTextsCore(
                     childAccessible,
                     role,
-                    names,
                     depth + 1,
-                    ref visited);
-                if (nested != null) return nested;
+                    ref visited,
+                    result);
                 continue;
             }
 
@@ -617,18 +886,15 @@ internal static class NeteaseController
             ElementSnapshot simple = SnapshotAccessibleChild(
                 accessible,
                 childId,
-                role,
-                names);
-            if (simple != null) return simple;
+                role);
+            if (simple != null) lock (result) result.Add(simple);
         }
-        return null;
     }
 
     private static ElementSnapshot SnapshotAccessibleChild(
         IAccessible accessible,
         object childId,
-        int expectedRole,
-        string[] names)
+        int expectedRole)
     {
         try
         {
@@ -636,7 +902,7 @@ internal static class NeteaseController
             if (roleValue == null || Convert.ToInt32(roleValue) != expectedRole)
                 return null;
             string name = accessible.get_accName(childId) ?? "";
-            if (!NameMatches(name, names)) return null;
+            if (name.Length == 0) return null;
 
             int left;
             int top;
@@ -664,35 +930,33 @@ internal static class NeteaseController
         }
     }
 
-    private static bool NameMatches(string actual, string[] expected)
-    {
-        foreach (string name in expected)
-        {
-            if (String.Equals(
-                actual,
-                name,
-                StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        return false;
-    }
-
-    private static bool WaitForTitle(Process process, string title, int timeoutMs)
+    private static bool WaitForTitle(
+        Process process,
+        IntPtr handle,
+        string[] candidates,
+        int timeoutMs)
     {
         Stopwatch watch = Stopwatch.StartNew();
         while (watch.ElapsedMilliseconds < timeoutMs)
         {
-            if (WindowTitleMatches(process, title)) return true;
+            if (WindowTitleMatches(process, handle, candidates)) return true;
             Thread.Sleep(250);
         }
-        return false;
+        return WindowTitleMatches(process, handle, candidates);
     }
 
-    private static bool WindowTitleMatches(Process process, string title)
+    // The window we drive is checked first; Process.MainWindowTitle is kept
+    // as a fallback in case the client reports the playing song elsewhere.
+    private static bool WindowTitleMatches(
+        Process process,
+        IntPtr handle,
+        string[] candidates)
     {
+        if (TextMatchesAny(WindowText(handle), candidates)) return true;
         try
         {
             process.Refresh();
-            return process.MainWindowTitle.IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0;
+            return TextMatchesAny(process.MainWindowTitle, candidates);
         }
         catch
         {
@@ -737,12 +1001,15 @@ internal static class NeteaseController
 
     private static void MouseClick()
     {
+        // The LEFT/RIGHT flags name physical buttons. With "swap mouse
+        // buttons" on, the primary (logical left) click is the physical right.
+        bool swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
         INPUT down = new INPUT();
         down.type = INPUT_MOUSE;
-        down.U.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        down.U.mi.dwFlags = swapped ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
         INPUT up = new INPUT();
         up.type = INPUT_MOUSE;
-        up.U.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        up.U.mi.dwFlags = swapped ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
         SendInput(2, new[] { down, up }, Marshal.SizeOf(typeof(INPUT)));
     }
 
@@ -761,8 +1028,13 @@ internal static class NeteaseController
 
     private static int Fail(string error)
     {
-        Console.WriteLine("{\"ok\":false,\"error\":\"" + EscapeJson(error) + "\"}");
+        Console.WriteLine(FailJson(error));
         return 1;
+    }
+
+    private static string FailJson(string error)
+    {
+        return "{\"ok\":false,\"error\":\"" + EscapeJson(error) + "\"}";
     }
 
     private static string EscapeJson(string value)
@@ -779,7 +1051,10 @@ internal static class NeteaseController
                 case '\n': result.Append("\\n"); break;
                 case '\t': result.Append("\\t"); break;
                 default:
-                    if (character < 0x20)
+                    // Console.Out encodes in the OEM code page while PRTS decodes
+                    // UTF-8, so keep the JSON pure ASCII: escape every non-ASCII
+                    // character (Chinese error text included) as \uXXXX.
+                    if (character < 0x20 || character > 0x7E)
                         result.Append("\\u" + ((int)character).ToString("x4"));
                     else
                         result.Append(character);

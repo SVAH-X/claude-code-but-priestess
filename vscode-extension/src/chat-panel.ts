@@ -19,6 +19,19 @@ function realpath(p: string): string {
   }
 }
 
+/**
+ * Overlays what vscode-chat.js actually uses for a VS Code turn onto a tray
+ * settings snapshot: the workspace folder as cwd (when one is open) and
+ * agent mode capped at advisor. Pure; exported for tests.
+ */
+export function vscodeEffectiveState(state: unknown, workspaceCwd: string | null): unknown {
+  if (!state || typeof state !== "object") return state;
+  const next: Record<string, unknown> = { ...(state as Record<string, unknown>) };
+  if (workspaceCwd) next.chatCwd = workspaceCwd;
+  if (next.vibeCodingMode === "agent") next.vibeCodingMode = "advisor";
+  return next;
+}
+
 export class ChatPanelProvider implements vscode.WebviewViewProvider {
   private wsUnsubs: (() => void)[] = [];
   private themeUnsub: vscode.Disposable | null = null;
@@ -223,6 +236,20 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     }
     #sendBtn:hover { background: var(--vscode-button-hoverBackground); }
     #sendBtn:disabled { opacity: 0.5; cursor: default; }
+    /* Stop: renderer.js enables it while a reply runs (setRunning) and
+       disables it when idle, so visibility simply follows that state. The
+       click posts chat:cancel through the shim. */
+    #cancelBtn {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border: none;
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    #cancelBtn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    #cancelBtn[disabled] { display: none; }
     .cwd-line {
       font-size: 0.75em;
       color: var(--vscode-descriptionForeground);
@@ -264,9 +291,44 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     .apply-fix-btn:hover { background: var(--vscode-button-hoverBackground); }
     .code-block-wrapper { overflow: hidden; }
 
-    /* HTML preview panel */
-    .preview-divider { display: none; }
-    .html-preview { display: none; }
+    /* HTML preview panel. Opening is opt-in (the shim turns the renderer's
+       auto-open into a no-op; the message's preview button opens it) and the
+       header's close button closes it. The sidebar is too narrow for the
+       Electron popover's side-by-side split, so the panel stacks under the
+       chat stream (main-area is a column); renderer.js still drives the
+       flex ratio. The divider only separates: its drag logic is horizontal. */
+    .preview-divider {
+      flex: 0 0 4px;
+      cursor: default;
+      pointer-events: none;
+      background: var(--vscode-sideBar-border, var(--vscode-panel-border));
+    }
+    .html-preview {
+      border-left: none;
+      border-top: 1px solid var(--vscode-sideBar-border, var(--vscode-panel-border));
+      background: var(--vscode-sideBar-background);
+    }
+    .html-preview.open { min-width: 0; min-height: 160px; }
+    .preview-header {
+      background: var(--vscode-sideBarSectionHeader-background);
+      color: var(--vscode-sideBarSectionHeader-foreground);
+      border-bottom: 1px solid var(--vscode-sideBar-border, var(--vscode-panel-border));
+    }
+    .preview-title { color: var(--vscode-descriptionForeground); }
+    .preview-btn {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .preview-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .msg-preview-btn {
+      border-color: var(--vscode-button-border, var(--vscode-panel-border));
+      color: var(--vscode-textLink-foreground);
+    }
+    .msg-preview-btn:hover,
+    .msg-preview-btn.active { background: var(--vscode-list-hoverBackground); }
   </style>
 </head>
 <body>
@@ -278,7 +340,6 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="bar-actions" id="barActions">
       <button type="button" id="clearBtn" hidden>Clear</button>
-      <button type="button" id="cancelBtn" hidden>Stop</button>
       <button type="button" id="closeBtn" hidden>&times;</button>
     </div>
   </header>
@@ -306,6 +367,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     <form id="composer" autocomplete="off">
       <textarea id="composerInput" rows="1" placeholder="说点什么…" enterkeyhint="send"></textarea>
       <button type="submit" id="sendBtn" disabled>&#x27A4;</button>
+      <button type="button" id="cancelBtn" disabled>停止</button>
     </form>
     <p class="cwd-line" id="cwdLine"></p>
   </footer>
@@ -350,10 +412,13 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
             context: this.contextCapture?.getCurrentContext() || null,
           })
           .then((res: any) => {
+            // res is the raw WS envelope and carries the ws-client's own
+            // reqId/type: spread it first so the webview's reqId wins, or
+            // the shim never matches the reply to its pending promise.
             webview.postMessage({
+              ...res,
               type: "chat:send:result",
               reqId: msg.reqId,
-              ...res,
             });
           })
           .catch((err: any) => {
@@ -396,7 +461,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
             webview.postMessage({
               type: "settings:get:result",
               reqId: msg.reqId,
-              state: res.state,
+              state: this.effectiveState(res.state),
             });
           })
           .catch((err: any) => {
@@ -415,9 +480,9 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
           .request("desktop-pet:cat-mode-get")
           .then((res: any) => {
             webview.postMessage({
+              ...res,
               type: "desktop-pet:cat-mode-get:result",
               reqId: msg.reqId,
-              ...res,
             });
           })
           .catch((err: any) => {
@@ -460,11 +525,28 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
 
     for (const evt of events) {
       const handler = (data: any) => {
-        if (this.wsClient) webview.postMessage(data);
+        if (!this.wsClient) return;
+        if (evt === "settings:state" && data && typeof data === "object") {
+          webview.postMessage({ ...data, state: this.effectiveState(data.state) });
+          return;
+        }
+        webview.postMessage(data);
       };
       this.wsClient.on(evt, handler);
       this.wsUnsubs.push(() => { try { (this.wsClient as any)?.removeListener?.(evt, handler); } catch (_) { /* ignore */ } });
     }
+  }
+
+  /**
+   * The tray's settings describe the Electron chat; the status line in the
+   * sidebar must describe the VS Code chat instead (see vscode-chat.js send):
+   * the turn runs in the first workspace folder, not the tray's chatCwd, and
+   * agent mode is capped at advisor on this side.
+   */
+  private effectiveState(state: unknown): unknown {
+    const folders = vscode.workspace.workspaceFolders;
+    const cwd = folders && folders.length ? folders[0].uri?.fsPath || null : null;
+    return vscodeEffectiveState(state, cwd);
   }
 
   private themeScheme(): "dark" | "light" {

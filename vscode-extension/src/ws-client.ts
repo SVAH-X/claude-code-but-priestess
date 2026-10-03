@@ -184,9 +184,9 @@ export class WsClient extends EventEmitter {
           if (msg.expiresAt && msg.expiresAt < now) continue;
           this.ws.send(msg.raw);
         }
-        this.bufferedMessages = this.bufferedMessages.filter(
-          (m) => !(m.expiresAt && m.expiresAt < now)
-        );
+        // Flushed once: a message kept here would be sent again on every
+        // later reconnect (a buffered chat:send would start a second turn).
+        this.bufferedMessages = [];
       });
 
       this.ws.on("message", (data: Buffer) => {
@@ -319,11 +319,19 @@ export class WsClient extends EventEmitter {
   }
 
   private rejectAllPending(reason: Error) {
+    const rejected = new Set(this.pending.keys());
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(reason);
     }
     this.pending.clear();
+    // Same rule as the timeout path: once the caller has been told the
+    // request failed, its buffered copy must not be replayed on reconnect.
+    if (rejected.size) {
+      this.bufferedMessages = this.bufferedMessages.filter(
+        (b) => !b.reqId || !rejected.has(b.reqId)
+      );
+    }
   }
 
   private updateStatusBar(state: "connected" | "disconnected" | "error" | "reconnecting") {

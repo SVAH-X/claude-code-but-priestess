@@ -3,7 +3,7 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { ChatPanelProvider } from "../../chat-panel";
+import { ChatPanelProvider, vscodeEffectiveState } from "../../chat-panel";
 import { vscodeStub, resetVscodeStub } from "./helpers/vscode-stub";
 
 // ChatPanelProvider relays webview messages to the ws client. These tests pin
@@ -297,5 +297,98 @@ describe("chat-panel message routing", () => {
         fs.rmSync(base, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe("chat-panel reply correlation", () => {
+  beforeEach(() => resetVscodeStub());
+
+  it("answers chat:send with the webview's reqId even though the WS envelope carries its own", async () => {
+    const { ws, provider, posted, webview } = makeHarness();
+    (provider as any).handleWebviewMessage({ type: "chat:send", text: "hi", reqId: "1" }, webview);
+    // ws-client resolves with the raw server envelope: its reqId is the
+    // ws-client counter, not the webview's, and must not win.
+    ws.pending[0].resolve({ type: "chat:send:result", reqId: "41", ok: true, queued: false, queueLength: 0 });
+    await wait(0);
+    assert.strictEqual(posted[0].type, "chat:send:result");
+    assert.strictEqual(posted[0].reqId, "1");
+    assert.strictEqual(posted[0].ok, true);
+  });
+
+  it("answers desktop-pet:cat-mode-get with the webview's reqId", async () => {
+    const { ws, provider, posted, webview } = makeHarness();
+    (provider as any).handleWebviewMessage({ type: "desktop-pet:cat-mode-get", reqId: "2" }, webview);
+    ws.pending[0].resolve({ type: "desktop-pet:cat-mode-get:result", reqId: "7", cat: true, mood: "normal" });
+    await wait(0);
+    assert.strictEqual(posted[0].reqId, "2");
+    assert.strictEqual(posted[0].cat, true);
+  });
+});
+
+describe("chat-panel VS Code-effective status line", () => {
+  beforeEach(() => resetVscodeStub());
+
+  it("vscodeEffectiveState overlays the workspace cwd and caps agent at advisor", () => {
+    const tray = { chatCwd: "/Users/doctor/tray", vibeCodingMode: "agent", chatProvider: "claude" };
+    assert.deepStrictEqual(vscodeEffectiveState(tray, "C:\\work\\app"), {
+      chatCwd: "C:\\work\\app", vibeCodingMode: "advisor", chatProvider: "claude",
+    });
+    // No workspace open: the tray cwd is what the turn would use.
+    assert.deepStrictEqual(vscodeEffectiveState({ chatCwd: "/t", vibeCodingMode: "advisor" }, null),
+      { chatCwd: "/t", vibeCodingMode: "advisor" });
+    assert.strictEqual(vscodeEffectiveState(null, "/w"), null);
+    assert.strictEqual(tray.vibeCodingMode, "agent", "input must not be mutated");
+  });
+
+  it("relays settings:get and settings:state with the VS Code-effective values", async () => {
+    vscodeStub.workspace.workspaceFolders = [{ uri: { fsPath: "C:\\work\\app" } }];
+    const { ws, provider, posted, webview } = makeHarness();
+    (provider as any).handleWebviewMessage({ type: "settings:get", reqId: "3" }, webview);
+    ws.pending[0].resolve({ type: "settings:get:result", reqId: "1", state: { chatCwd: "/tray", vibeCodingMode: "agent" } });
+    await wait(0);
+    assert.deepStrictEqual(posted[0], {
+      type: "settings:get:result", reqId: "3", state: { chatCwd: "C:\\work\\app", vibeCodingMode: "advisor" },
+    });
+
+    // Broadcast path: wireWsEvents subscribes through ws.on().
+    const handlers: Record<string, (d: any) => void> = {};
+    (ws as any).on = (evt: string, fn: (d: any) => void) => { handlers[evt] = fn; };
+    (provider as any).wireWsEvents(webview);
+    handlers["settings:state"]({ type: "settings:state", state: { chatCwd: "/tray", vibeCodingMode: "companion" } });
+    assert.deepStrictEqual(posted[1], {
+      type: "settings:state", state: { chatCwd: "C:\\work\\app", vibeCodingMode: "companion" },
+    });
+    // Other events pass through untouched.
+    handlers["chat:chunk"]({ type: "chat:chunk", text: "x" });
+    assert.deepStrictEqual(posted[2], { type: "chat:chunk", text: "x" });
+  });
+});
+
+describe("chat-panel webview markup", () => {
+  beforeEach(() => resetVscodeStub());
+
+  function buildHtml(): string {
+    vscodeStub.Uri.joinPath = (base: any, ...parts: string[]) => {
+      const p = [base.fsPath, ...parts].join("/");
+      return { fsPath: p, path: p, toString: () => p };
+    };
+    const provider = new ChatPanelProvider({ extensionUri: { fsPath: "/ext" } } as any, makeWsClient() as any);
+    return (provider as any).buildHtml({ asWebviewUri: (u: any) => u.toString(), cspSource: "vscode-resource:" });
+  }
+
+  it("puts the Stop button in the composer, hidden until the renderer enables it", () => {
+    const html = buildHtml();
+    const composer = html.slice(html.indexOf('<form id="composer"'), html.indexOf("</form>"));
+    assert.ok(/<button type="button" id="cancelBtn" disabled>/.test(composer), "Stop lives next to Send");
+    assert.ok(/#cancelBtn\[disabled\]\s*\{\s*display:\s*none/.test(html), "visibility follows the disabled state");
+    assert.ok(!/<header class="top-bar"[^]*id="cancelBtn"[^]*<\/header>/.test(html), "not in the hidden header");
+  });
+
+  it("keeps the HTML preview panel and its close button renderable", () => {
+    const html = buildHtml();
+    assert.ok(!/\.html-preview\s*\{\s*display:\s*none/.test(html), "panel must not be display:none");
+    assert.ok(!/\.preview-divider\s*\{\s*display:\s*none/.test(html));
+    assert.ok(html.includes('id="closePreviewBtn"'));
+    assert.ok(html.includes('id="previewFrame"'));
   });
 });

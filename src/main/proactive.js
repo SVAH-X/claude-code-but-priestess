@@ -6,7 +6,9 @@
 //
 //  - Proactive check: when enabled and every gate passes, run a silent chat
 //    turn that screenshots the screen and lets the model decide whether to
-//    speak ([[silent]] = stay quiet; see chat.sendProactive).
+//    speak ([[silent]] = stay quiet; see chat.sendProactive). The screenshot
+//    needs 老婆模式 consent: a VS Code diagnostic/activity check without it
+//    sends the editor text context only (chat.js).
 //  - Memory curation: at most ~weekly, when MEMORY.md has grown big and the
 //    chat has been idle a while, run a silent turn asking her to tidy it.
 // ============================================================
@@ -64,6 +66,14 @@ function inQuietHours(date = new Date()) {
   return start < end ? now >= start && now < end : now >= start || now < end;
 }
 
+// A new day only refills the daily budget. Intervals and cooldowns are
+// independent of the calendar: zeroing the attempt stamps here used to let
+// the day rollover bypass the proactive interval and the boot delay.
+function resetDailyBudgetIfNewDay() {
+  const day = localDayKey();
+  if (daily.day !== day) daily = { day, count: 0 };
+}
+
 function intervalMs() {
   return clampNumber(settings.get("proactiveIntervalMin"), 5, 24 * 60, 20) * 60 * 1000;
 }
@@ -112,13 +122,7 @@ function shouldRunDiagnosticCheck(now) {
   if (now - lastDiagnosticAttemptAt < diagnosticCooldownMs()) return false;
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
-  const day = localDayKey();
-  if (daily.day !== day) {
-    daily = { day, count: 0 };
-    lastDiagnosticAttemptAt = 0;
-    lastActivityAttemptAt = 0;
-    lastProactiveAttemptAt = 0;
-  }
+  resetDailyBudgetIfNewDay();
   if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
   const diag = getWsServer().getLatestDiagnostics();
@@ -142,13 +146,7 @@ function shouldRunTerminalCheck(now) {
   if (now - lastActivityAttemptAt < activityCooldownMs()) return false;
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
-  const day = localDayKey();
-  if (daily.day !== day) {
-    daily = { day, count: 0 };
-    lastDiagnosticAttemptAt = 0;
-    lastActivityAttemptAt = 0;
-    lastProactiveAttemptAt = 0;
-  }
+  resetDailyBudgetIfNewDay();
   if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
   const evt = getWsServer().getLatestTerminalEvent();
@@ -167,13 +165,7 @@ function shouldRunActivityCheck(now) {
   if (now - lastActivityAttemptAt < activityCooldownMs()) return false;
   if (chat.isBusy()) return false;
   if (inQuietHours()) return false;
-  const day = localDayKey();
-  if (daily.day !== day) {
-    daily = { day, count: 0 };
-    lastDiagnosticAttemptAt = 0;
-    lastActivityAttemptAt = 0;
-    lastProactiveAttemptAt = 0;
-  }
+  resetDailyBudgetIfNewDay();
   if (daily.count >= dailyCap()) return false;
   if (!hasCliProvider()) return false;
   const activities = getWsServer().getRecentActivities();
@@ -190,13 +182,7 @@ function shouldRunProactive(now) {
   if (settings.get("waifuMode") !== true) return false;
   if (now - lastProactiveAttemptAt < intervalMs()) return false;
   if (inQuietHours()) return false;
-  const day = localDayKey();
-  if (daily.day !== day) {
-    daily = { day, count: 0 };
-    lastDiagnosticAttemptAt = 0;
-    lastActivityAttemptAt = 0;
-    lastProactiveAttemptAt = 0;
-  }
+  resetDailyBudgetIfNewDay();
   if (daily.count >= dailyCap()) return false;
   if (chat.isBusy()) return false;
   if (!hasCliProvider()) return false;
@@ -274,8 +260,12 @@ function tick() {
     }
 
     if (shouldRunMaintenance(now)) {
-      lastMaintenanceAttemptAt = now;
-      if (chat.sendMaintenance()?.ok) {
+      const result = chat.sendMaintenance();
+      // A VS Code turn in flight is as transient as a busy popover (which
+      // shouldRunMaintenance waits out above): try again next tick instead of
+      // burning the retry window.
+      if (result?.reason !== "vscode-busy") lastMaintenanceAttemptAt = now;
+      if (result?.ok) {
         settings.set({ memoryCuratedAt: now });
       }
     }

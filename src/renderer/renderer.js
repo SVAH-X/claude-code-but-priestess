@@ -74,6 +74,12 @@ const RENDERER_TEXT = {
     preview_close_title: "关闭预览",
     preview_browser_opened: "已在浏览器中打开。",
     preview_browser_failed: "打开浏览器失败。",
+    msg_too_long: (n) => `消息太长了（上限 ${n} 字），请精简后再发送。`,
+    vibe_companion: "陪伴",
+    vibe_advisor: "顾问",
+    vibe_agent: "代理",
+    badge_agent: "⚡ 代理模式",
+    ctx_selection: (a, b) => `已选中 L${a}-${b}`,
     apply_fix: "对比",
     apply_fix_title: (f) => `在对比视图中查看这段代码与 ${f} 的差异（不会直接改动文件）`
   },
@@ -105,6 +111,12 @@ const RENDERER_TEXT = {
     preview_close_title: "Close preview",
     preview_browser_opened: "Opened in browser.",
     preview_browser_failed: "Failed to open browser.",
+    msg_too_long: (n) => `Message too long (limit ${n} characters) — please shorten it.`,
+    vibe_companion: "companion",
+    vibe_advisor: "advisor",
+    vibe_agent: "agent",
+    badge_agent: "⚡ agent",
+    ctx_selection: (a, b) => `selected L${a}-${b}`,
     apply_fix: "Diff",
     apply_fix_title: (f) => `Review this code against ${f} in a diff view (the file is not changed)`
   }
@@ -1443,6 +1455,9 @@ function buildMsgEl(msg, applyTarget = null) {
   el.className = `msg ${msg.role}${msg.queued ? " queued" : ""}`;
   if (msg.role === "user") {
     el.textContent = msg.text || "";
+    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+      el.appendChild(renderAttachmentList(msg.attachments));
+    }
     appendBubbleTime(el, msg);
     // Context badge — show active file, cursor, selection info
     if (msg.context && msg.context.activeFile) {
@@ -1453,7 +1468,7 @@ function buildMsgEl(msg, applyTarget = null) {
       let label = `📄 ${file}`;
       if (ctx.activeFileLanguage) label += ` · ${ctx.activeFileLanguage}`;
       if (ctx.cursorLine) label += ` · L${ctx.cursorLine}`;
-      if (ctx.selection) label += ` · 已选中 L${ctx.selection.startLine}-${ctx.selection.endLine}`;
+      if (ctx.selection) label += ` · ${t("ctx_selection", ctx.selection.startLine, ctx.selection.endLine)}`;
       badge.textContent = label;
       badge.title = ctx.activeFile;
       el.append(badge);
@@ -1949,9 +1964,15 @@ attachBtn?.addEventListener("click", async () => {
   composerInput.focus();
 });
 
+// Whether a drag carries OS files, as opposed to text or a URL being dragged
+// into the composer.
+function dragHasFiles(dataTransfer) {
+  return Array.from(dataTransfer?.types || []).includes("Files");
+}
+
 // Drag a file anywhere onto the chat window → attach it (never navigate).
 window.addEventListener("dragover", (event) => {
-  if (Array.from(event.dataTransfer?.types || []).includes("Files")) {
+  if (dragHasFiles(event.dataTransfer)) {
     event.preventDefault();
     document.body.classList.add("file-dragging");
   }
@@ -1960,8 +1981,13 @@ window.addEventListener("dragleave", (event) => {
   if (event.relatedTarget === null) document.body.classList.remove("file-dragging");
 });
 window.addEventListener("drop", (event) => {
-  event.preventDefault();
   document.body.classList.remove("file-dragging");
+  // Only file drops are ours. The dragover above leaves non-file drags to the
+  // browser, which accepts them on editable targets alone, so a text drop can
+  // only land on the composer — and preventDefault here would cancel the
+  // insert that the Doctor dragged it there for.
+  if (!dragHasFiles(event.dataTransfer)) return;
+  event.preventDefault();
   const dropped = event.dataTransfer?.files;
   if (!dropped || dropped.length === 0) return;
   const paths = [];
@@ -1972,11 +1998,26 @@ window.addEventListener("drop", (event) => {
   addAttachments(paths);
 });
 
+// Mirrors MAX_USER_MESSAGE_CHARS in src/main/chat.js: the main process refuses
+// longer messages, so the composer checks first and keeps the draft instead of
+// clearing it and only then learning that it was refused.
+const MAX_USER_MESSAGE_CHARS = 100_000;
+
+function checkComposerDraft(text, fileCount) {
+  if (!text && fileCount === 0) return { ok: false, reason: "empty" };
+  if (text.length > MAX_USER_MESSAGE_CHARS) return { ok: false, reason: "too-long" };
+  return { ok: true };
+}
+
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = composerInput.value.trim();
   const files = pendingAttachments.map((a) => a.path);
-  if (!text && files.length === 0) return;
+  const draft = checkComposerDraft(text, files.length);
+  if (!draft.ok) {
+    if (draft.reason === "too-long") showBubble(t("msg_too_long", MAX_USER_MESSAGE_CHARS), 3000);
+    return;
+  }
   composerInput.value = "";
   autosizeInput();
   clearAttachments();
@@ -2110,6 +2151,13 @@ const versionBadge = document.getElementById("versionBadge");
 let queueLength = 0;
 let lastSettingsPayload = null;
 
+// Label for the vibe-coding mode shown in the cwd line.
+function vibeModeLabel(mode) {
+  if (mode === "agent") return t("vibe_agent");
+  if (mode === "advisor") return t("vibe_advisor");
+  return t("vibe_companion");
+}
+
 function refreshComposerMeta() {
   const payload = lastSettingsPayload;
   const availability = payload?.providerAvailability;
@@ -2124,7 +2172,7 @@ function refreshComposerMeta() {
   const queueSuffix = queueLength > 0 ? ` · ${t("cwd_queue", queueLength)}` : "";
   const runningSuffix = chatRunning ? ` · ${t("cwd_running")}` : "";
   const mode = payload?.vibeCodingMode || "companion";
-  const modeLabel = mode === "agent" ? "agent" : mode === "advisor" ? "advisor" : "陪伴";
+  const modeLabel = vibeModeLabel(mode);
   if (cwd) {
     const truncated = cwd.length > 42 ? "…" + cwd.slice(-41) : cwd;
     cwdLine.textContent = `${provider} · ${truncated}${queueSuffix}${runningSuffix} · ${modeLabel}`;
@@ -2135,19 +2183,13 @@ function refreshComposerMeta() {
   }
   if (providerBadge) providerBadge.textContent = provider;
   if (versionBadge && payload?.appVersion) versionBadge.textContent = `v${payload.appVersion}`;
-  // Vibe coding mode badge
+  // The amber badge is a warning that she can now edit files and run
+  // commands. Advisor and companion are read-only / chat-only and earn none;
+  // the cwd line still names the mode. Its colour comes from the .agent-badge
+  // rule, not an inline override.
   if (agentBadge) {
-    agentBadge.hidden = false;
-    if (mode === "agent") {
-      agentBadge.textContent = "⚡ agent";
-      agentBadge.style.color = "var(--vscode-charts-orange)";
-    } else if (mode === "advisor") {
-      agentBadge.textContent = "👁 advisor";
-      agentBadge.style.color = "var(--vscode-charts-blue)";
-    } else {
-      agentBadge.textContent = "💬 companion";
-      agentBadge.style.color = "var(--vscode-descriptionForeground)";
-    }
+    agentBadge.hidden = mode !== "agent";
+    agentBadge.textContent = t("badge_agent");
   }
   if (sendBtn) sendBtn.disabled = !backendReady;
   composerInput.placeholder = backendReady

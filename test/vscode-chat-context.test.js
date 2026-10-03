@@ -71,6 +71,7 @@ test("blacklisted active-file context is dropped with a notice; other context pa
       messages.push(message);
       return { command: noop, args: [], stdin: "x\n" };
     },
+    cleanupInvocation: () => {},
   });
   t.after(restoreChat);
   for (const mod of ["../src/main/vscode-chat", "../src/main/ws-server"]) {

@@ -83,7 +83,8 @@ installModuleStub("../src/main/chat", {
   buildProviderInvocation: (provider, message, cwd, mode, screenshot, transcript, plan, sessionIds) => {
     invocations.push({ provider, mode, resumeId: sessionIds?.codex || null });
     return { command: fakeCodex, args: ["exec", "--json", "-"], stdin: message };
-  }
+  },
+  cleanupInvocation: () => {}
 });
 installModuleStub("../src/main/ws-server", { getVscodeWorkspace: () => null });
 
